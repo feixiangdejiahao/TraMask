@@ -166,6 +166,8 @@ def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
     route = ROOT / "results/api_route.json"
     prefix = json.loads(route.read_text()).get("prefix", "") if route.exists() else ""
     url = base.rstrip("/") + "/" + prefix + "chat/completions"
+    # Identify provider changes without recording an endpoint or a credential.
+    provenance['provider_endpoint_sha256'] = digest(url.encode())
     started = time.monotonic()
     try:
         with httpx.Client(timeout=300, follow_redirects=False) as client:
