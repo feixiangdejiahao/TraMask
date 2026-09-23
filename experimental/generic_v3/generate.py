@@ -39,7 +39,7 @@ def _novelty(term, language, parameters, indentation=''):
     return _canonical(term, labels)
 
 
-def generate(corpus: dict, budget: Budget = Budget()) -> dict:
+def generate(corpus: dict, budget: Budget = Budget(), *, refine=_refine) -> dict:
     """Return JSON-serializable candidates compatible with the existing emitter."""
     if any(type(v) is not int or v < 1 for v in asdict(budget).values()):
         raise ValueError('Generation budgets must be positive integers')
@@ -107,7 +107,7 @@ def generate(corpus: dict, budget: Budget = Budget()) -> dict:
             instances = [record]
         for instance in instances:
             try:
-                records[instance['instance_id']] = _refine(instance, budget.max_nodes)
+                records[instance['instance_id']] = refine(instance, budget.max_nodes)
             except BudgetExceeded:
                 skipped['refined_body_node_budget'] += 1
     groups = defaultdict(list)
