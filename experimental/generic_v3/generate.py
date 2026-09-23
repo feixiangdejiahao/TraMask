@@ -39,7 +39,7 @@ def _novelty(term, language, parameters, indentation=''):
     return _canonical(term, labels)
 
 
-def generate(corpus: dict, budget: Budget = Budget(), *, refine=_refine, compose_views=None) -> dict:
+def generate(corpus: dict, budget: Budget = Budget(), *, refine=_refine, compose_views=None, neighbor_order=None) -> dict:
     """Return JSON-serializable candidates compatible with the existing emitter."""
     if any(type(v) is not int or v < 1 for v in asdict(budget).values()):
         raise ValueError('Generation budgets must be positive integers')
@@ -131,8 +131,12 @@ def generate(corpus: dict, budget: Budget = Budget(), *, refine=_refine, compose
             neighbors = sorted((r for r in members if r is not A), key=lambda r: (
                 -difflib.SequenceMatcher(a=A['skeleton'], b=r['skeleton'], autojunk=False).ratio(),
                 r['instance_id']))
-            edit_neighbors = _diverse_neighbors(neighbors)[:budget.edit_neighbors]
-            for C in neighbors[:budget.target_neighbors]:
+            target_order, edit_order = neighbors, neighbors
+            if neighbor_order is not None:
+                target_order = neighbor_order(A, neighbors, capsules=capsules, phase='target')
+                edit_order = neighbor_order(A, neighbors, capsules=capsules, phase='edit')
+            edit_neighbors = _diverse_neighbors(edit_order)[:budget.edit_neighbors]
+            for C in target_order[:budget.target_neighbors]:
                 for B in edit_neighbors:
                     ids = (A['test']['id'], B['test']['id'], C['test']['id'])
                     if B is not C and seeds.intersection(ids):
