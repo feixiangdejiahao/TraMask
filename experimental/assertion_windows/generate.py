@@ -29,11 +29,11 @@ def _novelty(corpus, record, text, max_nodes):
     return _canonical(converted.term, _binding_labels(source, node, converted, record['test']['parameters']))
 
 
-def generate(corpus, budget=Budget(), *, refine=_refine):
+def generate(corpus, budget=Budget(), *, refine=_refine, extractor=_extract):
     cache = {}
 
     def extract_instances(*args, **kwargs):
-        result = _extract(*args, **kwargs)
+        result = extractor(*args, **kwargs)
         result['instances'] = [prepare_environment(corpus, record, cache) for record in result['instances']]
         return result
 
