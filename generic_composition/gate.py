@@ -83,6 +83,21 @@ def presentation(evidence: dict, candidates: list[dict]) -> dict:
             'candidates': shown}
 
 
+def selection_candidates(candidates: list[dict], scheme: str = 'content_hash') -> list[dict]:
+    """Short request-local names avoid asking a model to copy content hashes."""
+    if scheme == 'content_hash':
+        return candidates
+    if scheme != 'ordinal_v1':
+        raise ValueError('Unknown candidate ID presentation scheme')
+    return [dict(candidate, id=f'c{index}') for index, candidate in enumerate(candidates)]
+
+
+def resolve_selection(content: str, candidates: list[dict], scheme: str) -> list[str]:
+    shown = selection_candidates(candidates, scheme)
+    mapping = {view['id']: source['id'] for view, source in zip(shown, candidates)}
+    return sorted(mapping[value] for value in parse_selection(content, shown))
+
+
 def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
                       model: str = "ds/deepseek-v4-flash", max_tokens: int = 10000) -> dict:
     """Persist one request and response. Caller has already fixed all proposals."""
@@ -91,9 +106,10 @@ def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
         raise RuntimeError("Model evidence upload is not authorized")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
+    scheme = 'ordinal_v1'
     payload = {"model": model, "response_format": {"type": "json_object"}, "tool_choice": "none", "messages": [
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": json.dumps(presentation(evidence, candidates), ensure_ascii=False)}]}
+        {"role": "user", "content": json.dumps(presentation(evidence, selection_candidates(candidates, scheme)), ensure_ascii=False)}]}
     family = model.rsplit('/', 1)[-1]
     if family.startswith(("gpt-5", "gpt-6", "o3", "o4")):
         payload.update(max_completion_tokens=max_tokens, reasoning_effort="medium")
@@ -107,6 +123,7 @@ def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
     (output / "candidates.json").write_bytes(candidates_bytes)
     provenance = {"request_sha256": digest(request_bytes),
                   "candidates_sha256": digest(candidates_bytes), "model": model,
+                  "selection_id_scheme": scheme,
                   "external_model_calls": 0, "reference_inputs": False,
                   "execution_outcomes": False, "candidate_count": len(candidates)}
     config = {k.lower(): v for k, v in dotenv_values(ROOT / ".env").items() if v}
@@ -133,7 +150,7 @@ def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
         content = raw["choices"][0]["message"].get("content") or ""
         provenance["finish_reason"] = raw["choices"][0].get("finish_reason")
         try:
-            provenance.update(accepted=parse_selection(content, candidates), valid=True)
+            provenance.update(accepted=resolve_selection(content, candidates, scheme), valid=True)
         except (ValueError, TypeError) as exc:
             provenance.update(valid=False, validation_error=str(exc))
     except httpx.HTTPError as exc:
@@ -165,7 +182,8 @@ def load_admission(directory: Path, candidates: list[dict]) -> dict:
     if provenance["response_sha256"] != digest((directory / "response.json").read_bytes()):
         raise ValueError("Cached admission response changed")
     response = json.loads((directory / "response.json").read_text())
-    accepted = parse_selection(response["choices"][0]["message"]["content"], candidates)
+    accepted = resolve_selection(response["choices"][0]["message"]["content"], candidates,
+                                 provenance.get('selection_id_scheme', 'content_hash'))
     if accepted != provenance["accepted"]:
         raise ValueError("Admission IDs differ from the original response")
     return provenance

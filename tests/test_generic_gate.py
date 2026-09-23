@@ -70,7 +70,7 @@ def fake_provider(monkeypatch, tmp_path, response=None, *, error=None):
     return calls
 
 
-def provider_response(content='{"accepted": ["candidate-a"]}'):
+def provider_response(content='{"accepted": ["c1"]}'):
     return {'id': 'unit-response', 'model': 'unit-model', 'usage': {'total_tokens': 7},
             'choices': [{'message': {'content': content}, 'finish_reason': 'stop'}]}
 
@@ -87,7 +87,8 @@ def test_one_request_contains_fixed_proposals_and_no_credentials_in_artifacts(mo
     output, calls = cached_admission(monkeypatch, tmp_path)
     payload = calls[0]['json']
     sent = json.loads(payload['messages'][1]['content'])
-    assert sent == {'evidence': {'issue': 'unit requirement'}, 'candidates': CANDIDATES}
+    assert sent == {'evidence': {'issue': 'unit requirement'},
+                    'candidates': gate.selection_candidates(CANDIDATES, 'ordinal_v1')}
     assert 'tools' not in payload
     assert payload['tool_choice'] == 'none'
     assert payload['response_format'] == {'type': 'json_object'}
@@ -97,6 +98,14 @@ def test_one_request_contains_fixed_proposals_and_no_credentials_in_artifacts(mo
     with pytest.raises(FileExistsError):
         gate.request_admission({}, CANDIDATES, output)
     assert len(calls) == 1
+
+
+def test_short_ids_resolve_exactly_without_guessing_or_changing_source_candidates():
+    assert gate.resolve_selection('{"accepted":["c0"]}', CANDIDATES, 'ordinal_v1') == ['candidate-b']
+    assert gate.resolve_selection('{"accepted":["candidate-a"]}', CANDIDATES, 'content_hash') == ['candidate-a']
+    assert CANDIDATES[0]['id'] == 'candidate-b'
+    with pytest.raises(ValueError):
+        gate.resolve_selection('{"accepted":["c9"]}', CANDIDATES, 'ordinal_v1')
 
 
 def test_presentation_keeps_exact_edits_sources_and_oracle_relation_flag():
