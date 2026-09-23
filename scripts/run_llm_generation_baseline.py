@@ -52,7 +52,8 @@ def prepare(args) -> dict:
     corpus, evidence = (json.loads(payloads[name]) for name in ("corpus.json", "evidence.json"))
     selected = baseline.retrieval_evidence(corpus, evidence)
     shown = baseline.presentation(corpus, selected)
-    payload = baseline.request_payload(shown)
+    # Match the same canonical input round trip used by generate().
+    payload = baseline.request_payload(json.loads(baseline.encoded(shown)))
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     for name in ("case.json", "retrieval.json", "corpus.json"):
@@ -194,7 +195,7 @@ def freeze(args) -> dict:
     if response.get("valid"):
         _, checked = baseline.load_generation(output / "generation",
                                               json.loads((args.output.resolve() / "input.json").read_bytes()), corpus)
-        if checked != generated:
+        if baseline.encoded(checked) != baseline.encoded(generated):
             raise ValueError("Round candidates differ from immutable model output")
     candidates = generated["candidates"]
     emitted = emit(corpus, candidates)

@@ -234,8 +234,8 @@ def test_response_bytes_are_bounded(monkeypatch, tmp_path):
     assert (output / "response.json").stat().st_size == 100
 
 
-def staged_toy(tmp_path):
-    corpus, shown, repository = toy(tmp_path)
+def staged_toy(tmp_path, code="def test_parent():\n    assert run(1) == 1\n"):
+    corpus, shown, repository = toy(tmp_path, code)
     source = tmp_path / "source_prepared"
     source.mkdir()
     data = {"case.json": {"id": "invented", "language": "python", "repository": str(repository),
@@ -257,6 +257,7 @@ def test_cli_rounds_freeze_original_controls_without_subject_execution(monkeypat
     cli.prepare(args)
     assert calls == []
     cli.generate(args)
+    assert (args.output / "request_template.json").read_bytes() == calls[0].content
     frozen = cli.freeze(args)
     assert frozen["generated"] == frozen["controls"] == 1
     first = args.output / "rounds/r1"
@@ -274,6 +275,19 @@ def test_cli_rounds_freeze_original_controls_without_subject_execution(monkeypat
     (args.output / "rounds/temporary").rename(second)
     with pytest.raises(ValueError, match="declared round"):
         cli.freeze(args)
+
+
+def test_cli_freeze_preserves_resolved_call_signatures_after_json_round_trip(monkeypatch, tmp_path):
+    code = "def run(value, scale=1):\n    return value * scale\n\ndef test_parent():\n    assert run(1) == 1\n"
+    corpus, shown, args = staged_toy(tmp_path, code)
+    identifier = next(iter(shown["source_tests"]))
+    provider(monkeypatch, tmp_path, response_content(identifier, "assert run(2, scale=2) == 4"))
+    cli.prepare(args)
+    cli.generate(args)
+    cached = json.loads((args.output / "rounds/r1/generated.json").read_bytes())
+    assert cached["validation"][0]["lexical"]["calls"][0]["signature"]["parameters"]
+    frozen = cli.freeze(args)
+    assert frozen["generated"] == frozen["controls"] == 1
 
 
 def test_cli_invalid_generation_remains_explicit_and_freezes_empty(monkeypatch, tmp_path):

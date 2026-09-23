@@ -45,6 +45,27 @@ done
 
 模型请求仅包含已授权的 issue、候选代码、来源测试及静态证据；生成与模型阶段不读取参考补丁、隐藏 verifier、封存评价真值或执行结果。参考运行只用于冻结后的独立评价。密钥不进入请求证据或 Git，策略见 [execution_policy.json](configs/execution_policy.json)。
 
+另有一个独立的[检索＋模型生成对照](research/llm_generation_baseline_plan.md)：统一向模型展示冻结检索的前十个父测试，每轮最多提出三个完整测试体。它允许模型构造新断言，与只筛选类比候选的方法具有不同能力和预算，结果单独报告。已有冻结输入时可运行：
+
+```bash
+.venv/bin/python scripts/run_llm_generation_baseline.py prepare \
+  --case P1 --source-prepared results/generic_observation_priority/batch2/pilot/P1 \
+  --output results/my_llm/P1
+
+for round_id in r1 r2; do
+  .venv/bin/python scripts/run_llm_generation_baseline.py generate \
+    --case P1 --output results/my_llm/P1 --rerun-id "$round_id"
+done
+for round_id in r1 r2; do
+  .venv/bin/python scripts/run_llm_generation_baseline.py freeze \
+    --case P1 --output results/my_llm/P1 --rerun-id "$round_id"
+  .venv/bin/python scripts/run_llm_generation_baseline.py run \
+    --case P1 --output results/my_llm/P1 --rerun-id "$round_id"
+done
+```
+
+该对照同样不依据执行结果修正代码或 expected。机械校验通过、测试失败和有效缺陷仍须分别记录；完整断言及输入适用性需要独立审计。
+
 ## 代码与边界
 
 | 位置 | 作用 |
