@@ -39,6 +39,7 @@ def algorithm_files() -> list[Path]:
     return sorted([*ROOT.glob("generic_composition/*.py"), *ROOT.glob("anchor_retrieval/*.py"),
                    *ROOT.glob("experimental/generic_v2/*.py"),
                    *ROOT.glob("experimental/generic_v21/*.py"),
+                   *ROOT.glob("experimental/generic_v3/*.py"),
                    ROOT / "combination_testing/runner.py", ROOT / "combination_testing/container_runner.py",
                    ROOT / "combination_testing/test_reports.py", Path(__file__).resolve()])
 
@@ -174,6 +175,8 @@ def prepare(args) -> dict:
         from experimental.generic_v2.generate import Budget, gate_evidence, generate
     elif generator == 'analogy-erasing':
         from experimental.generic_v21.generate import Budget, gate_evidence, generate
+    elif generator == 'analogy-aligned':
+        from experimental.generic_v3.generate import Budget, gate_evidence, generate
     elif generator == 'context':
         from generic_composition.engine import Budget, gate_evidence, generate
     else:
@@ -430,7 +433,7 @@ def main() -> None:
         sub.add_argument("--case-root", type=Path)
         if name == "prepare":
             sub.add_argument("--model", default="closeai/gpt-5.6-luna")
-            sub.add_argument("--generator", choices=("context", "analogy", "analogy-erasing"), default="context")
+            sub.add_argument("--generator", choices=("context", "analogy", "analogy-erasing", "analogy-aligned"), default="context")
             sub.add_argument("--retrieval", type=Path)
             sub.add_argument("--max-candidates", type=int, default=128)
             sub.add_argument("--top-k", type=int, default=10)
