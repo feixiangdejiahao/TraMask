@@ -46,7 +46,8 @@ def _json_provenance(value):
     return value
 
 
-def generate(corpus, budget=Budget(), *, refine=_refine):
+def generate(corpus, budget=Budget(), *, refine=_refine, extract_instances=extract,
+             compose_instances=compose, novelty=None):
     if any(type(value) is not int or value < 1 for value in asdict(budget).values()):
         raise ValueError('Generation budgets must be positive integers')
     ordered = sorted(corpus['tests'].values(), key=lambda test: (test.get('retrieval_rank') or 99999, test['id']))
@@ -56,13 +57,14 @@ def generate(corpus, budget=Budget(), *, refine=_refine):
     priority = lambda tid: (tid not in seeds, corpus['tests'][tid].get('retrieval_rank') or 99999, tid)
     # Corpus construction already bounds source material. Group truncation is
     # parent-fair below; a long first test cannot consume a global instance cap.
-    extracted = extract(corpus, max_instances=max(1, len(corpus['capsules'])), max_nodes=budget.max_nodes)
+    extracted = extract_instances(corpus, max_instances=max(1, len(corpus['capsules'])), max_nodes=budget.max_nodes)
     skipped, records, groups, existing = Counter(extracted['skipped']), {}, defaultdict(list), defaultdict(set)
     for record in extracted['instances']:
         if len(record['text'].encode()) > budget.max_body_bytes:
             skipped['instance_byte_budget'] += 1
             continue
-        existing[record['group_key']].add(_canonical(record['tree'].term, record['bindings']))
+        existing[record['group_key']].add(novelty(record, None, budget.max_nodes) if novelty else
+                                           _canonical(record['tree'].term, record['bindings']))
         try:
             refined = refine(record, budget.max_nodes)  # Cached once per input.
         except BudgetExceeded:
@@ -105,7 +107,7 @@ def generate(corpus, budget=Budget(), *, refine=_refine):
                 continue
             seen.add(triple)
             attempts += 1
-            result = compose(corpus, A, B, C, max_nodes=budget.max_nodes, max_holes=budget.max_holes,
+            result = compose_instances(corpus, A, B, C, max_nodes=budget.max_nodes, max_holes=budget.max_holes,
                              refine=lambda record, _: record, mechanical_cache=mechanical_cache,
                              source_cache=source_cache)
             if result['status'] != 'hypothesis':
@@ -113,9 +115,10 @@ def generate(corpus, budget=Budget(), *, refine=_refine):
             else:
                 candidate, rule = result['candidate'], result['rule']
                 after = candidate['edits'][0]['after']
-                novelty_key = (corpus['language'], tuple(C['test']['parameters']), after)
+                novelty_key = (C['instance_id'], after) if novelty else (corpus['language'], tuple(C['test']['parameters']), after)
                 if novelty_key not in novelty_cache:
-                    novelty_cache[novelty_key] = _statement_key(after, corpus['language'], C['test']['parameters'], budget.max_nodes)
+                    novelty_cache[novelty_key] = (novelty(C, after, budget.max_nodes) if novelty else
+                                                _statement_key(after, corpus['language'], C['test']['parameters'], budget.max_nodes))
                 key = _id('assertion_instance_output', C['parent_test_id'], C['span'], after)
                 if novelty_cache[novelty_key] in existing[C['group_key']]:
                     skipped['existing_combination'] += 1

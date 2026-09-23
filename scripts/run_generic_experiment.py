@@ -43,6 +43,7 @@ def algorithm_files() -> list[Path]:
                    *ROOT.glob("experimental/generic_v4/*.py"),
                    *ROOT.glob("experimental/generic_v5/*.py"),
                    *ROOT.glob("experimental/assertion_instances/*.py"),
+                   *ROOT.glob("experimental/assertion_instances_v2/*.py"),
                    *ROOT.glob("experimental/edit_square/*.py"),
                    *ROOT.glob("experimental/observation_priority/*.py"),
                    ROOT / "combination_testing/runner.py", ROOT / "combination_testing/container_runner.py",
@@ -188,6 +189,8 @@ def prepare(args) -> dict:
         from experimental.generic_v5.generate import Budget, gate_evidence, generate
     elif generator == 'assertion-instances':
         from experimental.assertion_instances.generate import Budget, gate_evidence, generate
+    elif generator == 'assertion-instances-open':
+        from experimental.assertion_instances_v2.generate import Budget, gate_evidence, generate
     elif generator == 'edit-square':
         from experimental.edit_square.generate import Budget, gate_evidence, generate
     elif generator == 'observation-priority':
@@ -448,7 +451,7 @@ def main() -> None:
         sub.add_argument("--case-root", type=Path)
         if name == "prepare":
             sub.add_argument("--model", default="ds/deepseek-v4-flash")
-            sub.add_argument("--generator", choices=("context", "analogy", "analogy-erasing", "analogy-aligned", "analogy-balanced", "analogy-views", "assertion-instances", "edit-square", "observation-priority"), default="context")
+            sub.add_argument("--generator", choices=("context", "analogy", "analogy-erasing", "analogy-aligned", "analogy-balanced", "analogy-views", "assertion-instances", "assertion-instances-open", "edit-square", "observation-priority"), default="context")
             sub.add_argument("--retrieval", type=Path)
             sub.add_argument("--max-candidates", type=int, default=128)
             sub.add_argument("--top-k", type=int, default=10)
