@@ -1,4 +1,4 @@
-# 通用生成实验：跨版本独立评价（含独立模型生成对照，成本账本 v8）
+# 通用生成实验：跨版本独立评价（含模型生成、筛选与机械诊断，成本账本 v9）
 
 所有版本目前均无具备契约支持的候选缺陷证据。以下保留直接生成和两轮模型准入的全部出现次数；不能把运行失败直接视为发现缺陷。
 
@@ -140,3 +140,22 @@ Predicate-free 仍采用固定 128 候选、2000 次尝试预算，54 单元均�
 候选侧源控制全部通过，无编译或 collection 阻断。参考侧存在 P4/P6/P7 原测试导入、API 符号或目录布局不兼容，共 18 项未执行；另有参考源控制失败。原控制失败不会计作新生成误报，参考通过也不自动验证 oracle。八次初始 freeze 因 JSON 将 tuple 保存为 list 而比较失败，已保留原日志，仅用[独立适配器](../scripts/freeze_llm_baseline_json_adapter.py)对完整对象作 JSON 规范化后补齐；请求、响应、代码 body、validation 内容和原快照均未修改。此对照最终仍为 0 个合格差分、0 个契约支持缺陷，见[完整评价](../results/llm_generation_baseline/batch1/evaluation_complete.json)。
 
 本对照新增 320,488 tokens（输入 304,346、输出 16,142）。[累计账本 v8](../results/generic_evaluation_summary/v8/summary.json)共 201 次正式实验及诊断尝试，已报告 5,823,815 tokens（输入 5,517,470、输出 306,345），23 次用量未知；另 3 次旧 unit fixture 连接事故单列，合计 204 次尝试、26 次用量未知。以上不含早期领域专用 contract 实验。零有效检出仍是当前结果，不能将此对照描述为证明某种生成方法有效，也未测得 issue resolution rate 改善。
+
+## 两项独立补充诊断
+
+前导注释的范围检查经独立 toy 证明过严后，统一对原 14 份响应重新物化，模型 body 和原 38 个候选完全不变；新增支持仅为 P3 两轮各 2 项。P3 每轮完整 3 项重新执行，其余 12 轮仅在候选、完整物化文件和 harness 全部字节相同后明确复用。新增 4 项 oracle 可由原 shift-printable、phase 和 aliases 文档推导，候选全部通过，仍无缺陷。诊断总 42 项为 30 valid 通过、7 错误报警、5 unknown 通过；不覆盖原实验，也不混入下述后置筛选。两项新增 reference 报警与原 `97;2u => A` 源契约不一致，已独立记录，没有据 reference 结果改写 oracle。见[机械重验证](../results/llm_comment_revalidation/batch1/evaluation_complete.json)。
+
+后置 gate 是另行声明的探索性诊断，只筛选原 38 项，每轮一次请求，不修模型代码、不合并两轮。全部源码、candidate edits 与完整生成函数哈希一致后才复用旧 oracle 标签；两侧执行均重新进行。
+
+| 轮次与流程 | 执行项 | valid oracle 通过 | 错误 oracle 报警 | unknown 通过 | 已确认目标 |
+|---|---:|---:|---:|---:|---:|
+| 原直接生成 r1 | 19 | 13 | 4 | 2 | 0/7 |
+| 原直接生成 r2 | 19 | 13 | 3 | 3 | 0/7 |
+| 同一生成池＋gate r1 | 17 | 12 | 3 | 2 | 0/7 |
+| 同一生成池＋gate r2 | 13 | 9 | 1 | 3 | 0/7 |
+
+Gate 拒绝了 3 个错误 oracle，也拒绝了 5 个正确但通过的测试，仍保留 4 个错误 oracle 和全部 5 个 unknown。池中没有已确认真实故障候选，所以不能由这些数字估计真实缺陷的误拒率或召回率。21 个 valid oracle 通过只是有效执行覆盖，不是 21 个缺陷。两阶段总成本为 **28 次请求、621,570 tokens**，其中生成 320,488、筛选 301,082；不能只报告筛选成本。[完整后置筛选评价](../results/llm_baseline_postgate/batch1/evaluation_complete.json)仍为 0 个合格差分、0 个契约支持缺陷。
+
+依[预定选择规则](generic_version_selection.md)，当前没有达到“两轮七个目标都命中且无错误/未知报警与执行问题”的版本。低报警存在明显覆盖取舍：priority 两轮无 pilot 产物；predicate-free 的 14 个准入 pilot 项中 13 个被源控制阻断；v5 batch2 虽零受控错误报警，但只有 r1 的两个有效 pilot 重放，另三轮模型协议失败。Balanced 两轮有 16 个有效 pilot 项通过、2 个错误报警、无源控制阻断，可保留为覆盖较清楚的工程研究基线；这不是统计最优或学术方法有效性的结论。模型直接生成及其 gate 属于不同预算与能力的独立基线，不纳入同预算单因素排名。全部七个目标仍未获得可信检出。
+
+[累计账本 v9](../results/generic_evaluation_summary/v9/summary.json)为 215 次正式实验及诊断尝试，已报告 **6,124,897 tokens**（输入 5,818,362、输出 306,535），23 次用量未知。三次旧 unit fixture 连接事故继续单列，合计 218 次尝试、26 次用量未知；前导注释机械诊断没有新增模型调用。
