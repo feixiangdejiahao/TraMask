@@ -63,7 +63,7 @@ def parse_selection(content: str, candidates: list[dict]) -> list[str]:
 
 
 def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
-                      model: str = "gpt-6-astra", max_tokens: int = 10000) -> dict:
+                      model: str = "ds/deepseek-v4-flash", max_tokens: int = 10000) -> dict:
     """Persist one request and response. Caller has already fixed all proposals."""
     policy = json.loads((ROOT / "configs/execution_policy.json").read_text())
     if not policy.get("allow_model_code_upload"):
@@ -74,9 +74,10 @@ def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": json.dumps(
             {"evidence": evidence, "candidates": candidates}, ensure_ascii=False)}]}
-    if model.startswith(("gpt-5", "gpt-6", "o3", "o4")):
+    family = model.rsplit('/', 1)[-1]
+    if family.startswith(("gpt-5", "gpt-6", "o3", "o4")):
         payload.update(max_completion_tokens=max_tokens, reasoning_effort="medium")
-    elif model.startswith("deepseek"):
+    elif family.startswith("deepseek"):
         payload.update(max_tokens=max_tokens, temperature=0, thinking={"type": "disabled"})
     else:
         payload.update(max_tokens=max_tokens, temperature=0)
@@ -119,6 +120,8 @@ def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
         # Do not persist exception strings: transport exceptions can contain URLs.
         provenance.update(seconds=time.monotonic() - started, valid=False,
                           transport_error=type(exc).__name__, usage=None)
+        if isinstance(exc, httpx.HTTPStatusError):
+            provenance['http_status'] = exc.response.status_code
     except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
         provenance.update(seconds=time.monotonic() - started, valid=False,
                           response_error=type(exc).__name__)
