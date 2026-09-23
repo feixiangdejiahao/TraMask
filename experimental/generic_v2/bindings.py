@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import builtins
 from dataclasses import asdict, dataclass, field
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from anchor_retrieval.syntax import CALLS, Source, call_parts, child, walk
 
@@ -30,6 +30,10 @@ _NONCALLABLE = {'integer', 'float', 'string', 'true', 'false', 'none', 'list',
                 'tuple', 'dictionary', 'set', 'int_literal', 'float_literal',
                 'imaginary_literal', 'interpreted_string_literal', 'raw_string_literal',
                 'rune_literal', 'number', 'array', 'object', 'null', 'undefined', 'nil'}
+_GO_PREDECLARED = set('''any bool byte comparable complex64 complex128 error float32
+    float64 int int8 int16 int32 int64 rune string uint uint8 uint16 uint32 uint64
+    uintptr true false iota nil append cap clear close complex copy delete imag len
+    make max min new panic print println real recover'''.split())
 
 
 def _span(node):
@@ -168,8 +172,9 @@ def _signature(source, node):
 
 
 class _Index:
-    def __init__(self, source):
+    def __init__(self, source, go_package_names=None):
         self.source = source
+        self.go_package_names = go_package_names
         self.root = _Scope(source.root, 'module', None)
         self.scopes = {source.root.id: self.root}
         self.declarations = set()
@@ -303,10 +308,16 @@ class _Index:
             for i, name in enumerate(names):
                 self._add(scope, name, 'local', scope.node.start_byte if scope.kind == 'module' else node.end_byte,
                           value=values[i] if len(values) == len(names) else None)
+        if language == 'go' and kind in {'type_spec', 'type_alias', 'type_parameter_declaration'}:
+            for name in node.children_by_field_name('name'):
+                self._add(scope, name, 'type', scope.node.start_byte if scope.kind == 'module' else name.start_byte)
         if kind in {'assignment_expression', 'assignment_statement', 'augmented_assignment', 'update_expression'}:
             for name in _pattern_names(child(node, 'left', 'argument')):
                 self.writes.append((self.source.text(name), name, node.start_byte))
-                self.declarations.add(name.id)
+                # Go '=' writes an existing binding; it never declares one.
+                # Retain it as a checked reference, including assignment-only edits.
+                if language != 'go':
+                    self.declarations.add(name.id)
         if language == 'go' and kind == 'range_clause':
             # Range declaration is visible in the loop body, not the range source.
             if ':=' in self.source.text(node):
@@ -392,6 +403,21 @@ class _Index:
                 scope = scope.parent
         if self.source.language == 'python' and name in vars(builtins):
             return None, 'available', 'language_builtin'
+        if self.source.language == 'go' and self.go_package_names is not None:
+            if name in _GO_PREDECLARED:
+                return None, 'available', 'language_builtin'
+            if name in self.go_package_names:
+                return None, 'available', 'same_package_declaration'
+            if '.' in self.root.bindings:
+                return None, 'unknown', 'dot_import_members_unresolved'
+            parent = node.parent
+            if (parent is not None and parent.type == 'literal_element' and
+                    parent.parent is not None and parent.parent.type == 'keyed_element' and
+                    child(parent.parent, 'key') == parent):
+                # A simple composite key can be a struct-field label, or a
+                # map-key expression. Distinguishing aliases requires types.
+                return None, 'unknown', 'composite_literal_key_kind_unknown'
+            return None, 'invalid', 'undeclared_go_identifier'
         return None, 'unknown', 'external_or_unresolved_binding'
 
     def callable(self, node):
@@ -419,6 +445,8 @@ class _Index:
 
 def _value_reference(index, node):
     if node.type not in {'identifier', 'shorthand_property_identifier'} or node.id in index.declarations:
+        return False
+    if index.source.language == 'go' and index.source.text(node) == '_':
         return False
     field = _field(node)
     if field in {'attribute', 'property', 'field', 'label'}:
@@ -505,9 +533,33 @@ def _syntax_issues(source):
     return [(n.type, source.text(n)) for n in walk(source.root) if n.type == 'ERROR' or n.is_missing]
 
 
+def _go_package_names(edited, package_sources):
+    """Collect package-level declarations only, from explicitly complete inputs.
+
+    The caller supplies all build-selected peer files of the same package.
+    Imports and locals in sibling functions are never package declarations.
+    The target file is replaced by the edited bytes even if a stale copy was given.
+    """
+    def package_name(source):
+        clause = next(n for n in source.root.named_children if n.type == 'package_clause')
+        return source.text(clause.named_children[-1])
+    expected = package_name(edited)
+    sources = [edited] + [Source(path, code, 'go') for path, code in package_sources.items()
+                          if path != edited.path]
+    names = set()
+    for source in sources:
+        if _syntax_issues(source) or package_name(source) != expected:
+            raise ValueError('Complete Go package inputs must parse and belong to one package')
+        index = _Index(source)
+        names.update(name for name, rows in index.root.bindings.items()
+                     if name != 'init' and any(row.kind != 'import' for row in rows))
+    return names
+
+
 def analyze_bindings(source: Source | str, language: str | None, at_byte: int,
                      replacement: str, *, end_byte: int | None = None,
-                     imported_names: Iterable[str] = (), path: str | None = None) -> dict:
+                     imported_names: Iterable[str] = (), path: str | None = None,
+                     go_package_sources: Mapping[str, str] | None = None) -> dict:
     """Check one exact UTF-8-byte expression edit without changing the source.
 
     ``end_byte`` should be provided from the donor span. If omitted, the smallest
@@ -515,6 +567,10 @@ def analyze_bindings(source: Source | str, language: str | None, at_byte: int,
     imports the emitter has separately validated; they remain signature-unknown.
     A result with ``status == 'invalid'`` contains a demonstrated local mechanical
     conflict. Unknown results are eligible for an independent semantic gate.
+    ``go_package_sources`` is an explicit completeness assertion: all build-selected
+    same-package peers are supplied. An empty mapping means the target is the only
+    file. With the default None, unresolved Go names remain unknown because a peer
+    file may declare them. This option does not imply complete type checking.
     """
     if isinstance(source, str):
         if language is None:
@@ -556,7 +612,11 @@ def analyze_bindings(source: Source | str, language: str | None, at_byte: int,
                 errors.append({'reason': 'introduced_syntax_error', 'detail': exc.msg})
     if old_syntax:
         unknowns.append({'reason': 'preexisting_parse_errors', 'count': len(old_syntax)})
-    index = _Index(edited)
+    if go_package_sources is not None and edited.language != 'go':
+        raise ValueError('go_package_sources is only meaningful for Go')
+    package_names = (_go_package_names(edited, go_package_sources)
+                     if go_package_sources is not None and not new_syntax else None)
+    index = _Index(edited, package_names)
     additions = set(imported_names)
     for node in walk(edited.root):
         if at_byte <= node.start_byte and node.end_byte <= right and _value_reference(index, node):
