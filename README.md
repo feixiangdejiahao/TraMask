@@ -5,6 +5,7 @@
 **当前通用版本尚未确认检出七个 pilot 中的目标缺陷。** 旧领域算子原型曾达到 7/7，但算子是在已知这些缺陷之后设计的，存在过拟合，不能作为通用方法的结果。旧文档与运行方式已[归档](research/archive/README_pilot.md)，代码标签为 `combination-v0.1-pilot`。
 
 - [当前方法：测试类比方格](research/method_design.md)
+- [五小时实验交付与保留基线](research/timeboxed_experiment_report.md)
 - [跨版本实验、失败与模型成本](research/generic_generation_cross_version_results.md)
 - [实验评价约定](research/generic_generation_evaluation_plan.md)与[版本选择规则](research/generic_version_selection.md)
 - [观察前沿检索](research/observation_frontier_method.md)及[独立检索结果](research/observation_frontier_experiment.md)
