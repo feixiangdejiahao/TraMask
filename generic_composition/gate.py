@@ -99,7 +99,7 @@ def resolve_selection(content: str, candidates: list[dict], scheme: str) -> list
 
 
 def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
-                      model: str = "closeai/gpt-5.6-luna", max_tokens: int = 10000) -> dict:
+                      model: str = "ds/deepseek-v4-flash", max_tokens: int = 10000) -> dict:
     """Persist one request and response. Caller has already fixed all proposals."""
     policy = json.loads((ROOT / "configs/execution_policy.json").read_text())
     if not policy.get("allow_model_code_upload"):
@@ -114,7 +114,9 @@ def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
     if family.startswith(("gpt-5", "gpt-6", "o3", "o4")):
         payload.update(max_completion_tokens=max_tokens, reasoning_effort="medium")
     elif family.startswith("deepseek"):
-        payload.update(max_tokens=max_tokens, temperature=0, thinking={"type": "disabled"}, reasoning_effort="low")
+        # DeepSeek's current API documents low/high/max as enabling thinking.
+        # Keep both switches consistent instead of sending disabled + low.
+        payload.update(max_tokens=max_tokens, temperature=0, thinking={"type": "disabled"}, reasoning_effort="none")
     else:
         payload.update(max_tokens=max_tokens, temperature=0)
     request_bytes = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode()

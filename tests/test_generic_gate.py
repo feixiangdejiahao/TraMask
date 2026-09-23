@@ -108,6 +108,16 @@ def test_short_ids_resolve_exactly_without_guessing_or_changing_source_candidate
         gate.resolve_selection('{"accepted":["c9"]}', CANDIDATES, 'ordinal_v1')
 
 
+def test_requested_deepseek_model_uses_consistent_non_thinking_switches(monkeypatch, tmp_path):
+    _, calls = cached_admission(monkeypatch, tmp_path)
+    payload = calls[0]['json']
+    assert payload['model'] == 'ds/deepseek-v4-flash'
+    assert payload['thinking'] == {'type': 'disabled'}
+    assert payload['reasoning_effort'] == 'none'
+    assert payload['max_tokens'] == 10000
+    assert 'max_completion_tokens' not in payload
+
+
 def test_presentation_keeps_exact_edits_sources_and_oracle_relation_flag():
     candidate = dict(CANDIDATES[0], base_test_id='test-a', source_test_ids=['test-b'],
                      provenance={'input_ports': ['large repeated analysis']},

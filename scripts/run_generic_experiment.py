@@ -438,7 +438,7 @@ def main() -> None:
         sub.add_argument("--output", required=True, type=Path)
         sub.add_argument("--case-root", type=Path)
         if name == "prepare":
-            sub.add_argument("--model", default="closeai/gpt-5.6-luna")
+            sub.add_argument("--model", default="ds/deepseek-v4-flash")
             sub.add_argument("--generator", choices=("context", "analogy", "analogy-erasing", "analogy-aligned", "analogy-balanced", "analogy-views"), default="context")
             sub.add_argument("--retrieval", type=Path)
             sub.add_argument("--max-candidates", type=int, default=128)
@@ -448,7 +448,7 @@ def main() -> None:
             sub.add_argument("--rerun-id", choices=("r1", "r2"), default="r1")
         if name == "admit":
             sub.add_argument("--cache-output", type=Path)
-            sub.add_argument("--model", default="closeai/gpt-5.6-luna")
+            sub.add_argument("--model", default="ds/deepseek-v4-flash")
             sub.add_argument("--max-tokens", type=int, default=10000)
         if name in {"freeze", "run"}:
             sub.add_argument("--direct-baseline", action="store_true")
