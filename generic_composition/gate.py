@@ -98,6 +98,33 @@ def resolve_selection(content: str, candidates: list[dict], scheme: str) -> list
     return sorted(mapping[value] for value in parse_selection(content, shown))
 
 
+def _failure_kind(raw: dict, error: Exception) -> str:
+    """Classify a rejected final response without inferring hidden reasoning.
+
+    ``length`` plus explicit reasoning content or positive reported reasoning
+    tokens supports a reasoning-limit classification. ``length`` alone does not.
+    This is diagnostic only: legacy validation and exception fields are kept.
+    """
+    choice = raw["choices"][0]
+    message = choice["message"]
+    content = message.get("content")
+    if content is None or isinstance(content, str) and not content.strip():
+        reasoning = message.get("reasoning_content")
+        has_reasoning = isinstance(reasoning, str) and bool(reasoning.strip())
+        usage = raw.get("usage")
+        details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+        tokens = details.get("reasoning_tokens") if isinstance(details, dict) else None
+        has_reasoning |= type(tokens) in (int, float) and tokens > 0
+        if choice.get("finish_reason") == "length":
+            return "no_final_reasoning_limit" if has_reasoning else "no_final_completion_limit"
+        return "no_final_reasoning_only" if has_reasoning else "no_final"
+    if not isinstance(content, str):
+        return "invalid_final_content_type"
+    if isinstance(error, json.JSONDecodeError):
+        return "invalid_final_json_at_limit" if choice.get("finish_reason") == "length" else "invalid_final_json"
+    return "invalid_selection_schema"
+
+
 def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
                       model: str = "ds/deepseek-v4-flash", max_tokens: int = 10000) -> dict:
     """Persist one request and response. Caller has already fixed all proposals."""
@@ -132,7 +159,8 @@ def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
     base = config.get("base_url") or config.get("openai_base_url")
     key = config.get("api_key") or config.get("openai_api_key")
     if not base or not key:
-        provenance.update(valid=False, configuration_error="MissingProviderCredentials", usage=None)
+        provenance.update(valid=False, configuration_error="MissingProviderCredentials", usage=None,
+                          failure_kind="configuration_error")
         (output / "manifest.json").write_text(json.dumps(provenance, indent=2) + "\n")
         raise RuntimeError("Configured provider credentials are missing")
     route = ROOT / "results/api_route.json"
@@ -154,16 +182,17 @@ def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
         try:
             provenance.update(accepted=resolve_selection(content, candidates, scheme), valid=True)
         except (ValueError, TypeError) as exc:
-            provenance.update(valid=False, validation_error=str(exc))
+            provenance.update(valid=False, validation_error=str(exc), failure_kind=_failure_kind(raw, exc))
     except httpx.HTTPError as exc:
         # Do not persist exception strings: transport exceptions can contain URLs.
         provenance.update(seconds=time.monotonic() - started, valid=False,
-                          transport_error=type(exc).__name__, usage=None)
+                          transport_error=type(exc).__name__, usage=None,
+                          failure_kind="http_status_error" if isinstance(exc, httpx.HTTPStatusError) else "transport_error")
         if isinstance(exc, httpx.HTTPStatusError):
             provenance['http_status'] = exc.response.status_code
     except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
         provenance.update(seconds=time.monotonic() - started, valid=False,
-                          response_error=type(exc).__name__)
+                          response_error=type(exc).__name__, failure_kind="invalid_response_envelope")
         provenance.setdefault('usage', None)
     (output / "manifest.json").write_text(json.dumps(provenance, indent=2) + "\n")
     return provenance
