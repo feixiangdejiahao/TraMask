@@ -72,3 +72,5 @@ ISSTA 2026 的 Mixed-Assertion 研究把同一测试内多个断言及其位置�
 ASE 2026 的 *Escaping the Self-Repair Trap* 讨论围绕当前实现反复修正 oracle 可能削弱检错能力。本原型因此不通过“让候选测试通过”来修正 expected；论文设置与本项目的缺陷发现设置并不相同。[论文](https://arxiv.org/abs/2608.05917)。
 
 真正需要实验支持的不是“代码能重构”，而是这种方格是否经常对应有效且此前缺失的行为交互，以及能否在有限预算下发现缺陷。目前尚没有支持这一效果的正结果，更没有测量 issue resolution rate 的提升。
+
+更多关于断言切片、最小因果上下文与既有工作的区别见[2026 程序分析 insight](program_analysis_insights_2026.md)。
