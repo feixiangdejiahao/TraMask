@@ -77,8 +77,36 @@ def _jsonl(path: Path) -> list[dict]:
     return rows
 
 
-def parse_report(output: Path, specification: dict, process: dict) -> dict:
-    """Infrastructure failures stay errors even when a partial report exists."""
+def _selected_test_name(actual: str, selected_names: set[str]) -> bool:
+    """Match only declared runtime IDs or standard parameter/subtest suffixes."""
+    local = actual.rsplit("::", 1)[-1]
+    return any(actual == name or local == name
+               or actual.startswith(name + "[") or actual.startswith(name + "/")
+               or local.startswith(name + "[") or local.startswith(name + "/")
+               for name in selected_names)
+
+
+def _deduplicate_unselected_skips(rows: list[dict], selected_names: set[str]) -> tuple[list[dict], list[dict]]:
+    """Keep one unselected skip; never conceal selected, failed, or error rows."""
+    groups = {}
+    for row in rows:
+        groups.setdefault(row["id"], []).append(row)
+    removable = {name for name, group in groups.items()
+                 if len(group) > 1 and not _selected_test_name(name, selected_names)
+                 and all(row["status"] == "skip" for row in group)}
+    retained, excluded, seen = [], [], set()
+    for row in rows:
+        if row["id"] in removable and row["id"] in seen:
+            excluded.append(row)
+        else:
+            retained.append(row)
+            seen.add(row["id"])
+    return retained, excluded
+
+
+def parse_report(output: Path, specification: dict, process: dict, *,
+                 selected_names: list[str] | None = None) -> dict:
+    """Global failures remain errors; optional selection only deduplicates irrelevant skips."""
     output = Path(output)
     rows = []
     errors = []
@@ -92,6 +120,9 @@ def parse_report(output: Path, specification: dict, process: dict) -> dict:
             errors.append(f"Malformed test report: {exc}")
     else:
         errors.append("Test report missing")
+    excluded = []
+    if selected_names is not None:
+        rows, excluded = _deduplicate_unselected_skips(rows, set(selected_names))
     ids = [row["id"] for row in rows]
     if len(set(ids)) != len(ids):
         errors.append("Duplicate testcase IDs in test report")
@@ -108,4 +139,10 @@ def parse_report(output: Path, specification: dict, process: dict) -> dict:
         errors.append("Missing command exit code")
     counts = {state: sum(row["status"] == state for row in rows) for state in ("pass", "fail", "error", "skip")}
     status = "error" if errors or counts["error"] else "fail" if counts["fail"] else "pass" if counts["pass"] else "inconclusive"
-    return {"status": status, "counts": counts, "tests": rows, "errors": errors}
+    result = {"status": status, "counts": counts, "tests": rows, "errors": errors}
+    if selected_names is not None:
+        result["selection_parse"] = {
+            "selected_names": sorted(set(selected_names)),
+            "excluded_unselected_skipped_duplicates": excluded,
+        }
+    return result

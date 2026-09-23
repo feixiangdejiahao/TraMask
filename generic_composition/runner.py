@@ -152,6 +152,16 @@ def _normalize_go_subtests(result: dict, manifest: dict) -> dict:
     return result
 
 
+def _selected_test_names(manifest: dict) -> list[str]:
+    """Use frozen IDs, including source controls; never infer a naming prefix."""
+    metadata = manifest.get("metadata", {})
+    names = set(metadata.get("controls", []))
+    for row in metadata.get("obligations", []):
+        names.update(row[key] for key in ("id", "test_name") if row.get(key))
+        names.update(row.get("controls", []))
+    return sorted(names)
+
+
 def run_artifact(directory: Path, program: str, output: Path, *,
                  registry: Path | list[dict] | dict,
                  case_root: Path | None = None,
@@ -163,6 +173,10 @@ def run_artifact(directory: Path, program: str, output: Path, *,
     if case.get("image"):
         result = existing.run_artifact(directory, program, output, registry=cases,
                                        case_root=case_root, reference_patch=reference_patch)
+        # Preserve the legacy parse alongside the explicit-selection parse.
+        (Path(output) / "unfiltered_result.json").write_text(json.dumps(result, indent=2) + "\n")
+        result.update(parse_report(Path(output), manifest["report"], result["process"],
+                                   selected_names=_selected_test_names(manifest)))
         _normalize_go_subtests(result, manifest)
         (Path(output) / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         return result
@@ -225,7 +239,8 @@ def run_artifact(directory: Path, program: str, output: Path, *,
               "created_at": datetime.now(timezone.utc).isoformat(),
               "backend": "local_disposable_copy", "network_isolation": False,
               "transport": {"returncode": process["returncode"]}, "process": process,
-              **parse_report(output, manifest["report"], process)}
+              **parse_report(output, manifest["report"], process,
+                             selected_names=_selected_test_names(manifest))}
     _normalize_go_subtests(result, manifest)
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
