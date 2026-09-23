@@ -84,7 +84,7 @@ def main():
     lines.extend(['', '目标由前一轮人工审查固定。检索器不读取标注、handbook、隐藏 verifier 或参考补丁。',
                   'P6/P7 只评价原测试入口的检索，命中不能证明目标组合已有可继承 oracle。',
                   '未标注其他候选是否相关，因此不把它们都当作 false positive，也不报告伪造的 precision。',
-                  '统计包含最终仓库及解析出的 trajectory 脚本；没有重放历史脚本或执行被测仓库。'])
+                  '输入范围以 manifest 的 repository_only 设置为准；trajectory 脚本仅作静态分析，没有重放或执行被测仓库。'])
     (args.results / 'report.md').write_text('\n'.join(lines) + '\n')
     print('\n'.join(lines), flush=True)
 

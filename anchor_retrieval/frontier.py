@@ -11,7 +11,7 @@ import collections
 import itertools
 import operator
 
-from .syntax import ATTRS, CALLS, canonical, literal, walk
+from .syntax import canonical, literal, walk
 
 
 def observation_expression(assertion, source, has_origin=None):

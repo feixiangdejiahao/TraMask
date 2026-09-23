@@ -1,19 +1,15 @@
-**手工分析、A 的检索与方法适用性审查**
+**组合测试研究与当前实现**
 
-日期：2026-09-23。研究材料包含 7 个原始 pilot、3 条补充 DeepSeek-v4-flash trajectory，以及 6 篇 2026 年 ICSE/FSE/ASE 收录研究论文。前期进行了手工分析；最新阶段已按授权实现检索原型并运行七例本地实验，没有执行被测仓库、replay、修复实验或外部模型调用。
+当前核心抽象是 **观察前沿**：按断言观察值的依赖足迹建立偏序，在有限预算内优先选择组合行为的观察入口。七个发现集 pilot 上，Test Hit@10 和 Assertion Hit@10 均达到 1；当前只完成已有 A 的检索，没有实现组合测试生成或 issue resolution 评价。
 
-- [逐例手工分析](manual_case_analysis.md)：现有 test 特征、源码证据、组合关系、遗漏机制、生成草图和分析难度。
-- [A 的检索与七例适用性审查](anchor_applicability_audit.md)：从大量 validation tests 检索断言入口，逐例检查依赖、供体与 oracle 前提。
-- [实现与七例实验](anchor_retrieval_experiment.md)：全部目标进入提取清单，但完整排序 Test Hit@10 为 0/7，关键词基线为 7/7；包含消融、失败原因和复现材料。
-- [候选方法：关系残差切片](method_design.md)：保留配对符号消去与最小供体重组的设计，并明确本轮审查发现的适用边界。
-- [2026 文献依据](literature_2026.md)：来源、阅读范围、原论文机制、可借鉴的 insight 与贡献重叠。
-- [结构化人工标注](manual_annotations.json)：10 个 case 的特征、关系、约束、观察和证据入口；是人工发现集，不是自动提取结果。
-- [补充下载来源与哈希](sources/flash_provenance.json)：下载的 trajectory 和候选 patch。选择未使用 reward。
+- [方法设计](method_design.md)：核心抽象、算法、P3 示例、论文依据和局限。
+- [最新实验报告](observation_frontier_experiment.md)：逐例排名、消融、稳定性核验和 Git 版本。
+- [事前约定及修订记录](observation_frontier_plan.md)：两轮开发的假设、证据和修复。
+- [精简实验数据](experiments)：受 Git 管理的评价摘要。
+- [历史检索实验](anchor_retrieval_experiment.md)：旧完整方法双 Hit@10 为 0/7 的负结果。
+- [逐例人工分析](manual_case_analysis.md)及[人工标注](manual_annotations.json)：场景、oracle 缺口、依赖关系与组合问题。
+- [A 的适用性审查](anchor_applicability_audit.md)：为什么 P6/P7 的旧测试入口不等于已有可继承 oracle。
+- [2026 文献依据](literature_2026.md)：MR-Coupler 等论文 insight 与研究贡献边界。
+- [历史关系残差方案](archive/method_design_v2_residual.md)及[最初工程方案](archive/method_design_v1.md)：保留设计演变，均不是当前排序实现。
 
-最新实验结论：当前依赖、取值差和观察位置轮换的完整排序没有准确优先选出 A；简单的 patch/关键词基线更强。此前的手工示例不构成排序有效性的证据。适用性边界仍成立：P3 需要位级组合，P1/P4/P5 有额外建模需求，P6/P7 缺少目标观察或可继承 oracle。关系残差仍只是针对已有关系的优化假设。
-
-[旧版工程框架](archive/method_design_v1.md) 仅作归档；当前方法不再使用其多层 schema 和交互义务系统。人工标注仍是案例阅读记录，不是算法必需的输入格式。
-
-原始 7 个 trial 属于 4 个 issue 家族。它们和补充 3 个样本都属于方法发现集；不能将本文人工指出的组合交给生成器，再把成功命中作为盲测结果。当前结论是机制假设及静态风险证据，未确认新增缺陷，未测量 resolution 提升。
-
-已校验人工标注的证据路径和行号边界、引用的 trajectory step、报告本地链接，以及下载文件哈希。公共原始索引共有 31,617 行，筛选得到 452 条 Flash 且有 trajectory 的记录。原始索引可能包含 outcome 元数据，未来生成阶段只能获得投影后的允许字段；本次选择补充样本未使用 outcome。
+全部分析本地执行，没有代码外发。七例已经用于方法发现，后续需要冻结算法并在未见 issue 上验证，不能把当前 7/7 解释为已证明泛化。
