@@ -155,3 +155,53 @@ def test_known_recursive_target_rejects_identity_donor():
     metadata = {"obligations": [{"id": "new", "donor": None}]}
     assert not audit_known_target("P7", metadata, [{"id": "new", "confirmed_witness": True}],
                                   {"new": {"relation": "recursive_unfold"}})["detected"]
+
+
+def test_counts_separate_static_controls_and_runtime_obligations(tmp_path):
+    from combination_testing.evaluate import evaluate_case
+    from combination_testing.runner import sha256
+    artifact, execution = tmp_path / "artifact", tmp_path / "execution"
+    metadata = {"obligations": [
+        {"id": "identity", "is_control": True},
+        {"id": "combined", "control_id": "identity"},
+        {"id": "unexecuted_combination"},
+        {"id": "unexecuted_control", "is_control": True},
+    ], "controls": ["identity"]}
+    freeze_artifact(artifact, "P7", {}, "true", "jsonl", "stdout.txt", metadata=metadata)
+    common = {"case_id": "P7", "artifact_sha256": sha256(artifact / "manifest.json"),
+              "status": "fail", "errors": []}
+    for program in ("candidate", "reference"):
+        path = execution / program
+        path.mkdir(parents=True)
+        status = "fail" if program == "candidate" else "pass"
+        (path / "result.json").write_text(json.dumps({**common, "tests": [
+            {"id": "identity", "status": "pass", "is_control": True},
+            {"id": "combined", "status": status},
+            {"id": "runtime_seed", "status": "pass", "is_control": True},
+            {"id": "runtime_combined", "status": status, "control_id": "runtime_seed"},
+        ]}))
+    result = evaluate_case(artifact, execution)
+    counts = result["counts"]
+    assert counts["observed_obligations"] == 2
+    assert counts["static_declared_obligations"] == counts["declared_obligations"] == 2
+    assert counts["static_declared_controls"] == 2
+    assert counts["observed_controls"] == counts["controls"] == 2
+    assert counts["runtime_only_obligations"] == counts["runtime_only_controls"] == 1
+    assert counts["statically_declared_observed_obligations"] == 1
+    assert result["declared_unexecuted"] == ["unexecuted_combination"]
+    assert result["declared_controls_unexecuted"] == ["unexecuted_control"]
+    # Count reporting must not change independent alarm/control semantics.
+    assert counts["candidate_alerts"] == counts["confirmed_witnesses"] == 2
+    assert counts["reference_alerts"] == 0
+
+
+def test_parameterized_records_are_observed_expansions_of_one_declaration():
+    from combination_testing.evaluate import _declaration_counts
+    metadata = {"obligations": [{"id": "combined", "control": "seed"}]}
+    counts, missing, missing_controls = _declaration_counts(
+        metadata, {"suite::combined[first]", "suite::combined[second]"}, {"suite::seed"})
+    assert counts["static_declared_obligations"] == 1
+    assert counts["observed_obligations"] == counts["statically_declared_observed_obligations"] == 2
+    assert counts["runtime_only_obligations"] == 0
+    assert counts["static_declared_controls"] == 1
+    assert not missing and not missing_controls

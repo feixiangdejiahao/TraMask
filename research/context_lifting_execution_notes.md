@@ -1,6 +1,6 @@
 # 上下文提升：执行与评价记录
 
-2026-09-23。本记录保留局部 v1、guarded v2、关系契约分支与 screening v1–v3 的正负结果；不是最终方法的结论。原始产物与日志位于 `results/combination_testing/`；可版本管理的计数、产物哈希和目标归因样例见 [execution_observations.json](experiments/context_lifting_execution_observations.json)。这些结果没有证明普遍的零误报、零漏报或 issue resolution rate 提升。
+2026-09-23。本记录保留局部 v1、guarded v2、关系契约分支与 screening v1–v3 的正负结果；不是最终方法的结论。后续统一版本及独立重放见 [最终实验报告](combination_generation_experiment.md)，screening v4、contract v4–v6 的逐条审计也由该报告索引。原始产物与日志位于 `results/combination_testing/`；可版本管理的早期计数、产物哈希和目标归因样例见 [execution_observations.json](experiments/context_lifting_execution_observations.json)。这些结果没有证明普遍的零误报、零漏报或 issue resolution rate 提升。
 
 ## 执行单位与证据
 
@@ -55,6 +55,8 @@ P1/P2/P3 原始 seed 在参考上的失败数分别是 4/3/2；它们不属于�
 | 契约关系 v1 / P3 | 1 | 1 | 0 | 是 | 依赖的 5 个 seed 控制通过 |
 
 P5 将同一脚本提升为返回含 callable 的复合 scope 的工厂，比较 host/guest 执行；候选发生异常而独立路径及参考通过。P6 的 cloned writer 更新后，配对 observer 仍读到旧值，而原实例状态保持不变，符合“内部共享丢失”的目标。P7 非恒等 donor 在有限展开上执行，在递归解析上丢失；恒等控制通过。
+
+计数区分静态声明与运行时记录：`static_declared_obligations` 只计算元数据中具名的组合义务，`static_declared_controls` 单独计算具名控制；`observed_obligations`/`observed_controls` 计算两次运行中出现的唯一 ID。没有对应静态声明的运行时记录分别记为 `runtime_only_obligations`/`runtime_only_controls`；参数化测试匹配已有声明时不属于 runtime-only。旧字段 `declared_obligations` 保留为静态组合数的别名，`controls` 保留为实际控制数的别名。按此口径，`audited_structural_v3` 的 P4–P7 是 12 个静态组合声明、10 个静态控制声明，实际观察到 54 个组合和 52 个控制；其中 Go 在运行时展开的组合和控制各 42 个。旧报告的 20 个 `declared_obligations` 混入了 TS 的 8 个 identity 控制，不能与 54 个实际组合直接比较。
 
 P3 契约分支从 API 文档提取表示角色，从已有 modifier 断言确定唯一 bit，再运输既有 alias membership。其 oracle 显式依赖“表示吸收已包含的修饰操作”这一契约解释，不声称由一个正例自动证明。候选只产生带冗余修饰的 alias，参考接受运输后的断言。该产物还执行了 31 个原始 seed，其中参考失败 2 个；这两项不在新义务的 5 个依赖控制中，故既不伪装成组合误报，也不隐去。
 

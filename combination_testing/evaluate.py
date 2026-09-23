@@ -76,6 +76,62 @@ def _controls_pass(names: list[str], outcomes: dict[str, dict]) -> bool:
     return True
 
 
+def _declaration_counts(metadata: dict, obligation_ids: set[str], control_ids: set[str]) -> tuple[dict, list[str], list[str]]:
+    """Count named static declarations separately from observed runtime records.
+
+    An adapter may put controls in its ``obligations`` metadata, and runtime
+    adapters may declare no individual records at all. Neither convention
+    changes the alarm semantics or makes a control a combination obligation.
+    """
+    declared_rows = _metadata_lists(metadata, "obligations")
+    declared_controls = set()
+    for value in _metadata_lists(metadata, "controls"):
+        name = value if isinstance(value, str) else value.get("id") or value.get("test")
+        if name:
+            declared_controls.add(name)
+    for row in declared_rows:
+        name = row.get("id") or row.get("test")
+        if name and row.get("is_control"):
+            declared_controls.add(name)
+        references = row.get("controls", [])
+        if isinstance(references, str):
+            references = [references]
+        declared_controls.update(value for value in [*references, row.get("control"), row.get("control_id")] if value)
+    declared_obligations = set()
+    for row in declared_rows:
+        name = row.get("id") or row.get("test")
+        if not name:
+            continue
+        if name in declared_controls or any(_matches(name, actual) for actual in control_ids):
+            declared_controls.add(name)
+        else:
+            declared_obligations.add(name)
+    missing_obligations = sorted(name for name in declared_obligations
+                                 if not any(_matches(name, actual) for actual in obligation_ids))
+    missing_controls = sorted(name for name in declared_controls
+                              if not any(_matches(name, actual) for actual in control_ids))
+    runtime_only_obligations = sum(not any(_matches(name, actual) for name in declared_obligations)
+                                   for actual in obligation_ids)
+    runtime_only_controls = sum(not any(_matches(name, actual) for name in declared_controls)
+                               for actual in control_ids)
+    counts = {
+        "static_declared_obligations": len(declared_obligations),
+        "static_declared_controls": len(declared_controls),
+        "observed_obligations": len(obligation_ids),
+        "observed_controls": len(control_ids),
+        "runtime_only_obligations": runtime_only_obligations,
+        "runtime_only_controls": runtime_only_controls,
+        "statically_declared_observed_obligations": len(obligation_ids) - runtime_only_obligations,
+        # Existing field names remain aliases, but controls are no longer
+        # incorrectly included in the declared combination-obligation count.
+        "declared_obligations": len(declared_obligations),
+        "declared_unexecuted": len(missing_obligations),
+        "declared_controls_unexecuted": len(missing_controls),
+        "controls": len(control_ids),
+    }
+    return counts, missing_obligations, missing_controls
+
+
 def evaluate_case(artifact_dir: Path, execution_dir: Path) -> dict:
     artifact_dir, execution_dir = Path(artifact_dir), Path(execution_dir)
     manifest = load_artifact(artifact_dir)
@@ -119,12 +175,10 @@ def evaluate_case(artifact_dir: Path, execution_dir: Path) -> dict:
                      "candidate_alert": candidate_alert, "reference_alert": reference_alert,
                      "confirmed_witness": confirmed})
     obligations = [row for row in rows if not row["is_control"]]
-    declared = _metadata_lists(metadata, "obligations")
-    declared_ids = [row.get("id") or row.get("test") for row in declared]
-    declared_missing = [name for name in declared_ids if name and not any(_matches(name, actual) for actual in test_ids)]
+    declaration_counts, declared_missing, missing_controls = _declaration_counts(
+        metadata, {row["id"] for row in obligations}, control_ids)
     skipped = _metadata_lists(metadata, "skipped") + _metadata_lists(metadata, "rejected") + _metadata_lists(metadata, "unsupported")
-    counts = {"observed_obligations": len(obligations), "declared_obligations": len(declared),
-              "declared_unexecuted": len(declared_missing), "controls": len(control_ids),
+    counts = {**declaration_counts,
               "candidate_control_failures": sum(ctests.get(key, {}).get("status") == "fail" for key in control_ids),
               "reference_control_failures": sum(rtests.get(key, {}).get("status") == "fail" for key in control_ids),
               "candidate_control_errors": sum(ctests.get(key, {}).get("status") == "error" for key in control_ids),
@@ -152,6 +206,7 @@ def evaluate_case(artifact_dir: Path, execution_dir: Path) -> dict:
             "reference_alarm": bool(counts["reference_alerts"]),
             "candidate_run_status": candidate["status"], "reference_run_status": reference["status"],
             "counts": counts, "declared_unexecuted": declared_missing,
+            "declared_controls_unexecuted": missing_controls,
             "global_errors": {"candidate": candidate.get("errors", []), "reference": reference.get("errors", [])},
             "tests": rows}
 
@@ -183,6 +238,7 @@ def evaluate_experiment(artifacts: dict[str, Path], executions: dict[str, Path],
             "missing_experiments": missing,
             "target_matching": "Evaluator-only criteria in configs/combination_targets.json; known_target_detection differs from any-witness case_detection.",
             "scope": "Discovery-set case detection and alarms on independent reference implementations; not a population false-positive rate or proof of complete combination coverage.",
+            "counting_policy": "Static declarations count unique named combinations and controls separately. Observed counts are unique runtime IDs across both runs. Runtime-only records have no matching static declaration; parameterized records matching a declaration are counted as statically declared observations. Legacy declared_obligations aliases static_declared_obligations, and controls aliases observed_controls.",
             "oracle_policy": "Candidate and reference alarms computed independently before differential comparison; no reference-based filtering of generated artifacts."}
 
 

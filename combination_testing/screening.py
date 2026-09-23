@@ -22,6 +22,7 @@ from dotenv import dotenv_values
 from .protocol import Packet, canonical, generate_protocol_transports, render_probe
 from .runner import freeze_artifact
 from .screen_checks import calibration_proposals, classify_transport
+from .protocol_inputs import input_applicability, wire_semantics_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -139,10 +140,14 @@ def prepare(repository, selection, issue, budget=128):
     vetoed = [candidate for candidate in generated['candidates']
               if classify_transport(candidate, facts)['classification'] == 'contradicted']
     rejected_ids = {candidate['id'] for candidate in vetoed}
+    inapplicable = [candidate for candidate in generated['candidates']
+                   if not input_applicability(candidate['followup_packet'])['supported']]
+    rejected_ids.update(candidate['id'] for candidate in inapplicable)
     generated['candidates'] = [candidate for candidate in generated['candidates']
                                if candidate['id'] not in rejected_ids]
     chosen, sampling = choose_proposals(generated, selection, budget)
     sampling['existing_fact_vetoes'] = len(vetoed)
+    sampling['outside_input_domain'] = len(inapplicable)
     calibration = calibration_proposals(facts)
     # Interleave controls without exposing their labels or marking their IDs.
     # They are never emitted as novel test obligations.
@@ -169,6 +174,7 @@ def prepare(repository, selection, issue, budget=128):
          'field': fact['field'], 'op': fact['op'], 'expected': fact['expected']}
         for fact in facts]
     evidence['candidate_api_documentation'] = contract_documentation(repository, {fact['field'] for fact in facts})
+    evidence['wire_semantics'] = wire_semantics_evidence()
     return generated, chosen, sampling, evidence
 
 
