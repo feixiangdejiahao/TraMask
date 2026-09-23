@@ -16,6 +16,122 @@ from .syntax import (ATTRS, BLOCKS, CALLS, FUNCTIONS, IDENTIFIERS, Source, Unit,
                      attr_parts, call_parts, canonical, child, literal, walk)
 
 
+def _locally_rebound(unit: Unit, name: str) -> bool:
+    """Conservative lexical shadow check; unrelated nested scopes may reject."""
+    for node in walk(unit.body):
+        if node.type in {'assignment', 'assignment_statement', 'short_var_declaration',
+                         'variable_declarator', 'var_spec', 'const_spec'}:
+            target = child(node, 'left', 'name')
+            if target is not None and any(unit.source.text(n) == name for n in walk(target)
+                                          if n.type == 'identifier'):
+                return True
+    return False
+
+
+def standard_node_assertion(unit: Unit, node):
+    """Recognize only calls proved to originate at the standard Node assert API."""
+    source = unit.source
+    if source.language != 'typescript' or node.type not in CALLS:
+        return None
+    fn, args = call_parts(node)
+    parts = source.text(fn).split('.')
+    if not parts or not all(re.fullmatch(r'[A-Za-z_$][\w$]*', p) for p in parts):
+        return None
+    imported = source.imports.get(parts[0])
+    if imported is None or imported[0] not in {'assert', 'node:assert', 'assert/strict', 'node:assert/strict'}:
+        return None
+    if parts[0] in unit.params or _locally_rebound(unit, parts[0]):
+        return None
+    parent = node.parent
+    while parent is not None:
+        parameters = child(parent, 'parameters')
+        if parameters is not None and any(source.text(n) == parts[0] for n in walk(parameters)
+                                          if n.type == 'identifier'):
+            return None
+        if parent.type in BLOCKS:
+            for declaration in parent.named_children:
+                if declaration.type in {'lexical_declaration', 'variable_declaration'}:
+                    for value in declaration.named_children:
+                        name = child(value, 'name')
+                        if name is not None and source.text(name) == parts[0]:
+                            return None
+        parent = parent.parent
+    exported = imported[1]
+    if len(parts) == 1:
+        method = 'ok' if exported in {'default', 'strict'} else exported
+    elif exported in {None, 'default', 'strict'}:
+        tail = parts[1:]
+        method = tail[-1] if len(tail) == 1 or (len(tail) == 2 and tail[0] == 'strict') else None
+    else:
+        return None
+    binary = {'equal', 'notEqual', 'deepEqual', 'notDeepEqual', 'strictEqual',
+              'notStrictEqual', 'deepStrictEqual', 'notDeepStrictEqual'}
+    if method in binary and len(args) >= 2:
+        return args[0], args[1], method
+    if method == 'ok' and args:
+        return args[0], None, 'truthy'
+    return None
+
+
+def standard_go_guard(unit: Unit, node):
+    """A failure-only testing branch denotes the logical negation of its guard.
+
+    Report arguments may read values but cannot invoke other calls or channel
+    operations. An initializer is retained by Flow before extracting the oracle.
+    """
+    source = unit.source
+    if source.language != 'go' or node.type != 'if_statement' or child(node, 'alternative') is not None:
+        return None
+    guard, body = child(node, 'condition'), child(node, 'consequence')
+    if guard is None or body is None:
+        return None
+    statements = [n for n in body.named_children if n.type != 'comment']
+    if len(statements) == 1 and statements[0].type == 'statement_list':
+        statements = [n for n in statements[0].named_children if n.type != 'comment']
+    if not statements:
+        return None
+    for statement in statements:
+        if statement.type != 'expression_statement' or len(statement.named_children) != 1:
+            return None
+        call = statement.named_children[0]
+        if call.type not in CALLS:
+            return None
+        fn, args = call_parts(call)
+        if fn is None or fn.type not in ATTRS:
+            return None
+        receiver, method = attr_parts(fn)
+        if receiver is None or receiver.type != 'identifier' or source.text(method) not in {'Fatal', 'Fatalf', 'Error', 'Errorf', 'Fail', 'FailNow'}:
+            return None
+        name = source.text(receiver)
+        typename = unit.param_types.get(name, '').lstrip('*').split('.')
+        if (len(typename) != 2 or typename[1] not in {'T', 'B', 'F', 'TB'}
+                or source.imports.get(typename[0], ('',))[0] != 'testing'
+                or _locally_rebound(unit, name)):
+            return None
+        for argument in args:
+            for inner in walk(argument):
+                if inner.type in CALLS or inner.type in {'receive_expression', 'send_statement'}:
+                    return None
+                if inner.type == 'unary_expression' and source.text(child(inner, 'operator')) == '<-':
+                    return None
+    actual, expected, predicate = guard, None, 'falsy'
+    inverse = {'==': '!=', '!=': '==', '<': '>=', '<=': '>', '>': '<=', '>=': '<'}
+    if guard.type == 'binary_expression':
+        operator = source.text(child(guard, 'operator'))
+        if operator in inverse:
+            actual, expected = child(guard, 'left'), child(guard, 'right')
+            predicate = inverse[operator]
+            try:
+                literal(source.text(actual))
+                actual, expected = expected, actual
+                predicate = {'<': '>', '>': '<', '<=': '>=', '>=': '<='}.get(predicate, predicate)
+            except ValueError:
+                pass
+    elif guard.type == 'unary_expression' and source.text(child(guard, 'operator')) == '!':
+        actual, predicate = child(guard, 'operand'), 'truthy'
+    return actual, expected, predicate, child(node, 'initializer')
+
+
 @dataclass
 class Value:
     id: int
@@ -46,6 +162,8 @@ class Assertion:
     expected: str
     incidental: bool
     expression_node: Any = None
+    expected_expression_node: Any = None
+    assertion_adapter: str = 'direct'
 
 
 class Flow:
@@ -277,18 +395,24 @@ class Flow:
             if base in {'self', 'cls'} or (base in self.unit.param_types and self.unit.owner):
                 self.fields[self.source.text(field)].append(defined.id)
 
-    def _assert(self, node, actual, expected='', predicate='assert', incidental=False):
+    def _assert(self, node, actual, expected='', predicate='assert', incidental=False, expected_node=None, adapter='direct'):
         value = self.expression(actual)
         anchor = self.add('assertion', self.source.text(node), node, [value])
         self.assertions.append(Assertion(anchor.id, node.start_point.row + 1, node.end_point.row + 1,
                                         self.source.text(node), self.source.text(actual), self.fields_in(actual),
-                                        predicate, expected, incidental, actual))
+                                        predicate, expected, incidental, actual, expected_node, adapter))
 
     def assertion_call(self, node) -> bool:
         if node.type not in CALLS:
             return False
         fn, args = call_parts(node)
         name = self.source.text(fn)
+        standard = standard_node_assertion(self.unit, node)
+        if standard is not None:
+            actual, expected, predicate = standard
+            self._assert(node, actual, self.source.text(expected), predicate,
+                         expected_node=expected, adapter='node_assert_import')
+            return True
         if self.source.language == 'go' and re.match(r'^(require|assert)\.', name) and len(args) >= 2:
             method = name.split('.')[-1]
             binary = method in {'Equal', 'NotEqual', 'Same', 'NotSame', 'Contains', 'NotContains', 'Len', 'Greater', 'Less'}
@@ -320,6 +444,24 @@ class Flow:
 
     def statements(self, node):
         kind = node.type
+        standard = standard_go_guard(self.unit, node)
+        if standard is not None:
+            actual, expected, predicate, initializer = standard
+            previous = dict(self.env)
+            if initializer is not None:
+                self.statements(initializer)
+            self._assert(node, actual, self.source.text(expected), predicate,
+                         expected_node=expected, adapter='go_testing_failure_guard')
+            if initializer is not None and initializer.type == 'short_var_declaration':
+                target = child(initializer, 'left')
+                for binding in walk(target) if target is not None else []:
+                    if binding.type == 'identifier':
+                        name = self.source.text(binding)
+                        if name in previous:
+                            self.env[name] = previous[name]
+                        else:
+                            self.env.pop(name, None)
+            return
         if kind in BLOCKS:
             for n in node.named_children:
                 self.statements(n)

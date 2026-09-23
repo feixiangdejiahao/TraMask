@@ -207,8 +207,10 @@ def _assertion_nodes(source: Source, assertion, unit: Unit):
     statement = min(statements, key=lambda n: (n.type not in CALLS | {'assert_statement'},
                                               n.end_byte - n.start_byte)) if statements else None
     observed, expected_text = observation_expression(assertion, source)
-    expected = None
-    if source.language == 'python' and assertion.expression_node.type == 'comparison_operator':
+    expected = getattr(assertion, 'expected_expression_node', None)
+    if expected is not None:
+        pass  # Framework adapter supplied the exact AST argument/guard operand.
+    elif source.language == 'python' and assertion.expression_node.type == 'comparison_operator':
         sides = assertion.expression_node.named_children
         if len(sides) == 2 and expected_text:
             expected = sides[0] if observed == sides[1] else sides[1]
@@ -758,6 +760,7 @@ def build_corpus(repository: Path | str, language: str, retrieval: dict | Path |
                       'assertion': assertion.text, 'assertion_span': statement_span,
                       'test_span': span(source, test_node), 'prefix_span': prefix,
                       'predicate': predicate, 'incidental': assertion.incidental,
+                      'assertion_adapter': getattr(assertion, 'assertion_adapter', 'direct'),
                       'observation_side': ('right' if source.language == 'python'
                                            and assertion.expression_node.type == 'comparison_operator'
                                            and len(assertion.expression_node.named_children) == 2

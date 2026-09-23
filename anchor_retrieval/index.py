@@ -9,7 +9,7 @@ import re
 import textwrap
 from functools import lru_cache
 
-from .graph import Flow, json_value
+from .graph import Flow, json_value, standard_go_guard, standard_node_assertion
 from .syntax import (ATTRS, CALLS, Source, Unit, attr_parts, call_parts, canonical,
                      child, diff_lines, is_test_path, literal, units, walk)
 
@@ -68,12 +68,16 @@ class Index:
                 if not u.test and (is_test_path(src.path) or re.match(r'^(expect|assert)', u.name)):
                     predicates = []
                     for n in walk(u.body, stop_functions=True):
-                        if n.type == 'assert_statement':
+                        if standard_go_guard(u, n) is not None:
+                            predicates.append('go_testing_failure_guard')
+                        elif standard_node_assertion(u, n) is not None:
+                            predicates.append('node_assert_import')
+                        elif n.type == 'assert_statement':
                             predicates.append('assert')
                         elif n.type in CALLS:
                             fn, _ = call_parts(n)
                             name = src.text(fn)
-                            if re.match(r'^(require|assert)\.', name):
+                            if src.language == 'go' and re.match(r'^(require|assert)\.', name):
                                 predicates.append(name.rsplit('.', 1)[-1])
                             elif src.language == 'typescript' and name == 'expect':
                                 predicates.append('expect')

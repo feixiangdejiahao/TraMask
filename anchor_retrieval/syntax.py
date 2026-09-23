@@ -177,6 +177,10 @@ class Source:
                     if item.type == 'import_specifier':
                         name, alias = child(item, 'name'), child(item, 'alias')
                         self.imports[self.text(alias or name)] = (mod, self.text(name))
+                    elif item.type == 'import_clause':
+                        for name in item.named_children:
+                            if name.type == 'identifier':
+                                self.imports[self.text(name)] = (mod, 'default')
                     elif item.type == 'namespace_import':
                         name = next((n for n in item.named_children if n.type == 'identifier'), None)
                         self.imports[self.text(name)] = (mod, None)
