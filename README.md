@@ -54,6 +54,7 @@ done
 | `experimental/generic_v2/analogy.py` | 源码类比与重构等式 |
 | `experimental/generic_v3/`、`generic_v5/` | 语句对齐及组合表示变体 |
 | `experimental/assertion_instances_v2/` | 带词法环境的 helper 断言实例 |
+| `experimental/assertion_windows/` | 断言和依赖定义的连续窗口，以及独立的字符串表示消融 |
 | `experimental/observation_priority/` | 观察对象和程序依赖引导的排序 |
 | `scripts/run_generic_experiment.py` | prepare、admit、freeze、run、summarize |
 

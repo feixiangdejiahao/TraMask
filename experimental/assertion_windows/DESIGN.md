@@ -46,3 +46,9 @@ an otherwise plausible `xs.append` to `ys.append` receiver renaming.
 
 All validation is source-only and uses invented examples. No subject outputs,
 reference patch, pilot/holdout results or model calls determine the proposal.
+
+`balanced.py` is a separate representation ablation. It changes only the
+refinement callback to the existing v4 balanced-delimiter representation, with
+its existing flat fallback. It keeps the same search, analogy kernel, parent
+preservation checks, budgets and gate. Flat and balanced candidates are not
+pooled. Neither representation establishes embedded-language semantics.

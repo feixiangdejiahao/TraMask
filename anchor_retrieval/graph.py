@@ -364,7 +364,7 @@ class Flow:
                 if any(not t.startswith('@builtin:') or t in {'@builtin:list', '@builtin:dict', '@builtin:set'}
                        for t in self.env[name].types):
                     names.append(name)
-        for name in set(names):
+        for name in sorted(set(names)):
             old = self.env[name]
             merged = self.add('may_effect', name, node, [old, value], types=old.types,
                               constants=old.constants, regexes=old.regexes, variable=name)
@@ -512,7 +512,7 @@ class Flow:
             if condition is not None:
                 self.guards.pop()
             self.env = dict(before)
-            for name in set().union(*(e.keys() for e in environments)):
+            for name in sorted(set().union(*(e.keys() for e in environments))):
                 vals = {e[name].id: e[name] for e in environments if name in e}
                 if len(vals) > 1:
                     self.env[name] = self.add('join', name, node, vals.values(),

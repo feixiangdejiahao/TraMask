@@ -63,8 +63,13 @@ def generate(corpus, budget=Budget(), *, refine=_refine, extract_instances=extra
         if len(record['text'].encode()) > budget.max_body_bytes:
             skipped['instance_byte_budget'] += 1
             continue
-        existing[record['group_key']].add(novelty(record, None, budget.max_nodes) if novelty else
-                                           _canonical(record['tree'].term, record['bindings']))
+        try:
+            input_novelty = (novelty(record, None, budget.max_nodes) if novelty else
+                             _canonical(record['tree'].term, record['bindings']))
+        except BudgetExceeded:
+            skipped['input_novelty_node_budget'] += 1
+            continue
+        existing[record['group_key']].add(input_novelty)
         try:
             refined = refine(record, budget.max_nodes)  # Cached once per input.
         except BudgetExceeded:
@@ -116,19 +121,23 @@ def generate(corpus, budget=Budget(), *, refine=_refine, extract_instances=extra
                 candidate, rule = result['candidate'], result['rule']
                 after = candidate['edits'][0]['after']
                 novelty_key = (C['instance_id'], after) if novelty else (corpus['language'], tuple(C['test']['parameters']), after)
-                if novelty_key not in novelty_cache:
-                    novelty_cache[novelty_key] = (novelty(C, after, budget.max_nodes) if novelty else
-                                                _statement_key(after, corpus['language'], C['test']['parameters'], budget.max_nodes))
-                key = _id('assertion_instance_output', C['parent_test_id'], C['span'], after)
-                if novelty_cache[novelty_key] in existing[C['group_key']]:
-                    skipped['existing_combination'] += 1
-                elif key in pool:
-                    skipped['duplicate_target_edit'] += 1
+                try:
+                    if novelty_key not in novelty_cache:
+                        novelty_cache[novelty_key] = (novelty(C, after, budget.max_nodes) if novelty else
+                                                    _statement_key(after, corpus['language'], C['test']['parameters'], budget.max_nodes))
+                except BudgetExceeded:
+                    skipped['output_novelty_node_budget'] += 1
                 else:
-                    candidate.update(id=key, focus_instance_id=C['instance_id'], source_instance_ids=list(triple))
-                    mechanical = candidate['provenance']['binding_analysis']
-                    candidate['binding_check'] = {k: mechanical[k] for k in ('status', 'errors', 'unknowns')}
-                    pool[key], rules[rule['id']] = candidate, rule
+                    key = _id('assertion_instance_output', C['parent_test_id'], C['span'], after)
+                    if novelty_cache[novelty_key] in existing[C['group_key']]:
+                        skipped['existing_combination'] += 1
+                    elif key in pool:
+                        skipped['duplicate_target_edit'] += 1
+                    else:
+                        candidate.update(id=key, focus_instance_id=C['instance_id'], source_instance_ids=list(triple))
+                        mechanical = candidate['provenance']['binding_analysis']
+                        candidate['binding_check'] = {k: mechanical[k] for k in ('status', 'errors', 'unknowns')}
+                        pool[key], rules[rule['id']] = candidate, rule
             if attempts >= budget.max_attempts:
                 active.extend(queues[index + 1:])
                 break

@@ -194,6 +194,8 @@ def prepare(args) -> dict:
         from experimental.assertion_instances_v2.generate import Budget, gate_evidence, generate
     elif generator == 'assertion-windows':
         from experimental.assertion_windows.generate import Budget, gate_evidence, generate
+    elif generator == 'assertion-windows-balanced':
+        from experimental.assertion_windows.balanced import Budget, gate_evidence, generate
     elif generator == 'edit-square':
         from experimental.edit_square.generate import Budget, gate_evidence, generate
     elif generator == 'observation-priority':
@@ -454,7 +456,7 @@ def main() -> None:
         sub.add_argument("--case-root", type=Path)
         if name == "prepare":
             sub.add_argument("--model", default="deepseek-v4-flash")
-            sub.add_argument("--generator", choices=("context", "analogy", "analogy-erasing", "analogy-aligned", "analogy-balanced", "analogy-views", "assertion-instances", "assertion-instances-open", "assertion-windows", "edit-square", "observation-priority"), default="context")
+            sub.add_argument("--generator", choices=("context", "analogy", "analogy-erasing", "analogy-aligned", "analogy-balanced", "analogy-views", "assertion-instances", "assertion-instances-open", "assertion-windows", "assertion-windows-balanced", "edit-square", "observation-priority"), default="context")
             sub.add_argument("--retrieval", type=Path)
             sub.add_argument("--max-candidates", type=int, default=128)
             sub.add_argument("--top-k", type=int, default=10)
