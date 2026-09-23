@@ -89,12 +89,30 @@ def test_one_request_contains_fixed_proposals_and_no_credentials_in_artifacts(mo
     sent = json.loads(payload['messages'][1]['content'])
     assert sent == {'evidence': {'issue': 'unit requirement'}, 'candidates': CANDIDATES}
     assert 'tools' not in payload
+    assert payload['tool_choice'] == 'none'
+    assert payload['response_format'] == {'type': 'json_object'}
     assert calls[0]['options']['follow_redirects'] is False
     assert gate.load_admission(output, CANDIDATES)['accepted'] == ['candidate-a']
     assert all('unit-test-only-placeholder' not in p.read_text() for p in output.iterdir())
     with pytest.raises(FileExistsError):
         gate.request_admission({}, CANDIDATES, output)
     assert len(calls) == 1
+
+
+def test_presentation_keeps_exact_edits_sources_and_oracle_relation_flag():
+    candidate = dict(CANDIDATES[0], base_test_id='test-a', source_test_ids=['test-b'],
+                     provenance={'input_ports': ['large repeated analysis']},
+                     oracle={'mode': 'retain_all', 'assertion_ids': ['a1'],
+                             'shared_input_expected_dependency': True})
+    evidence = {'source_tests': {'test-a': {'code': 'assert result == expected'}},
+                'observations': {'a1': 'assert result == expected'}, 'issue': 'contract'}
+    shown = gate.presentation(evidence, [candidate])
+    assert shown['candidates'][0]['edits'] == candidate['edits']
+    assert shown['candidates'][0]['source_test_ids'] == ['test-b']
+    assert shown['candidates'][0]['oracle']['shared_input_expected_dependency'] is True
+    assert shown['evidence']['source_tests'] == evidence['source_tests']
+    assert 'observations' not in shown['evidence'] and 'provenance' not in shown['candidates'][0]
+    assert 'provenance' in candidate and 'observations' in evidence
 
 
 @pytest.mark.parametrize('filename', ['request.json', 'response.json', 'candidates.json'])
