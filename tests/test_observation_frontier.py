@@ -114,6 +114,19 @@ func TestWorker(t *testing.T) {
     assert rows[0]['frontier']['constant_return_calls'] == ['w.Ready()']
 
 
+def test_distinct_constants_under_polymorphic_dispatch_are_not_collapsed():
+    rows, _ = analyze('''class Left:
+    def flag(self): return True
+class Right:
+    def flag(self): return False
+''', '''from calc import Left, Right
+def test_choice(obj: Left | Right):
+    assert obj.flag() is True
+''')
+    assert rows[0]['frontier']['constant_return_calls'] == []
+    assert rows[0]['frontier']['footprint']
+
+
 def test_alpha_renaming_and_unrelated_setup_preserve_the_frontier():
     template = '''from calc import Invoice
 def TEST():
@@ -155,3 +168,63 @@ def test_second():
     ranked = rank_frontier(rows, baseline)
     assert len({r['test_id'] for r in ranked[:2]}) == 2
     assert ranked[0]['frontier']['observed_expression'] == 'bill.total'
+
+
+def test_expected_object_construction_does_not_replace_the_observed_result():
+    rows, _ = analyze('''def process(x): return {'number': str(x)}
+''', '''from calc import process
+def test_document():
+    result = process(17)
+    assert result == {'number': str(17)}
+''')
+    assert rows[0]['frontier']['observed_expression'] == 'result'
+    assert rows[0]['frontier']['expected_expression'] == "{'number': str(17)}"
+    assert rows[0]['frontier']['footprint']
+
+
+def test_reversed_equality_follows_the_value_origin():
+    rows, _ = analyze('''def process(x): return x + 1
+''', '''from calc import process
+def test_document():
+    expected = 18
+    result = process(17)
+    assert expected == result
+''')
+    assert rows[0]['frontier']['observed_expression'] == 'result'
+
+
+def test_relational_assertion_keeps_both_computed_sides():
+    rows, _ = analyze('''def process(x): return x + 1
+''', '''from calc import process
+def test_relation():
+    assert process(17) == process(18) - 1
+''')
+    assert len(rows[0]['frontier']['calls']) == 2
+
+
+def test_result_observation_refines_status_check_on_the_same_call():
+    rows, _ = analyze('''package calc
+func Calculate(x int) (int, error) { return x + 1, nil }
+''', '''package calc
+import "github.com/stretchr/testify/require"
+func TestCalculate(t *testing.T) {
+    value, err := Calculate(4)
+    require.NoError(t, err)
+    require.Equal(t, 5, value)
+}
+''', 'go')
+    assert rows[0]['frontier']['footprint'] == rows[1]['frontier']['footprint']
+    assert order_test(rows)[0]['predicate'] == 'Equal'
+
+
+def test_status_only_test_remains_retrievable():
+    rows, _ = analyze('''package calc
+func Check(x int) error { return inspect(x) }
+''', '''package calc
+import "github.com/stretchr/testify/require"
+func TestCheck(t *testing.T) {
+    err := Check(4)
+    require.NoError(t, err)
+}
+''', 'go')
+    assert order_test(rows) == rows

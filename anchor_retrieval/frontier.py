@@ -14,7 +14,7 @@ import operator
 from .syntax import ATTRS, CALLS, canonical, literal, walk
 
 
-def observation_expression(assertion, source):
+def observation_expression(assertion, source, has_origin=None):
     """Separate a simple Python comparison from its expected expression.
 
     Framework assertions already expose their actual argument. Compound Python
@@ -23,13 +23,16 @@ def observation_expression(assertion, source):
     node = assertion.expression_node
     if source.language == 'python' and node.type == 'comparison_operator' and len(node.named_children) == 2:
         left, right = node.named_children
-        left_observes = any(n.type in ATTRS | CALLS for n in walk(left))
-        right_observes = any(n.type in ATTRS | CALLS for n in walk(right))
+        left_observes = has_origin(left) if has_origin else False
+        right_observes = has_origin(right) if has_origin else False
         try:
             literal(source.text(left))
             left_literal = True
         except ValueError:
             left_literal = False
+        if left_observes and right_observes:
+            # A relation between two computed outputs must keep both sides.
+            return node, ''
         if (right_observes and not left_observes) or left_literal:
             return right, source.text(left)
         return left, source.text(right)
@@ -104,7 +107,7 @@ class ObservationFrontier:
                     except ValueError:
                         unknown = True
                         break
-            self._constant_returns[target] = bool(values) and len(values) == 1 and not unknown
+            self._constant_returns[target] = next(iter(values)) if len(values) == 1 and not unknown else None
         return self._constant_returns[target]
 
     def value_slice(self, flow, roots):
@@ -117,27 +120,37 @@ class ObservationFrontier:
             seen.add(n)
             call = calls.get(n)
             if call and call.targets and all(reason not in {'unique_name_candidate', 'ambiguous_name_candidate'}
-                                            and self.constant_return(uid) for uid, reason in call.targets):
-                constants.add(n)
-                continue
+                                            for _, reason in call.targets):
+                returns = {self.constant_return(uid) for uid, _ in call.targets}
+                if None not in returns and len(returns) == 1:
+                    constants.add(n)
+                    continue
             todo.extend(d for d in flow.edges.get(n, ()) if flow.edge_kinds.get((n, d)) == 'value')
         return seen, constants
 
+    def affected(self, uid):
+        if uid not in self._affected:
+            self._affected[uid] = bool(self.index.reach(uid)['changed'])
+        return self._affected[uid]
+
     def annotate(self, flow, assertion, record):
-        actual, expected = observation_expression(assertion, flow.source)
         reachable = flow.slice([assertion.node])
-        roots = [n for n in reachable if flow.nodes[n]['start_byte'] == actual.start_byte
-                 and flow.nodes[n]['end_byte'] == actual.end_byte and flow.nodes[n]['kind'] != 'assertion']
-        sliced, constants = self.value_slice(flow, roots or [assertion.node])
+        def roots(node):
+            return [n for n in reachable if flow.nodes[n]['start_byte'] == node.start_byte
+                    and flow.nodes[n]['end_byte'] == node.end_byte and flow.nodes[n]['kind'] != 'assertion']
+        def has_origin(node):
+            sliced, constants = self.value_slice(flow, roots(node))
+            return any(c.node in sliced and c.node not in constants and any(self.affected(uid) for uid, _ in c.targets)
+                       for c in flow.calls)
+        actual, expected = observation_expression(assertion, flow.source, has_origin)
+        sliced, constants = self.value_slice(flow, roots(actual) or [assertion.node])
         facts, calls = set(), []
         for call in flow.calls:
             if call.node not in sliced or call.node in constants:
                 continue
             affected = []
             for uid, _ in call.targets:
-                if uid not in self._affected:
-                    self._affected[uid] = bool(self.index.reach(uid)['changed'])
-                if self._affected[uid]:
+                if self.affected(uid):
                     affected.append(uid)
             if affected:
                 atom = f'call:{flow.unit.id}:{call.node}'
@@ -169,7 +182,9 @@ def order_test(rows, use_dependencies=True, use_expectation=True):
     ordered, layer = [], 0
     while pending:
         front = [r for r in pending if not use_dependencies or not any(
-            footprints[r['id']] < footprints[s['id']] for s in pending)]
+            footprints[r['id']] < footprints[s['id']] or
+            (footprints[r['id']] == footprints[s['id']] and r['incidental'] and not s['incidental'])
+            for s in pending)]
         front.sort(key=lambda r: (-(r['frontier']['expected_diversity'] if use_expectation else 1),
                                   r['line'], r['id']))
         for row in front:
