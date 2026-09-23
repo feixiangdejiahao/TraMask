@@ -222,7 +222,7 @@ def _refine(record, max_nodes):
     return dict(record, tree=refined, literal_roles=roles, skeleton=_skeleton(refined.term))
 
 
-def generate(corpus: dict, budget: Budget = Budget()) -> dict:
+def generate(corpus: dict, budget: Budget = Budget(), *, compose=analogy) -> dict:
     """Return JSON-serializable candidates compatible with the existing emitter."""
     if any(type(v) is not int or v < 1 for v in asdict(budget).values()):
         raise ValueError('Generation budgets must be positive integers')
@@ -324,7 +324,7 @@ def generate(corpus: dict, budget: Budget = Budget()) -> dict:
                 continue
             seen.add(triple)
             attempted += 1
-            result = analogy(A['tree'].term, B['tree'].term, C['tree'].term,
+            result = compose(A['tree'].term, B['tree'].term, C['tree'].term,
                              roles=_roles(A, B, C), max_nodes=budget.max_nodes, max_holes=budget.max_holes)
             known, mechanical = False, None
             if result.status == 'hypothesis':
