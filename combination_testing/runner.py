@@ -85,19 +85,33 @@ def reference_patch_for(case: dict) -> Path:
 
 
 def run_artifact(directory: Path, program: str, output: Path, *,
-                 reference_patch: Path | None = None) -> dict:
+                 reference_patch: Path | None = None,
+                 registry: Path | list[dict] | dict | None = None,
+                 case_root: Path | None = None) -> dict:
     """Run exactly one frozen artifact in a fresh network-isolated container."""
     from combination_testing.test_reports import parse_report
 
     directory, output = Path(directory).resolve(), Path(output).resolve()
     manifest = load_artifact(directory)
-    case = next(c for c in json.loads((ROOT / "data/cases.json").read_text())
-                if c["id"] == manifest["case_id"])
+    registry_rows = json.loads((ROOT / "data/cases.json").read_text()) if registry is None else (
+        json.loads(Path(registry).read_text()) if isinstance(registry, (str, Path)) else registry)
+    if isinstance(registry_rows, dict):
+        registry_rows = registry_rows["cases"]
+    case = dict(next(c for c in registry_rows if c["id"] == manifest["case_id"]))
+    if "base_commit" not in case:
+        case["base_commit"] = case["base_commit_hash"]
+    case.setdefault("task", case["id"])
+    case_root = Path(case_root) if case_root is not None else ROOT / "data/cases"
     if program not in {"candidate", "reference", "base"}:
         raise ValueError(f"Unknown program: {program}")
     patch = None
     if program == "candidate":
-        patch = ROOT / "data/cases" / case["id"] / "model.patch"
+        if case.get("candidate_patch"):
+            patch = Path(case["candidate_patch"])
+            if not patch.is_absolute():
+                patch = case_root / patch
+        else:
+            patch = case_root / case["id"] / "model.patch"
     elif program == "reference":
         patch = Path(reference_patch) if reference_patch else reference_patch_for(case)
     output.mkdir(parents=True, exist_ok=False)
