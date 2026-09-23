@@ -42,6 +42,7 @@ def algorithm_files() -> list[Path]:
                    *ROOT.glob("experimental/generic_v3/*.py"),
                    *ROOT.glob("experimental/generic_v4/*.py"),
                    *ROOT.glob("experimental/generic_v5/*.py"),
+                   *ROOT.glob("experimental/assertion_instances/*.py"),
                    ROOT / "combination_testing/runner.py", ROOT / "combination_testing/container_runner.py",
                    ROOT / "combination_testing/test_reports.py", Path(__file__).resolve()])
 
@@ -183,6 +184,8 @@ def prepare(args) -> dict:
         from experimental.generic_v4.generate import Budget, gate_evidence, generate
     elif generator == 'analogy-views':
         from experimental.generic_v5.generate import Budget, gate_evidence, generate
+    elif generator == 'assertion-instances':
+        from experimental.assertion_instances.generate import Budget, gate_evidence, generate
     elif generator == 'context':
         from generic_composition.engine import Budget, gate_evidence, generate
     else:
@@ -439,7 +442,7 @@ def main() -> None:
         sub.add_argument("--case-root", type=Path)
         if name == "prepare":
             sub.add_argument("--model", default="ds/deepseek-v4-flash")
-            sub.add_argument("--generator", choices=("context", "analogy", "analogy-erasing", "analogy-aligned", "analogy-balanced", "analogy-views"), default="context")
+            sub.add_argument("--generator", choices=("context", "analogy", "analogy-erasing", "analogy-aligned", "analogy-balanced", "analogy-views", "assertion-instances"), default="context")
             sub.add_argument("--retrieval", type=Path)
             sub.add_argument("--max-candidates", type=int, default=128)
             sub.add_argument("--top-k", type=int, default=10)
