@@ -145,6 +145,8 @@ def generate(corpus, budget=Budget(), *, refine=_refine, extract_instances=extra
     result = {'algorithm': 'test_edit_analogy_assertion_instances', 'unit': 'source_backed_oracle_helper_call',
               'budget': asdict(budget), 'candidates': selected, 'rules': [rules[r] for r in sorted(used)],
               'counts': {'seed_tests': len(seeds), 'eligible_tests': len({r['parent_test_id'] for r in records.values()}),
+                         'seed_instances': sum(r['parent_test_id'] in seeds for r in records.values()),
+                         'seed_tests_with_eligible_instances': len(seeds & {r['parent_test_id'] for r in records.values()}),
                          'eligible_instances': len(records), 'groups': len(groups), 'attempted_triples': attempts,
                          'candidate_pool': len(pool), 'candidates': len(selected)},
               'binding_statuses': dict(Counter(m['status'] for m in mechanical_cache.values())),
