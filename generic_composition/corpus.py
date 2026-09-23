@@ -416,6 +416,57 @@ def _observation_value_trace(source: Source, node, flow, unit: Unit) -> dict:
             'parameters': sorted(parameters)}
 
 
+def _bind_helper_arguments(helper: Unit, caller: Source, args) -> tuple[list[dict], str, list[str]]:
+    """Bind explicit arguments once for both actual and expected provenance.
+
+    Dynamic expansion and incomplete/invalid bindings are unknown; no partial
+    positional guess is retained. Defaults and variadic formals are currently
+    unsupported rather than interpreted by this source-only prototype.
+    """
+    spreading = {'list_splat', 'dictionary_splat', 'spread_element', 'variadic_argument'}
+    if any(arg.type in spreading for arg in args):
+        return [], 'unknown', ['spread_arguments_not_resolved']
+    parameters = child(helper.node, 'parameters')
+    if parameters is not None and any(n.type in {
+            'list_splat_pattern', 'dictionary_splat_pattern', 'rest_pattern',
+            'variadic_parameter_declaration'} for n in walk(parameters)):
+        return [], 'unknown', ['variadic_parameters_not_resolved']
+    bound, position, keyword_seen = {}, 0, False
+    unknowns = []
+    for slot, argument in enumerate(args):
+        keyword = None
+        if argument.type == 'keyword_argument':
+            keyword_seen = True
+            keyword = caller.text(child(argument, 'name'))
+            name, value = keyword, child(argument, 'value')
+            if name not in helper.params:
+                unknowns.append('unexpected_keyword:' + name)
+                continue
+        else:
+            if keyword_seen:
+                unknowns.append('positional_argument_after_keyword')
+                continue
+            if position >= len(helper.params):
+                unknowns.append('too_many_positional_arguments')
+                continue
+            name, value = helper.params[position], argument
+            position += 1
+        if name in bound:
+            unknowns.append('duplicate_parameter_binding:' + name)
+            continue
+        if value is None:
+            unknowns.append('missing_argument_value:' + name)
+            continue
+        bound[name] = {'parameter': name, 'slot': slot, 'keyword': keyword,
+                       'actual': expression(caller, value)}
+    missing = [name for name in helper.params if name not in bound]
+    if missing:
+        unknowns.append('unbound_parameters:' + ','.join(missing))
+    if unknowns:
+        return [], 'unknown', unknowns
+    return [bound[name] for name in helper.params], 'resolved', []
+
+
 def _helper_mappings(index: Index, unit: Unit, statement) -> list[dict]:
     """Keep exact actual/formal provenance, without guessing converted expectations."""
     if statement is None or statement.type not in CALLS:
@@ -426,8 +477,7 @@ def _helper_mappings(index: Index, unit: Unit, statement) -> list[dict]:
         if uid not in index.oracle_helpers or reason not in {'local_symbol', 'package_symbol', 'import_symbol'}:
             continue
         helper, hflow = index.units[uid], index.flow(uid)
-        bindings = [{'parameter': p, 'slot': i, 'actual': expression(unit.source, a)}
-                    for i, (p, a) in enumerate(zip(helper.params, args))]
+        bindings, binding_status, binding_unknowns = _bind_helper_arguments(helper, unit.source, args)
         for assertion in hflow.assertions:
             _, actual, expected, predicate = _assertion_nodes(helper.source, assertion, helper)
             expected_text = helper.source.text(expected)
@@ -450,11 +500,13 @@ def _helper_mappings(index: Index, unit: Unit, statement) -> list[dict]:
                 'path': helper.source.path, 'line': assertion.line, 'end_line': assertion.end_line},
                 'predicate': predicate, 'observed': expression(helper.source, actual),
                 'expected': expression(helper.source, expected), 'argument_bindings': bindings,
+                'binding_status': binding_status, 'binding_unknowns': binding_unknowns,
                 'expected_parameter_origins': origins,
                 'observed_parameter_origins': [b for b in bindings if b['parameter'] in observed_trace['parameters']],
                 'observed_dependency_precision': 'actual_only_value_edges; mutation_and_control_unknown',
                 'caller_expected': direct['actual'] if direct else None,
-                'status': 'direct_parameter' if direct else 'unsupported_expected_transform_or_constant'})
+                'status': ('unsupported_argument_binding' if binding_status != 'resolved'
+                           else 'direct_parameter' if direct else 'unsupported_expected_transform_or_constant')})
     return result
 
 
@@ -727,6 +779,8 @@ def build_corpus(repository: Path | str, language: str, retrieval: dict | Path |
                 record['unknowns'].append('no_direct_expected_expression')
             if parameterized and not params:
                 record['unknowns'].append('parameter_rows_not_expanded')
+            if any(h.get('binding_status') == 'unknown' for h in helper):
+                record['unknowns'].append('helper_argument_binding_unknown')
             corpus['capsules'].append(record)
         # Expression donors include whole arguments and syntax literals/containers.
         # A literal program is never parsed as a special subject language.

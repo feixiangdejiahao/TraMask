@@ -195,6 +195,8 @@ def generate(corpus: dict, budget: Budget = Budget()) -> dict:
             skipped['test_size_budget'] += 1
         elif not capsules.get(test['id']):
             skipped['no_observation'] += 1
+        elif any('helper_argument_binding_unknown' in a['unknowns'] for a in capsules[test['id']]):
+            skipped['helper_argument_binding_unknown'] += 1
         else:
             eligible.add(test['id'])
     donors = [d for d in expanded_donors(corpus)
