@@ -81,6 +81,18 @@ def test_request_parent_order_survives_canonical_artifact_round_trip(tmp_path):
     assert list(json.loads(payload["messages"][1]["content"])["source_tests"]) == ids
 
 
+@pytest.mark.parametrize("prefix", ["# independent comment\n    ", "\n    ", "# first\n    # second\n    "])
+def test_python_leading_suite_comments_are_preserved_without_body_escape(tmp_path, prefix):
+    corpus, shown, _ = toy(tmp_path)
+    identifier = next(iter(shown["source_tests"]))
+    body = prefix + "assert run(2) == 2"
+    generated = baseline.materialize(response_content(identifier, body), corpus, shown)
+    assert generated["counts"]["candidates"] == 1
+    assert generated["candidates"][0]["edits"][0]["after"] == body
+    escaped = "# comment\n    assert run(2) == 2\nassert run(3) == 3"
+    assert baseline.validate_body(corpus, identifier, escaped)["status"] == "unsupported"
+
+
 @pytest.mark.parametrize("value", [
     [], {"tests": [], "oracle_rule": "invented"}, {"tests": "not a list"},
     {"tests": [{"source_test_id": "unknown", "body": "assert True"}]},

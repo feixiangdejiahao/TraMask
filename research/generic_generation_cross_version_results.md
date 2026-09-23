@@ -1,4 +1,4 @@
-# 通用生成实验：跨版本独立评价（截至 predicate-free 消融，成本账本 v7）
+# 通用生成实验：跨版本独立评价（含独立模型生成对照，成本账本 v8）
 
 所有版本目前均无具备契约支持的候选缺陷证据。以下保留直接生成和两轮模型准入的全部出现次数；不能把运行失败直接视为发现缺陷。
 
@@ -122,6 +122,21 @@ Predicate-free 仍采用固定 128 候选、2000 次尝试预算，54 单元均�
 
 本版两轮只有 1 个受控报警，不等于可靠性改善：另有 13 个准入项被失败源控制阻断；公开契约支持的 15 个出现项中，14 个通过，1 个因同包生成代码编译失败而未执行，未发现可信缺陷。P5 从零变成 6 个产物，但复制了不相容程序的预期值；P7 仍零产物。关于观察已存在、合法组合尚未构造出的边界，见 [可表达性独立审计](generic_generation_expressibility_audit.md)。
 
-[累计账本 v7](../results/generic_evaluation_summary/v7/summary.json) 共 187 次正式实验及诊断尝试，已报告 5,503,327 tokens（输入 5,213,124／输出 290,203），23 次用量未知；另 3 次旧 fixture 连接事故继续单列，总尝试 190 次。尚未包含将来的 LLM 直接生成对照。
+[累计账本 v7](../results/generic_evaluation_summary/v7/summary.json) 共 187 次正式实验及诊断尝试，已报告 5,503,327 tokens（输入 5,213,124／输出 290,203），23 次用量未知；另 3 次旧 fixture 连接事故继续单列，总尝试 190 次。该历史累计尚未包含下述 LLM 直接生成对照。
 
 另需披露 [pytest 误收集事件](../results/collection_incident_v1/README.md)：predicate-free 实现已在误收集前完成，之后未改生成器；但误收集确实发生模块顶层导入并暴露真实测试路径/片段，网络及文件副作用未知，不能称全过程盲态。已经限定默认测试目录，664 项项目测试通过。此事故不被静默计作零副作用，也不凭未知行为捏造模型调用数量。
+
+## 独立模型直接生成对照
+
+[预先固定的计划](llm_generation_baseline_plan.md)统一取七例冻结检索的前十个父测试，每例两轮、每轮最多三个完整 body 替换。模型可以创造新输入和断言；因此它与仅从源码搬运的 128 候选生成器具有不同能力、预算和展示范围，不能把差异归因于单一因素，更不能合并后选最好一轮。14 次请求全部格式有效，42 项提议中 38 项进入冻结执行；其余 4 项被 body 范围检查拒绝，保留为 unsupported，未修复模型输出。
+
+| 独立轮次 | 提议 / 冻结执行 | 候选通过 | 错误 oracle 报警 | 契约支持报警 | 已确认目标 |
+|---|---:|---:|---:|---:|---:|
+| r1 | 21 / 19 | 15 | 4 | 0 | 0/7 |
+| r2 | 21 / 19 | 16 | 3 | 0 | 0/7 |
+
+[事前 oracle 审计](../results/llm_generation_baseline/batch1/oracle_audit_before_reference.json)覆盖全部 38 个出现项：26 项有来源契约支持且候选全部通过；7 个报警均为错误 oracle；5 项运行时 oracle 仍 unknown，即使通过也不升级。七个错误包括把 `=` 字符当作 `base_key` 名称、把 modifier 6 当成 alt+ctrl，以及四项闭包状态/全局值计算错误。另一名未见本轮执行结果的审计者对 26 valid 和 7 invalid 完全一致，将后五项记为 inapplicable；两者均认为类型检查拒绝不能推出精确的运行时抛错规则。[交叉审计记录](../results/llm_generation_baseline/batch1/cross_auditor_reconciliation.json)保留原标签与差异。
+
+候选侧源控制全部通过，无编译或 collection 阻断。参考侧存在 P4/P6/P7 原测试导入、API 符号或目录布局不兼容，共 18 项未执行；另有参考源控制失败。原控制失败不会计作新生成误报，参考通过也不自动验证 oracle。八次初始 freeze 因 JSON 将 tuple 保存为 list 而比较失败，已保留原日志，仅用[独立适配器](../scripts/freeze_llm_baseline_json_adapter.py)对完整对象作 JSON 规范化后补齐；请求、响应、代码 body、validation 内容和原快照均未修改。此对照最终仍为 0 个合格差分、0 个契约支持缺陷，见[完整评价](../results/llm_generation_baseline/batch1/evaluation_complete.json)。
+
+本对照新增 320,488 tokens（输入 304,346、输出 16,142）。[累计账本 v8](../results/generic_evaluation_summary/v8/summary.json)共 201 次正式实验及诊断尝试，已报告 5,823,815 tokens（输入 5,517,470、输出 306,345），23 次用量未知；另 3 次旧 unit fixture 连接事故单列，合计 204 次尝试、26 次用量未知。以上不含早期领域专用 contract 实验。零有效检出仍是当前结果，不能将此对照描述为证明某种生成方法有效，也未测得 issue resolution rate 改善。

@@ -199,7 +199,15 @@ def validate_body(corpus: dict, identifier: str, body: str) -> dict:
     matching = [unit for unit in units(edited)[0]
                 if unit.node.start_byte == definition["start_byte"]
                 and unit.node.end_byte == definition["end_byte"] + delta]
-    if len(matching) != 1 or (matching[0].body.start_byte, matching[0].body.end_byte) != (start, start + len(replacement)):
+    if len(matching) != 1:
+        return {"status": "unsupported", "reason": "replacement_escapes_or_is_not_complete_parent_body"}
+    body_start, body_end = matching[0].body.start_byte, matching[0].body.end_byte
+    # Python's AST omits leading suite comments and blank lines. Preserve those
+    # exact bytes while still requiring the same enclosing definition and end.
+    prefix = edited.data[start:body_start].decode() if body_start >= start else None
+    comment_prefix = source.language == "python" and prefix is not None and all(
+        not line.strip() or line.lstrip().startswith("#") for line in prefix.splitlines())
+    if (body_start != start and not comment_prefix) or body_end != start + len(replacement):
         return {"status": "unsupported", "reason": "replacement_escapes_or_is_not_complete_parent_body"}
     imports = {"import_statement", "import_from_statement", "future_import_statement", "import_declaration", "import"}
     original_imports = [source.text(node) for node in walk(source.root)
