@@ -39,7 +39,7 @@ def _novelty(term, language, parameters, indentation=''):
     return _canonical(term, labels)
 
 
-def generate(corpus: dict, budget: Budget = Budget(), *, refine=_refine) -> dict:
+def generate(corpus: dict, budget: Budget = Budget(), *, refine=_refine, compose_views=None) -> dict:
     """Return JSON-serializable candidates compatible with the existing emitter."""
     if any(type(v) is not int or v < 1 for v in asdict(budget).values()):
         raise ValueError('Generation budgets must be positive integers')
@@ -154,10 +154,14 @@ def generate(corpus: dict, budget: Budget = Budget(), *, refine=_refine) -> dict
             seen.add(triple)
             attempted += 1
             options = dict(roles=_roles(A, B, C), max_nodes=budget.max_nodes, max_holes=budget.max_holes)
-            first = align_analogy(A['tree'], B['tree'], C['tree'], **options)
-            variants = [first]
-            if first.provenance.get('has_shared_gap'):
-                variants.append(align_analogy(A['tree'], B['tree'], C['tree'], order='edit_first', **options))
+            if compose_views is None:
+                first = align_analogy(A['tree'], B['tree'], C['tree'], **options)
+                variants = [first]
+                if first.provenance.get('has_shared_gap'):
+                    variants.append(align_analogy(A['tree'], B['tree'], C['tree'], order='edit_first', **options))
+            else:
+                variants = compose_views(A, B, C,
+                    capsules=tuple(capsules[r['test']['id']] for r in (A, B, C)), **options)
             attempted_orders += len(variants)
             for result in variants:
                 known, mechanical = False, None
