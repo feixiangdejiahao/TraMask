@@ -45,6 +45,7 @@ class Assertion:
     predicate: str
     expected: str
     incidental: bool
+    expression_node: Any = None
 
 
 class Flow:
@@ -85,7 +86,8 @@ class Flow:
     def add(self, kind, text, node, deps=(), types=(), constants=(), regexes=(), **meta) -> Value:
         idx = len(self.nodes)
         self.nodes.append({'id': idx, 'kind': kind, 'text': text[:600],
-                           'line': node.start_point.row + 1, 'end_line': node.end_point.row + 1, **meta})
+                           'line': node.start_point.row + 1, 'end_line': node.end_point.row + 1,
+                           'start_byte': node.start_byte, 'end_byte': node.end_byte, **meta})
         if kind in {'parameter', 'receiver', 'join', 'unknown'}:
             # Synthetic graph nodes do not span the entire enclosing function/body.
             self.nodes[-1]['end_line'] = self.nodes[-1]['line']
@@ -280,7 +282,7 @@ class Flow:
         anchor = self.add('assertion', self.source.text(node), node, [value])
         self.assertions.append(Assertion(anchor.id, node.start_point.row + 1, node.end_point.row + 1,
                                         self.source.text(node), self.source.text(actual), self.fields_in(actual),
-                                        predicate, expected, incidental))
+                                        predicate, expected, incidental, actual))
 
     def assertion_call(self, node) -> bool:
         if node.type not in CALLS:

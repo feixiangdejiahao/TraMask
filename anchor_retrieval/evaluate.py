@@ -51,7 +51,8 @@ def main():
         for method, metrics in case['methods'].items():
             rows.append({'case': cid, 'method': method, **metrics})
     summary = {}
-    for method in ('full', 'no_input_gaps', 'no_diversity', 'legacy_keywords'):
+    methods = list(dict.fromkeys(['full', 'legacy_keywords'] + [r['method'] for r in rows]))
+    for method in methods:
         summary[method] = {}
         for unit in ('test', 'assertion'):
             ranks = [c['methods'][method][unit + '_rank'] for c in cases.values()]

@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from .index import Index
+from .frontier import ObservationFrontier, rank_frontier
 from .syntax import canonical, is_test_path, json_safe, load_sources
 
 STRONG_RESOLUTION = {'local_symbol', 'import_symbol', 'constructor', 'receiver_type',
@@ -72,6 +73,7 @@ def call_input_bindings(index, flow, calls):
 
 def make_anchors(index: Index):
     records, duplicates = [], collections.defaultdict(list)
+    frontier = ObservationFrontier(index)
     index.input_donors = []
     all_tests = [u for u in index.units.values() if u.test]
     # Prefer the final repository copy; retain historical provenance separately.
@@ -178,6 +180,7 @@ def make_anchors(index: Index):
                 'calls': sorted({c.name for c in calls}),
                 'input_gap_candidates': [],
             }
+            frontier.annotate(flow, assertion, record)
             records.append(record)
     return records, {'test_units': len(all_tests), 'unique_test_units': len(unique),
                      'type_only_units_excluded': type_only, 'no_direct_or_helper_oracle': no_oracle,
@@ -268,8 +271,16 @@ def retrieve(repo: Path, patch_path: Path, language: str, trajectory_path: Path 
     records, counts = make_anchors(index)
     analyzed = time.perf_counter()
     slots = annotate_gaps(records, index.input_donors)
+    baseline = rank(records, 'legacy_keywords', patch)
     variants = {name: [r['id'] for r in rank(records, name, patch)]
-                for name in ('full', 'no_input_gaps', 'no_diversity', 'legacy_keywords')}
+                for name in ('no_input_gaps', 'no_diversity', 'legacy_keywords')}
+    variants['legacy_full'] = [r['id'] for r in rank(records, 'full', patch)]
+    for name, settings in (
+            ('full', {}),
+            ('frontier_no_dependencies', {'use_dependencies': False}),
+            ('frontier_no_expectation', {'use_expectation': False}),
+            ('frontier_no_test_rounds', {'test_rounds': False})):
+        variants[name] = [r['id'] for r in rank_frontier(records, baseline, **settings)]
     by_id = {r['id']: r for r in records}
     selections = {}
     for variant in ('full', 'legacy_keywords'):
@@ -289,7 +300,7 @@ def retrieve(repo: Path, patch_path: Path, language: str, trajectory_path: Path 
         selections[variant] = selected
     elapsed = time.perf_counter() - started
     result = {
-        'algorithm': 'assertion_dependence_retrieval_v0.1',
+        'algorithm': 'observation_frontier_retrieval_v0.2',
         'settings': {'max_call_depth': max_depth, 'max_reachable_per_entry': max_reachable,
                      'external_model_calls': 0, 'executes_subject_code': False},
         'input_hashes': {'patch_sha256': hashlib.sha256(patch.encode()).hexdigest(),
@@ -297,7 +308,7 @@ def retrieve(repo: Path, patch_path: Path, language: str, trajectory_path: Path 
                              [(s.path, hashlib.sha256(s.data).hexdigest()) for s in sources]).encode()).hexdigest()},
         'counts': {**counts, 'sources': len(sources), 'functions': len(index.units),
                    'changed_production_functions': len(index.changed), 'assertions': len(records),
-                   'affected_assertions': len(variants['full']), 'input_slots': slots,
+                   'affected_assertions': sum(bool(r['impact_symbols']) for r in records), 'input_slots': slots,
                    'analyzed_function_bodies': len(index.flows), 'parse_error_sources': len(index.parse_errors),
                    'truncated_anchor_reaches': sum(r['reach_truncated'] for r in records),
                    'field_projected_assertions': sum(bool(r['field_witnesses']) for r in records)},
@@ -307,6 +318,7 @@ def retrieve(repo: Path, patch_path: Path, language: str, trajectory_path: Path 
         'anchors': records, 'rankings': variants, 'selected_tests': selections['full'],
         'baseline_selected_tests': selections['legacy_keywords'],
         'limitations': ['May-dependence, not sound whole-language analysis.',
+                        'Observation-footprint inclusion does not imply oracle entailment or fault preservation.',
                         'Dynamic calls are labeled; call expansion is bounded.',
                         'No Tengo guest-language alias/capture semantics or TypeScript closure points-to model.',
                         'No inferred oracle validity; input novelty is a retrieval signal only.',

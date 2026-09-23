@@ -6,6 +6,7 @@ import gc
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -32,6 +33,11 @@ def main():
                                 for p in sorted((ROOT / 'anchor_retrieval').glob('*.py'))},
                 'cases': args.cases, 'repository_only': args.repository_only,
                 'external_model_calls': 0, 'target_labels_read_by_retriever': False}
+    revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True)
+    status = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=ROOT,
+                            capture_output=True, text=True)
+    manifest['git_commit'] = revision.stdout.strip() if revision.returncode == 0 else None
+    manifest['git_tracked_changes'] = status.stdout.splitlines() if status.returncode == 0 else None
     (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2))
     snapshot = args.output / 'implementation_snapshot'
     snapshot.mkdir(exist_ok=True)
