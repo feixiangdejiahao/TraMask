@@ -1,6 +1,6 @@
 # 遗漏组合测试：源码类比原型
 
-从已有测试的输入、准备步骤和断言中学习变化，用 `A : B :: C : D` 构造尚未出现的组合测试。程序负责源码提取、绑定、对应关系及代码生成；模型只对固定候选作语义筛选。当前模型为 **`ds/deepseek-v4-flash`**，通过 `.env` 中的 provider 调用。
+从已有测试的输入、准备步骤和断言中学习变化，用 `A : B :: C : D` 构造尚未出现的组合测试。程序负责源码提取、绑定、对应关系及代码生成；模型只对固定候选作语义筛选。当前模型为 **`deepseek-v4-flash`**，通过 `.env` 中的 provider 调用。
 
 **当前通用版本尚未确认检出七个 pilot 中的目标缺陷。** 旧领域算子原型曾达到 7/7，但算子是在已知这些缺陷之后设计的，存在过拟合，不能作为通用方法的结果。旧文档与运行方式已[归档](research/archive/README_pilot.md)，代码标签为 `combination-v0.1-pilot`。
 
@@ -24,13 +24,13 @@
 ```bash
 .venv/bin/python scripts/run_generic_experiment.py prepare \
   --generator analogy-views --registry pilot --case P1 \
-  --model ds/deepseek-v4-flash --output results/my_generic/P1
+  --model deepseek-v4-flash --output results/my_generic/P1
 
-# 只有 admit 联系模型；两轮各发固定的一次请求，不按结果挑选或重试。
+# 只有 admit 联系模型；两轮各最多发固定的一次请求，不按结果挑选或重试。
 for round_id in r1 r2; do
   .venv/bin/python scripts/run_generic_experiment.py admit \
     --case P1 --output results/my_generic/P1 --rerun-id "$round_id" \
-    --model ds/deepseek-v4-flash
+    --model deepseek-v4-flash
   .venv/bin/python scripts/run_generic_experiment.py freeze \
     --case P1 --output results/my_generic/P1 --rerun-id "$round_id"
   .venv/bin/python scripts/run_generic_experiment.py run \

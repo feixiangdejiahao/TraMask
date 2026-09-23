@@ -111,7 +111,7 @@ def test_short_ids_resolve_exactly_without_guessing_or_changing_source_candidate
 def test_requested_deepseek_model_uses_consistent_non_thinking_switches(monkeypatch, tmp_path):
     _, calls = cached_admission(monkeypatch, tmp_path)
     payload = calls[0]['json']
-    assert payload['model'] == 'ds/deepseek-v4-flash'
+    assert payload['model'] == 'deepseek-v4-flash'
     assert payload['thinking'] == {'type': 'disabled'}
     assert payload['reasoning_effort'] == 'none'
     assert payload['max_tokens'] == 10000

@@ -126,7 +126,7 @@ def _failure_kind(raw: dict, error: Exception) -> str:
 
 
 def request_admission(evidence: dict, candidates: list[dict], output: Path, *,
-                      model: str = "ds/deepseek-v4-flash", max_tokens: int = 10000) -> dict:
+                      model: str = "deepseek-v4-flash", max_tokens: int = 10000) -> dict:
     """Persist one request and response. Caller has already fixed all proposals."""
     policy = json.loads((ROOT / "configs/execution_policy.json").read_text())
     if not policy.get("allow_model_code_upload"):

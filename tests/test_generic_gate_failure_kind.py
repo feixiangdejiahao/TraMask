@@ -38,7 +38,7 @@ def provider(monkeypatch,tmp_path,raw=None,exc=None):
 
 
 def response(content,finish='stop',reasoning=None,details=None):
-    raw={'model':'ds/deepseek-v4-flash','choices':[{'message':{'content':content},'finish_reason':finish}],
+    raw={'model':'deepseek-v4-flash','choices':[{'message':{'content':content},'finish_reason':finish}],
          'usage':{'completion_tokens_details':details}}
     if reasoning is not None: raw['choices'][0]['message']['reasoning_content']=reasoning
     return raw
@@ -69,7 +69,7 @@ def test_failure_kind_preserves_original_validation_and_request(monkeypatch,tmp_
     assert result['valid'] is False and result['failure_kind']==kind
     assert isinstance(result['validation_error'],str) and 'accepted' not in result
     assert result['external_model_calls']==len(calls)==1
-    assert calls[0]['model']=='ds/deepseek-v4-flash'
+    assert calls[0]['model']=='deepseek-v4-flash'
     assert calls[0]['thinking']=={'type':'disabled'} and calls[0]['reasoning_effort']=='none'
     assert calls[0]['response_format']=={'type':'json_object'} and calls[0]['max_tokens']==10000
     assert json.loads((output/'manifest.json').read_text())==result
