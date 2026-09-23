@@ -201,11 +201,17 @@ def request_contract(case_id: str, retrieval: Path, output: Path, model: str,
         raise RuntimeError('Model assistance is not authorized')
     output.mkdir(parents=True, exist_ok=False)
     evidence = build_evidence(case_id, retrieval)
-    payload = {'model': model, 'temperature': 0, 'max_tokens': max_tokens,
-               'thinking': {'type': 'enabled' if thinking else 'disabled'},
+    payload = {'model': model, 'max_tokens': max_tokens,
                'messages': [{'role': 'system', 'content': SYSTEM},
                             {'role': 'user', 'content': json.dumps(evidence, ensure_ascii=False)}]}
-    if thinking:
+    if model.startswith('deepseek'):
+        payload.update(temperature=0, thinking={'type': 'enabled' if thinking else 'disabled'})
+    elif model.startswith(('gpt-5', 'gpt-6', 'o3', 'o4')):
+        payload['max_completion_tokens'] = payload.pop('max_tokens')
+        payload['reasoning_effort'] = 'medium'
+    else:
+        payload['temperature'] = 0
+    if thinking and model.startswith('deepseek'):
         payload['reasoning_effort'] = 'low'
     (output / 'request.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n')
     config = {key.lower().strip(): value for key, value in dotenv_values(ROOT / '.env').items() if value}
@@ -230,7 +236,7 @@ def request_contract(case_id: str, retrieval: Path, output: Path, model: str,
     if source.startswith('```'):
         source = source.split('\n', 1)[1].rsplit('```', 1)[0].strip()
     (output / 'predicate.py').write_text(source + '\n')
-    result = {'case_id': case_id, 'model': model, 'temperature': 0,
+    result = {'case_id': case_id, 'model': model, 'temperature': payload.get('temperature'),
               'request_sha256': hashlib.sha256((output / 'request.json').read_bytes()).hexdigest(),
               'predicate_sha256': hashlib.sha256((source + '\n').encode()).hexdigest(),
               'seconds': time.monotonic() - started, 'usage': data.get('usage'),
@@ -257,6 +263,15 @@ def generate_contract_protocol(repository: Path, selection: dict, predicate_path
     if not generated['candidates']:
         return {'files': {}, 'metadata': generated['metadata'], 'obligations': []}
     predicate = Predicate(predicate_path.read_text())
+    provenance_path = predicate_path.parent / 'manifest.json'
+    provenance = json.loads(provenance_path.read_text())
+    actual_hash = hashlib.sha256(predicate_path.read_bytes()).hexdigest()
+    if not provenance.get('predicate_valid') or provenance.get('predicate_sha256') != actual_hash:
+        raise ValueError('Predicate is not the validated, unmodified cached model output')
+    from .contract_checks import audit_predicate
+    audit = audit_predicate(predicate, generated['metadata']['facts'])
+    if audit['status'] != 'not_falsified':
+        raise ValueError('Admission predicate failed existing-test consistency audit: ' + audit['status'])
     admitted, rejected, errors = [], [], []
     controls = generated['controls']
     for proposal in generated['candidates']:
@@ -282,7 +297,9 @@ def generate_contract_protocol(repository: Path, selection: dict, predicate_path
             rejected.append(proposal['id'])
     metadata = {**generated['metadata'], 'algorithm': 'contract_admitted_oracle_transport',
                 'predicate_source': predicate_path.read_text(),
-                'predicate_sha256': hashlib.sha256(predicate_path.read_bytes()).hexdigest(),
+                'predicate_sha256': actual_hash,
+                'contract_provenance': provenance,
+                'existing_fact_audit': audit,
                 'candidate_count': len(generated['candidates']), 'admitted_count': len(admitted),
                 'rejected_count': len(rejected), 'rejected_ids': rejected, 'predicate_errors': errors,
                 'oracle_status': 'model_proposed_side_condition_on_existing_assertion',

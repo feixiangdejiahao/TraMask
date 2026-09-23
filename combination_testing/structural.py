@@ -355,7 +355,73 @@ def mine_ts_donors(repository: Path) -> list[dict]:
     return donors
 
 
-def mine_ts_schemas(retrieval: Path | dict, top_k: int = 10) -> list[dict]:
+def _schema_template(expression: str) -> tuple[str, set[str], bool]:
+    """Substitute placeholder expression nodes, retaining literal/key spelling."""
+    source = Source("schema_expression.ts", expression, "typescript")
+    replacements, calls = [], set()
+    for node in walk(source.root):
+        if node.type == "call_expression":
+            function, _ = call_parts(node)
+            if function is not None and function.type == "identifier":
+                calls.add(source.text(function))
+        if source.text(node) != "Recur":
+            continue
+        if node.type == "identifier":
+            replacements.append((node.start_byte, node.end_byte, "__cc_self"))
+        elif node.type == "shorthand_property_identifier":
+            # `{ Recur }` is simultaneously a property key and its value.
+            replacements.append((node.start_byte, node.end_byte, "Recur: __cc_self"))
+    rewritten = source.data
+    for start, end, value in sorted(replacements, reverse=True):
+        rewritten = rewritten[:start] + value.encode() + rewritten[end:]
+    return rewritten.decode(), calls, bool(replacements)
+
+
+def _schema_effect_reason(expression: str, pure_factories: set[str] | None = None) -> str | None:
+    """Recognize closed constructor terms; callbacks/donors use a separate rule.
+
+    Repeated construction during unfolding is valid only for a deterministic
+    builder. Factory annotations come from the repository, not a pilot allowlist.
+    This deliberately small grammar does not claim purity for arbitrary JS.
+    """
+    source = Source("schema_expression.ts", expression, "typescript")
+    terms = {"program", "expression_statement", "call_expression", "arguments",
+             "identifier", "object", "pair", "property_identifier", "array",
+             "string", "string_fragment", "escape_sequence", "number", "true",
+             "false", "null", "undefined", "unary_expression", "parenthesized_expression",
+             "shorthand_property_identifier", "comment"}
+    for node in walk(source.root):
+        if node.type not in terms:
+            return "builder is outside the closed constructor grammar: " + node.type
+        if node.type == "call_expression":
+            function, _ = call_parts(node)
+            if function is None or function.type != "identifier":
+                return "builder contains an unresolved or effectful callee"
+            if pure_factories is not None and source.text(function) not in pure_factories:
+                return "constructor lacks a repository purity annotation: " + source.text(function)
+        elif node.type in {"identifier", "shorthand_property_identifier"}:
+            name = source.text(node)
+            parent = node.parent
+            is_callee = parent is not None and parent.type == "call_expression" and child(parent, "function") == node
+            if not is_callee and name not in {"Recur", "undefined", "NaN", "Infinity"}:
+                return "builder captures an unresolved external binding: " + name
+    return None
+
+
+def _pure_schema_factories(repository: Path) -> set[str] | None:
+    root = repository / "library" / "src"
+    if not root.exists():
+        return None  # Standalone synthetic fixtures have no production library.
+    names = set()
+    for category in ("schemas", "methods", "actions"):
+        for path in sorted((root / category).glob("**/*.ts")):
+            if ".test" not in path.name:
+                names.update(re.findall(r"@__NO_SIDE_EFFECTS__\s*\n\s*export\s+function\s+(\w+)", path.read_text()))
+    return names
+
+
+def mine_ts_schemas(retrieval: Path | dict, top_k: int = 10, *,
+                    rejected: list | None = None, pure_factories: set[str] | None = None) -> list[dict]:
     schemas, seen = [], set()
     for seed in _seeds(retrieval, top_k):
         source = Source(seed.get("path", "seed.ts"), seed["code"], "typescript")
@@ -371,7 +437,12 @@ def mine_ts_schemas(retrieval: Path | dict, top_k: int = 10) -> list[dict]:
             if wrapper not in {"recursive", "recursiveAsync"} or len(args) != 1:
                 continue
             expression = source.text(args[0])
-            if not re.search(r"\bRecur\b", expression):
+            if not _schema_template(expression)[2]:
+                continue
+            effect_reason = _schema_effect_reason(expression, pure_factories)
+            if effect_reason:
+                if rejected is not None:
+                    rejected.append({"seed": _provenance(seed), "reason": effect_reason})
                 continue
             # Locate the test's parse(schema, input) observation, not a variable
             # called "input". Input must be a self-contained object literal.
@@ -395,21 +466,40 @@ def mine_ts_schemas(retrieval: Path | dict, top_k: int = 10) -> list[dict]:
     return schemas
 
 
+_TS_UNFOLD = '''function ccUnfold(build: (self: any) => any) {
+  let boundaryVisited = false;
+  const bottom = never();
+  let schema: any = {
+    ...bottom,
+    '~run'(dataset: any, config: any) {
+      boundaryVisited = true;
+      return bottom['~run'](dataset, config);
+    },
+  };
+  for (let depth = 0; depth < 8; depth++) schema = build(schema);
+  return { schema, reachedBoundary: () => boundaryVisited };
+}
+'''
+
+
 def generate_typescript(repository: Path, retrieval: Path | dict, top_k: int = 10) -> dict:
-    seeds = mine_ts_schemas(retrieval, top_k)
+    rejected = []
+    seeds = mine_ts_schemas(retrieval, top_k, rejected=rejected,
+                            pure_factories=_pure_schema_factories(repository))
     donors = mine_ts_donors(repository)
     imports = {"Recur", "parseAsync", "never", "pipe", "pipeAsync", "transform"}
     obligations, blocks = [], []
     for seed in seeds:
         imports.add(seed["wrapper"])
-        imports.update(re.findall(r"\b([A-Za-z_]\w*)\s*\(", seed["body"]))
+        template, constructors, _ = _schema_template(seed["body"])
+        imports.update(constructors)
         for donor in [None] + donors:
             identifier = seed["id"] + ("/identity" if donor is None else "/extend_" + _digest(donor["expression"]))
             control_id = None if donor is None else seed["id"] + "/identity"
             record_context = ", is_control:" + ("true" if donor is None else "false")
             if control_id is not None:
                 record_context += ", control_id:" + json.dumps(control_id)
-            body = re.sub(r"\bRecur\b", "__cc_self", seed["body"])
+            body = template
             unmodified_body = body
             if donor is not None:
                 composition = "pipeAsync" if seed["wrapper"].endswith("Async") else "pipe"
@@ -421,12 +511,15 @@ def generate_typescript(repository: Path, retrieval: Path | dict, top_k: int = 1
             if donor is not None:
                 nonvacuity = f'''
   const unmodified = (__cc_self: any): any => ({unmodified_body});
-  let baseline: any = never();
-  for (let depth = 0; depth < 8; depth++) baseline = unmodified(baseline);
+  const baseline = ccUnfold(unmodified);
   let baselineOutput: any;
-  try {{ baselineOutput = await parseAsync(baseline, structuredClone(input)); }}
+  try {{ baselineOutput = await parseAsync(baseline.schema, structuredClone(input)); }}
   catch (error) {{
     console.log('CC_RESULT ' + JSON.stringify({{id:{json.dumps(identifier)}, status:'invalid', relation:'recursive_unfold', details:'Unfolded baseline failed: ' + String(error){record_context}}}));
+    return;
+  }}
+  if (baseline.reachedBoundary()) {{
+    console.log('CC_RESULT ' + JSON.stringify({{id:{json.dumps(identifier)}, status:'invalid', relation:'recursive_unfold', details:'Unfolded baseline reached depth boundary'{record_context}}}));
     return;
   }}
   if (isDeepStrictEqual(expected, baselineOutput)) {{
@@ -437,11 +530,14 @@ def generate_typescript(repository: Path, retrieval: Path | dict, top_k: int = 1
             blocks.append(f'''test({json.dumps(identifier)}, async () => {{
   const input = {seed['input']};
   const build = (__cc_self: any): any => ({body});
-  let explicit: any = never();
-  for (let depth = 0; depth < 8; depth++) explicit = build(explicit);
+  const explicit = ccUnfold(build);
   let expected: any;
-  try {{ expected = await parseAsync(explicit, structuredClone(input)); }}
+  try {{ expected = await parseAsync(explicit.schema, structuredClone(input)); }}
   catch (error) {{ console.log('CC_RESULT ' + JSON.stringify({{id: {json.dumps(identifier)}, status:'invalid', relation:'recursive_unfold', details:String(error){record_context}}})); return; }}
+  if (explicit.reachedBoundary()) {{
+    console.log('CC_RESULT ' + JSON.stringify({{id:{json.dumps(identifier)}, status:'invalid', relation:'recursive_unfold', details:'Unfolding reached depth boundary'{record_context}}}));
+    return;
+  }}
 {nonvacuity}
   try {{
     const actual = await parseAsync({seed['wrapper']}(build(Recur)), structuredClone(input));
@@ -455,12 +551,12 @@ def generate_typescript(repository: Path, retrieval: Path | dict, top_k: int = 1
     content = "// Generated by finite context unfolding; no expected output literals.\n"
     content += "import { expect, test } from 'vitest';\n"
     content += "import { isDeepStrictEqual } from 'node:util';\n"
-    content += "import { " + ", ".join(sorted(imports)) + " } from './index.ts';\n\n" + "\n\n".join(blocks) + "\n"
+    content += "import { " + ", ".join(sorted(imports)) + " } from './index.ts';\n\n" + _TS_UNFOLD + "\n\n".join(blocks) + "\n"
     return {"files": {"library/src/combination.context.generated.test.ts": content},
             "command": "pnpm --dir library exec vitest run src/combination.context.generated.test.ts",
             "report_format": "jsonl", "report_path": "stdout.txt",
             "metadata": {"adapter": "typescript_context_unfold", "top_k": top_k,
-                         "seeds": seeds, "donors": donors, "obligations": obligations,
+                         "seeds": seeds, "donors": donors, "obligations": obligations, "rejected": rejected,
                          "oracle": "finite syntactic unfolding followed by ordinary parsing"}}
 
 

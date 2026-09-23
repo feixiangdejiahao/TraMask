@@ -1,8 +1,14 @@
 """Semantic construction checks for the context-lifting adapters."""
 from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
 
 from combination_testing.structural import (
     _guest_free_identifiers,
+    _schema_effect_reason,
+    _TS_UNFOLD,
     _toplevel_bindings,
     generate_go,
     generate_typescript,
@@ -85,9 +91,25 @@ expect(parse(Weird, payload)).toStrictEqual(payload);
     assert "array(Recur)" in schemas[0]["body"]
 
 
+def test_schema_substitution_preserves_property_keys_and_string_literals(tmp_path: Path):
+    data = retrieval('''test('token collision', () => {
+const S = recursive(object({ Recur: array(Recur), tag: literal('Recur fake(') }));
+const payload = { Recur: [], tag: 'Recur fake(' };
+expect(parse(S, payload)).toStrictEqual(payload);
+});''', "collision.test.ts")
+    artifact = generate_typescript(tmp_path, data)
+    generated = artifact["files"]["library/src/combination.context.generated.test.ts"]
+    assert "Recur: array(__cc_self)" in generated
+    assert "literal('Recur fake(')" in generated
+    assert " fake," not in generated.split("from './index.ts';")[0]
+    literal_only = retrieval("test('literal', () => { const S = recursive(object({ tag: literal('Recur') })); const payload = { tag: 'Recur' }; expect(parse(S, payload)).toStrictEqual(payload); });", "literal.test.ts")
+    assert mine_ts_schemas(literal_only) == []
+
+
 def test_ts_only_migrates_pure_shape_preserving_donors(tmp_path: Path):
     test_dir = tmp_path / "library" / "src" / "actions"
     test_dir.mkdir(parents=True)
+    (test_dir / "factories.ts").write_text("// @__NO_SIDE_EFFECTS__\nexport function object() {}\n// @__NO_SIDE_EFFECTS__\nexport function array() {}\n")
     (test_dir / "donors.test.ts").write_text('''
 const useful = transform((value: {x: string}) => ({...value, extra: 42}));
 const shrink = transform((value: string) => value.length);
@@ -110,3 +132,42 @@ expect(parse(S, data)).toStrictEqual(data);
     assert "parseAsync(explicit" in code
     assert "expect(actual).toStrictEqual(expected)" in code
     assert "extra: 42, child" not in code
+
+
+def test_stateful_schema_builders_are_rejected_before_generation():
+    assert _schema_effect_reason("object({ branches: array(array(Recur)), caption: string() })",
+                                 {"object", "array", "string"}) is None
+    for expression in (
+        "object({ branches: array(Recur), tick: optional(number(), Date.now) })",
+        "object({ branches: array(Recur), tick: literal(counter++) })",
+        "object({ branches: array(Recur), tick: literal(external) })",
+    ):
+        assert _schema_effect_reason(expression)
+    assert _schema_effect_reason("customFactory(Recur)", {"object", "array"})
+
+
+def test_unfold_boundary_is_detected_even_if_fallback_recovers(tmp_path: Path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is unavailable for the generated TypeScript runtime check")
+    version = subprocess.run([node, "--version"], capture_output=True, text=True, check=True).stdout
+    if int(version.lstrip("v").split(".")[0]) < 22:
+        pytest.skip("Generated TypeScript runtime check requires Node 22+")
+    # Independent tiny schemas model the relevant API: fallback consumes an
+    # issue but cannot erase the fact that the unfolding boundary was visited.
+    source = '''
+function never() { return { '~run'(dataset: any, config: any) { return {...dataset, issues: ['bottom']}; } }; }
+''' + _TS_UNFOLD + '''
+const fallback = ccUnfold((child: any) => ({ '~run'(dataset: any, config: any) {
+  const output = child['~run'](dataset, config);
+  return output.issues ? {value: 'recovered'} : output;
+}}));
+const recovered = fallback.schema['~run']({value: 'input'}, {});
+if (recovered.issues || !fallback.reachedBoundary()) throw new Error('recovered cutoff must be rejected');
+const terminal = ccUnfold((_child: any) => ({ '~run'(dataset: any) { return dataset; } }));
+terminal.schema['~run']({value: 'input'}, {});
+if (terminal.reachedBoundary()) throw new Error('unvisited cutoff must remain applicable');
+'''
+    path = tmp_path / "unfold.ts"
+    path.write_text(source)
+    subprocess.run([node, "--experimental-strip-types", str(path)], check=True, capture_output=True, text=True)

@@ -19,6 +19,7 @@ from .structural import generate_structural
 from .runner import freeze_artifact
 from .contracts import generate_contract_protocol
 from .relational import generate_relational
+from .screening import generate_screened
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,7 +39,18 @@ def generate_case(case: dict, retrieval: Path, output: Path, *, top_k: int = 10,
                 'generator_inputs': ['candidate source', 'retrieved developer/agent tests'],
                 'reference_inputs_read': False, 'target_labels_read': False}
     if case['language'] == 'python':
-        if protocol_mode == 'contract':
+        if protocol_mode == 'screened':
+            cache = contracts / case['id'] if contracts else None
+            if cache and (cache / 'manifest.json').is_file():
+                protocol = generate_screened(cache)
+                if protocol['case_id'] != case['id']:
+                    raise ValueError('Screening cache belongs to a different case')
+            else:
+                probe = generate_protocol(repository, selection, top_k=top_k)
+                if probe['files']:
+                    raise ValueError(f"Missing frozen screening cache for {case['id']}")
+                protocol = probe
+        elif protocol_mode == 'contract':
             predicate_path = contracts / case['id'] / 'predicate.py' if contracts else None
             if predicate_path and predicate_path.is_file():
                 protocol = generate_contract_protocol(repository, selection, predicate_path, top_k=top_k)
@@ -90,7 +102,7 @@ def main():
     parser.add_argument('--retrieval', type=Path,
                         default=ROOT / 'results/anchor_retrieval/frontier_final')
     parser.add_argument('--top-k', type=int, default=10)
-    parser.add_argument('--protocol-mode', choices=['empirical', 'guarded', 'contract', 'relational'],
+    parser.add_argument('--protocol-mode', choices=['empirical', 'guarded', 'contract', 'relational', 'screened'],
                         default='empirical')
     parser.add_argument('--contracts', type=Path)
     args = parser.parse_args()
