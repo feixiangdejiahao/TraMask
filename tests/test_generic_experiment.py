@@ -153,3 +153,39 @@ def test_large_patch_context_uses_changed_enclosing_function(tmp_path):
     assert [row["path"] for row in context["files"]] == ["module.py"]
     assert context["files"][0]["mode"] == "changed_enclosing_functions"
     assert "Sentinel public contract" in context["files"][0]["snippets"][0]["code"]
+
+
+def test_analogy_cli_prepares_and_freezes_joint_input_and_oracle_change(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'test_values.py').write_text('''def f(value):
+    return [2 * x for x in value] if isinstance(value, list) else 2 * value
+
+def test_a():
+    assert f(3) == 6
+
+def test_b():
+    assert f([3]) == [6]
+
+def test_c():
+    assert f(5) == 10
+''')
+    registry = tmp_path / 'registry.json'
+    registry.write_text(json.dumps([{'id': 'toy', 'language': 'python', 'repository': str(repo)}]))
+    hashes = {'scripts/run_generic_experiment.py': cli.digest(cli.ROOT / 'scripts/run_generic_experiment.py')}
+    monkeypatch.setattr(cli, 'algorithm_hashes', lambda: hashes)
+    args = argparse.Namespace(registry=str(registry), case='toy', case_root=None,
+        output=tmp_path / 'out', retrieval=None, max_candidates=128, max_files=400,
+        top_k=10, model='not-called', generator='analogy', rerun_id='r1',
+        direct_baseline=True, timeout=10)
+    cli.prepare(args)
+    generated = json.loads((args.output / 'generated.json').read_text())
+    wanted = [row for row in generated['candidates'] if 'f([5]) == [10]' in row['edits'][0]['after']]
+    assert wanted and wanted[0]['oracle']['mode'] == 'transport_from_source'
+    assert json.loads((args.output / 'prepare.json').read_text())['generator'] == 'analogy'
+    cli.freeze(args)
+    artifact = args.output / 'frozen/direct'
+    manifest = json.loads((artifact / 'manifest.json').read_text())
+    assert any(row['candidate_id'] == wanted[0]['id'] for row in manifest['metadata']['obligations'])
+    assert manifest['metadata']['semantic_admission'] is False
+    assert not (args.output / 'admission').exists()

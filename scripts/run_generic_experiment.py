@@ -37,6 +37,7 @@ def write_json(path: Path, value: object) -> None:
 
 def algorithm_files() -> list[Path]:
     return sorted([*ROOT.glob("generic_composition/*.py"), *ROOT.glob("anchor_retrieval/*.py"),
+                   *ROOT.glob("experimental/generic_v2/*.py"),
                    ROOT / "combination_testing/runner.py", ROOT / "combination_testing/container_runner.py",
                    ROOT / "combination_testing/test_reports.py", Path(__file__).resolve()])
 
@@ -167,7 +168,13 @@ def checked_preparation(args, *, check_code: bool = True) -> tuple[dict, dict]:
 def prepare(args) -> dict:
     from anchor_retrieval.retrieve import retrieve
     from generic_composition.corpus import build_corpus
-    from generic_composition.engine import Budget, gate_evidence, generate
+    generator = getattr(args, 'generator', 'context')
+    if generator == 'analogy':
+        from experimental.generic_v2.generate import Budget, gate_evidence, generate
+    elif generator == 'context':
+        from generic_composition.engine import Budget, gate_evidence, generate
+    else:
+        raise ValueError('Unknown generator')
 
     if not 1 <= args.max_candidates <= 128:
         raise ValueError("The preregistered candidate budget is 1..128")
@@ -181,6 +188,7 @@ def prepare(args) -> dict:
         shutil.copyfile(ROOT / name, destination)
     write_json(output / "case.json", case)
     manifest = {"case_id": args.case, "status": "preparing", "algorithm_sha256": hashes,
+                "generator": generator,
                 "registry_path": str(registry), "registry_sha256": digest(registry),
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "declared_admission_rounds": ["r1", "r2"],
@@ -418,7 +426,8 @@ def main() -> None:
         sub.add_argument("--output", required=True, type=Path)
         sub.add_argument("--case-root", type=Path)
         if name == "prepare":
-            sub.add_argument("--model", default="ds/deepseek-v4-flash")
+            sub.add_argument("--model", default="closeai/gpt-5.6-luna")
+            sub.add_argument("--generator", choices=("context", "analogy"), default="context")
             sub.add_argument("--retrieval", type=Path)
             sub.add_argument("--max-candidates", type=int, default=128)
             sub.add_argument("--top-k", type=int, default=10)
@@ -427,7 +436,7 @@ def main() -> None:
             sub.add_argument("--rerun-id", choices=("r1", "r2"), default="r1")
         if name == "admit":
             sub.add_argument("--cache-output", type=Path)
-            sub.add_argument("--model", default="ds/deepseek-v4-flash")
+            sub.add_argument("--model", default="closeai/gpt-5.6-luna")
             sub.add_argument("--max-tokens", type=int, default=10000)
         if name in {"freeze", "run"}:
             sub.add_argument("--direct-baseline", action="store_true")
