@@ -10,6 +10,9 @@
 | batch2 | f0b75b2 | 14 | 0/7；0/7 | 15；16 | 2；2 | P1/r1 冻结失败；两轮各两个候选运行单元编译阻断 |
 | batch3 | 1843b0a | 14 | 0/7；0/7（全部协议阻断） | — | — | 14 次 HTTP 200 均无有效最终答案；0 冻结候选、0 候选执行 |
 | batch4 | d0c6d93 | 14 | 0/7；0/7 | 17；17 | 4；4 | 两轮各两个候选运行单元编译阻断；另保留 8 次模型发送前调度失败 |
+| batch5 | 5888ca8 | 14 | 0/7；0/7 | 17；17 | 4；4 | 两轮各两个候选运行单元受生成 Go 代码编译阻断 |
+
+第六批 `ab1552b` 正在准备，尚无完成后的独立评价；不将进行中的批次计入上表。该批保留相同七例源码输入、两轮各一次模型请求及 disabled thinking / 10,000 输出 tokens 配置，另行冻结通用父测试准入与断言排序、源值向量期望模板及 Go 前缀局部变量用途处理。
 
 第二批只有请求提示增加 JSON 字样，源输入与算法策略不据第一批执行反馈改变。该修改解决 provider 对 JSON 输出模式的提示要求。首批 12 次失败用量未知，另外两次共报告 29,692 tokens；第二批报告 171,196 tokens。模型请求名是 `deepseek-v4-flash`，响应名为 `deepseek-flash`，不能仅根据别名证明 provider 的内部路由。
 
@@ -21,6 +24,14 @@
 
 第四批还发生一次外层调度错误：部分 prepare 未完成时提前启动 complete，P4 至 P7 两轮的 8 个 CLI 在读取缺失的 `transport_prepare.json` 时退出，位置早于创建轮次目录和模型发送。全部 prepare 完成后，只对这 8 个从未发送的单元发起首次请求，另外 6 份响应保留。原始失败日志、恢复计划及两份 complete 账本均保留；22 次 CLI 调用对应 14 次模型调用，每单元一次，不将这 8 次失败隐藏或计作模型重试。第四批独立核对用量 **195,646 tokens**，四个批次已知合计 725,162 tokens，仍不含首批 12 次失败的未知用量及批次外诊断。
 
+第五批 14 次模型请求全部有效，104 项义务冻结，两轮各 52 项。独立评价在任何第五批候选执行之前，于 **07:38:02.191113 UTC** 封存 37 valid、21 invalid、34 inapplicable、12 unknown；全部生成身份在执行后仍匹配封存。104 项完整测试定义及 108 项来源控制均通过源码重构检查；94 项编辑与第四批同轮产物相同，10 项义务具有新测试体。候选运行后，72 项实际执行、32 项因生成 Go 代码编译失败而阻断；37 个有效 oracle 中 28 项通过、9 项未执行，**没有有效 oracle 的受控候选失败**。因此两轮各自的已确认目标命中为 0/7；这不证明所有目标均可被本批有效执行所覆盖。没有需要目标匹配复核的有效报警，未读取参考补丁或隐藏 verifier，未执行参考。
+
+第五批两轮合计 34 项已确认错误报警、8 项未知报警；另两项未知义务通过但各有一个来源控制 skip，标签仍保留 unknown。来源控制阻断共 34 项，与 32 项编译阻断重叠，不能相加。编译诊断包括生成变量未使用、嵌套调用的 error 返回值不满足 Object 参数类型，以及嵌套 helper 的 int64 返回值不满足 Object 参数类型，均属生成代码问题。调度器要求全部前置阶段成功后才进入下一阶段，本批 prepare 7、complete 14、freeze 14 均成功；账本保留耗时但缺少独立绝对开始时间，不能仅由 mtime 证明完整时序。
+
+第五批响应体与缓存用量核对一致：prompt 197,980、completion 3,180，共 **201,160 tokens**。五个已完成批次的已知用量累计 **926,322 tokens**，仍不含首批 12 次失败的未知用量、批次外诊断和进行中的第六批；不将 token 数称为货币成本。模型协议审计 v1 的 case_id 路径段错误由 v2 更正，调用数、哈希和用量均未变，v1 保留。
+
+第五批补全形式的事后诊断也经独立复核：104 项接受表达式全部是可静态还原的常量字面量，没有使用 `pre` 或 `arg`，其中 99 项的值与相应源期望槽相同；投影观察按其声明的源槽核对，不能一律取 `pre[0]`。没有实际检查的适用源见证。8 项已提交表达式因未知名字被拒绝：`tmp_path` 两项、`false` 四项、`true` 两项；另 180 项只是未提供补全的已展示候选，不能混算为非法提交。常量本来允许，源值相同也不证明 oracle 适用；这些统计不构成方法有效性证明或失败因果归因。[原始诊断](../results/semantic_transport/batch5/completion_expression_audit_v1.json)、[独立复核](../results/semantic_transport/batch5/completion_expression_independent_review_v1.json)。
+
 第二批 106 项物化，98 项完成冻结；其中 72 项实际执行、26 项受编译阻断。全部冻结项均在本批候选执行前完成独立 oracle 标签封存：33 valid、9 invalid、50 inapplicable、6 unknown。33 个有效 oracle 均通过，没有需要目标匹配复核的有效报警。运行叶子、静态测试义务和任务数分别计数，来源控制阻断等诊断可能与编译阻断重叠，不能直接求和。
 
 第一批 P4 两轮先封存 oracle，再运行候选；第二批同样先封存再执行。以上两批均未读取参考补丁、运行参考或读取隐藏 verifier。没有真实缺陷证据时，不以参考通过来证明 oracle。
@@ -30,6 +41,8 @@
 本地完整证据：[batch1 评价](../results/semantic_transport/batch1/candidate_evaluation_v1.json)、[batch2 评价](../results/semantic_transport/batch2/candidate_evaluation_v1.json)、[第二批事前封存](../results/semantic_transport/batch2/oracle_audit_before_reference.json)、[batch3 评价](../results/semantic_transport/batch3/candidate_evaluation_v1.json)、[第三批协议与用量审计](../results/semantic_transport/batch3/completion_protocol_audit_v1.json)、[第三批空项封存](../results/semantic_transport/batch3/oracle_audit_before_reference.json)。旧失败与冻结文件保留，不覆盖。第三批独立评价同样未读取参考补丁或隐藏 verifier。
 
 第四批证据：[候选评价](../results/semantic_transport/batch4/candidate_evaluation_v1.json)、[事前 oracle 封存](../results/semantic_transport/batch4/oracle_audit_before_reference.json)、[执行及编译审计](../results/semantic_transport/batch4/candidate_execution_audit_v1.json)、[调度恢复及请求审计](../results/semantic_transport/batch4/orchestration_audit_v1.json)、[来源控制核对](../results/semantic_transport/batch4/source_control_audit_v2.json)。来源控制审计 v1 的两个 Go raw-string 扫描假差异在 v2 中修正；v1 仍保留。
+
+第五批证据：[独立评价报告](../results/semantic_transport/batch5/evaluation_report.md)、[候选评价](../results/semantic_transport/batch5/candidate_evaluation_v1.json)、[事前 oracle 封存](../results/semantic_transport/batch5/oracle_audit_before_reference.json)、[封存回执](../results/semantic_transport/batch5/oracle_seal_receipt.json)、[执行及编译审计](../results/semantic_transport/batch5/candidate_execution_audit_v1.json)、[来源控制核对](../results/semantic_transport/batch5/source_control_audit_v1.json)、[模型协议与用量审计](../results/semantic_transport/batch5/completion_protocol_audit_v2.json)。旧产物不覆盖，执行后不重选测试或修改 oracle。
 
 ## 由证据得到的限制与后续改动
 

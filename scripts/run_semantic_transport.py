@@ -69,6 +69,9 @@ def prepare(args) -> dict:
     budget = proposals.Budget(max_candidates=128, shown_candidates=24, top_k=10)
     pending = proposals.generate(corpus, budget, retrieval=json.loads(payloads["retrieval.json"]))
     shown = model.presentation(corpus, source_evidence, pending)
+    profile = getattr(args, "completion_profile", "standard")
+    if profile != "standard":
+        shown["completion_profile"] = profile
     # Use the same canonical JSON round trip as completion and cache replay.
     shown = json.loads(model.encoded(shown))
     model.validate_input(shown, pending)
@@ -104,12 +107,14 @@ def prepare(args) -> dict:
                 "declared_completion_rounds": ROUNDS,
                 "budget": {"max_candidates": 128, "shown_candidates": 24, "top_k": 10,
                            "max_completions_per_round": model.MAX_COMPLETIONS,
-                           "model_calls_per_round": 1, "max_output_tokens_per_round": model.MAX_TOKENS,
+                           "model_calls_per_round": 1, "max_output_tokens_per_round": request["max_tokens"],
                            "max_request_bytes": model.MAX_REQUEST_BYTES,
                            "max_response_bytes": model.MAX_RESPONSE_BYTES},
                 "proposal_counts": pending["counts"], "external_model_calls": 0,
                 "subject_execution": False, "reference_or_verifier_inputs": False,
                 "execution_outcomes": False, "corpus_coverage": corpus.get("coverage", {})}
+    if profile != "standard":
+        manifest["completion_profile"] = profile
     write_json(output / "transport_prepare.json", manifest)
     return {"stage": "prepare", "case_id": args.case, "output": str(output),
             "counts": pending["counts"], "rounds": ROUNDS}
@@ -137,9 +142,13 @@ def checked_inputs(args, *, check_code=True) -> dict:
     pending = json.loads((output / "pending.json").read_bytes())
     shown = json.loads((output / "input.json").read_bytes())
     model.validate_input(shown, pending)
+    request = model.request_payload(shown)
+    if (manifest.get("completion_profile", "standard") != shown.get("completion_profile", "standard")
+            or manifest["budget"]["max_output_tokens_per_round"] != request["max_tokens"]):
+        raise ValueError("Prepared completion profile or token budget differs from the frozen request")
     if (model.encoded(model.id_mapping(pending)) != (output / "id_map.json").read_bytes()
             or model.encoded(pending["candidates"]) != (output / "proposals.json").read_bytes()
-            or model.encoded(model.request_payload(shown)) != (output / "request_template.json").read_bytes()):
+            or model.encoded(request) != (output / "request_template.json").read_bytes()):
         raise ValueError("Prepared presentation differs from immutable proposals")
     return manifest
 
@@ -326,6 +335,7 @@ def main() -> None:
         sub.add_argument("--output", required=True, type=Path)
         if name == "prepare":
             sub.add_argument("--source-prepared", required=True, type=Path)
+            sub.add_argument("--completion-profile", choices=model.COMPLETION_PROFILES, default="standard")
         else:
             sub.add_argument("--rerun-id", choices=ROUNDS, required=True)
         if name == "freeze":

@@ -20,6 +20,7 @@ from . import contracts, oracle
 ROOT = Path(__file__).resolve().parents[2]
 MODEL = "deepseek-v4-flash"
 MAX_TOKENS = 10000
+COMPLETION_PROFILES = ("standard", "reasoned_32k")
 MAX_COMPLETIONS = 8
 MAX_REQUEST_BYTES = 1_048_576
 MAX_RESPONSE_BYTES = 2_097_152
@@ -193,12 +194,26 @@ def presentation(corpus: dict, evidence: dict, pending: dict) -> dict:
             "max_completions": MAX_COMPLETIONS}
 
 
+def completion_settings(shown: dict) -> dict:
+    """Validate the frozen profile; it cannot override any other request setting."""
+    profile = shown.get("completion_profile", "standard")
+    if type(profile) is not str or profile not in COMPLETION_PROFILES:
+        raise ValueError("Unknown completion profile")
+    if profile == "reasoned_32k":
+        return {"max_tokens": 32000, "thinking": {"type": "enabled"}, "reasoning_effort": "low"}
+    return {"max_tokens": MAX_TOKENS, "thinking": {"type": "disabled"}, "reasoning_effort": "none"}
+
+
 def request_payload(shown: dict) -> dict:
-    payload = {"model": MODEL, "max_tokens": MAX_TOKENS, "temperature": 0,
-               "thinking": {"type": "disabled"}, "reasoning_effort": "none",
+    settings = completion_settings(shown)
+    # The profile is frozen transport metadata. Both profiles receive exactly
+    # the same system and user content for the same source-selected candidates.
+    semantic_input = {key: value for key, value in shown.items() if key != "completion_profile"}
+    payload = {"model": MODEL, "max_tokens": settings["max_tokens"], "temperature": 0,
+               "thinking": settings["thinking"], "reasoning_effort": settings["reasoning_effort"],
                "response_format": {"type": "json_object"}, "tool_choice": "none",
                "messages": [{"role": "system", "content": SYSTEM},
-                            {"role": "user", "content": json.dumps(shown, sort_keys=True,
+                            {"role": "user", "content": json.dumps(semantic_input, sort_keys=True,
                                                                       ensure_ascii=True, allow_nan=False)}]}
     if len(encoded(payload)) > MAX_REQUEST_BYTES:
         raise ValueError("Completion request exceeds the frozen request byte budget")
@@ -206,6 +221,7 @@ def request_payload(shown: dict) -> dict:
 
 
 def validate_input(shown: dict, pending: dict) -> None:
+    completion_settings(shown)
     ids = [row["candidate_id"] for row in shown["candidates"]]
     if ids != list(id_mapping(pending)):
         raise ValueError("Presentation differs from the frozen candidate ordering")
