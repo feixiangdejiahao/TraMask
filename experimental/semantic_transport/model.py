@@ -172,7 +172,7 @@ def presentation(corpus: dict, evidence: dict, pending: dict) -> dict:
 
 def request_payload(shown: dict) -> dict:
     payload = {"model": MODEL, "max_tokens": MAX_TOKENS, "temperature": 0,
-               "thinking": {"type": "enabled"}, "reasoning_effort": "medium",
+               "thinking": {"type": "disabled"}, "reasoning_effort": "none",
                "response_format": {"type": "json_object"}, "tool_choice": "none",
                "messages": [{"role": "system", "content": SYSTEM},
                             {"role": "user", "content": json.dumps(shown, sort_keys=True,
@@ -286,8 +286,10 @@ def request_completion(shown: dict, pending: dict, output: Path) -> dict:
         record.update(response_sha256=digest(encoded(raw)),
                       response_model=raw.get("model") if type(raw) is dict else None,
                       usage=raw.get("usage") if type(raw) is dict else None)
+        if (type(raw) is dict and type(raw.get("choices")) is list
+                and len(raw["choices"]) == 1 and type(raw["choices"][0]) is dict):
+            record["finish_reason"] = raw["choices"][0].get("finish_reason")
         content = response_content(raw)
-        record["finish_reason"] = raw["choices"][0].get("finish_reason")
         (output / "completion.txt").write_text(content)
         validation = resolve_completion(content, pending)
         write_json(output / "validation.json", validation)

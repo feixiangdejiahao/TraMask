@@ -90,8 +90,8 @@ class CompletionCacheTests(unittest.TestCase):
                 self.assertEqual(request["model"], "deepseek-v4-flash")
                 self.assertEqual(request["max_tokens"], 10000)
                 self.assertEqual(request["temperature"], 0)
-                self.assertEqual(request["thinking"], {"type": "enabled"})
-                self.assertEqual(request["reasoning_effort"], "medium")
+                self.assertEqual(request["thinking"], {"type": "disabled"})
+                self.assertEqual(request["reasoning_effort"], "none")
                 self.assertIn("json", request["messages"][0]["content"].lower())
                 self.assertEqual(request["response_format"], {"type": "json_object"})
                 self.assertEqual(result["usage"], raw["usage"])
@@ -189,6 +189,22 @@ class CompletionCacheTests(unittest.TestCase):
                 self.assertEqual(len(provider.requests), 1)
                 self.assertEqual(len((root / "round/response.body").read_bytes()), 13)
                 self.assertIn("seconds", json.loads((root / "round/manifest.json").read_bytes()))
+
+    def test_missing_final_answer_retains_finish_reason_and_usage(self):
+        corpus, evidence, pending = synthetic_inputs()
+        shown = model.presentation(corpus, evidence, pending)
+        for content, reason in (("", "length"), ("   ", "stop")):
+            raw = envelope(content)
+            raw["choices"][0]["finish_reason"] = reason
+            with self.subTest(reason=reason), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with FakeProvider(root, raw) as provider:
+                    result = model.request_completion(shown, pending, root / "round")
+                    self.assertFalse(result["valid"])
+                    self.assertNotIn("accepted", result)
+                    self.assertEqual(result["finish_reason"], reason)
+                    self.assertEqual(result["usage"], raw["usage"])
+                    self.assertEqual(len(provider.requests), 1)
 
     def test_presentation_deduplicates_source_and_does_not_show_implementation(self):
         corpus, evidence, pending = synthetic_inputs(2)
