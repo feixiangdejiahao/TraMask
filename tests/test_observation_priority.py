@@ -108,13 +108,26 @@ def test_state_operation_with_only_may_effect_path_is_not_called_value_dependenc
     assert reverse['changed_calls'][0]['side'] == 'A_deleted_or_changed'
 
 
-def test_unknown_effect_sharing_a_binding_stays_unknown_and_remains_in_neighbors(tmp_path):
+def test_unknown_argument_type_adds_only_may_effect_and_remains_in_neighbors(tmp_path):
     records, facts = corpus(tmp_path, {
         'A': 'value = unknown_factory()\nassert observe(value) == 1',
         'B': 'value = unknown_factory()\nmystery(value)\nassert observe(value) == 1',
     })
     priority = edit_priority(features(records, facts, 'A'), features(records, facts, 'B'))
-    assert priority['kind'] == 'shared_binding_unknown'
+    # Unknown argument types now retain an explicit possible mutation edge.
+    # This improves search provenance, without becoming a value-dependence or
+    # semantic-admission proof: score 2 is may-effect, while value is score 3.
+    assert priority['kind'] == 'may_effect'
+    assert priority['score'] == 2
+    assert priority['new_observations'] == 0
+    assert all(call['connection'] == 2 for call in priority['changed_calls'])
+    capsule = facts[records['B']['test']['id']][0]
+    graph = capsule['bindings']
+    mystery = next(node for node in graph['slice_nodes'] if node['kind'] == 'call' and node['call'] == 'mystery')
+    assert any(edge['kind'] == 'may_effect' and edge['to'] == mystery['id'] for edge in graph['slice_edges'])
+    assert graph['alias_precision'] == 'unknown'
+    assert 'mystery' in graph['unknown_effects']
+    assert 'call_effects_and_aliases_not_proved' in capsule['unknowns']
     assert rank_neighbors(records['A'], [records['B']], capsules=facts, phase='edit') == [records['B']]
 
 
