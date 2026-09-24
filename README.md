@@ -8,7 +8,8 @@
 - [本轮实验与失败记录](research/semantic_transport_results.md)
 - [本轮独立评价约定](research/semantic_composition_evaluation_plan.md)
 - [历史类比方格基线](research/method_design_analogy_baseline.md)
-- [五小时实验交付与保留基线](research/timeboxed_experiment_report.md)
+- [本轮五小时实验记录](research/semantic_transport_timebox_report.md)
+- [上一轮五小时实验交付与保留基线](research/timeboxed_experiment_report.md)
 - [跨版本实验、失败与模型成本](research/generic_generation_cross_version_results.md)
 - [实验评价约定](research/generic_generation_evaluation_plan.md)与[版本选择规则](research/generic_version_selection.md)
 - [观察前沿检索](research/observation_frontier_method.md)及[独立检索结果](research/observation_frontier_experiment.md)
@@ -39,6 +40,8 @@ for round_id in r1 r2; do
 done
 # 独立评审并封存 oracle 后，再分别 run --program candidate。
 ```
+
+prepare 默认使用标准配置。显式添加 `--completion-profile reasoned_32k` 可使用预先登记的推理预算对照；它保持程序候选与语义消息不变，仅调整输出上限和推理设置。配置、请求及缓存均按轮冻结。
 
 source-only preparation 可由下面通用 CLI 的 `prepare --generator context` 建立。下面保留整测试类比基线运行示例；各输出目录必须是新目录：
 
