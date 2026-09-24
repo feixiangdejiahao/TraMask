@@ -17,9 +17,10 @@ BOX = '''class Box:
 '''
 
 
-def corpus_for(tmp_path, code):
-    (tmp_path / 'test_regions.py').write_text(code)
-    return build_corpus(tmp_path, 'python')
+def corpus_for(tmp_path, code, language='python'):
+    filename = {'python': 'test_regions.py', 'go': 'regions_test.go', 'typescript': 'regions.test.ts'}[language]
+    (tmp_path / filename).write_text(code)
+    return build_corpus(tmp_path, language)
 
 
 def edited(corpus, candidate):
@@ -367,3 +368,327 @@ def test_target():
     generated = generate_state_regions(corpus)
     assert generated['candidates'] == []
     assert generated['skipped']['literal_closure_multiline_string_requires_byte_preserving_renderer']
+
+
+GO_BOX = '''package toy
+import "testing"
+type Box struct { value int }
+func NewBox() *Box { return &Box{} }
+func Put(amount int, box *Box) { box.value += amount }
+func (box *Box) Read() int { return box.value }
+'''
+
+
+def test_go_control_and_local_callback_do_not_hide_later_straight_line_region(tmp_path):
+    corpus = corpus_for(tmp_path, GO_BOX + '''func TestDonor(t *testing.T) {
+    if false { t.Log("unrelated") }
+    callback := func() { t.Log("unused") }
+    _ = callback
+    obj := NewBox()
+    amount := 3
+    copied := amount
+    alias := obj
+    Put(copied, alias)
+    if obj.Read() != 3 { t.Fatal("wrong") }
+}
+func TestTarget(t *testing.T) {
+    receiver := NewBox()
+    actual := receiver.Read()
+    if actual != 0 { t.Fatal("wrong") }
+}
+''', 'go')
+    assert generate_state_contexts(corpus)['candidates'] == []
+    result = generate_state_regions(corpus)
+    candidate = next(row for row in result['candidates']
+                     if corpus['tests'][row['base_test_id']]['name'] == 'TestTarget')
+    assert candidate['language'] == 'go'
+    assert candidate['arg_values'] == [3]
+    assert candidate['provenance']['receiver_mapping'] == {'alias': 'receiver'}
+    assert candidate['provenance']['observation_state_witnesses']
+    inserted = candidate['edits'][0]['after']
+    assert 'Put(' in inserted and ', receiver)' in inserted
+    assert 'NewBox' not in inserted and 'callback' not in inserted
+    changed = edited(corpus, candidate)
+    assert changed.index(inserted.strip()) < changed.index('actual := receiver.Read()')
+    assert not emit(corpus, [candidate])['unsupported']
+
+
+def test_go_explicit_block_regions_keep_original_assertion_guards(tmp_path):
+    corpus = corpus_for(tmp_path, GO_BOX + '''func TestBlocks(t *testing.T) {
+    {
+        obj := NewBox()
+        Put(4, obj)
+        if obj.Read() != 4 { t.Fatal("wrong") }
+    }
+    {
+        receiver := NewBox()
+        actual := receiver.Read()
+        if actual != 0 { t.Fatal("wrong") }
+    }
+}
+''', 'go')
+    assert generate_state_contexts(corpus)['candidates'] == []
+    result = generate_state_regions(corpus)
+    candidate = next(row for row in result['candidates'] if row['arg_values'] == [4])
+    assert candidate['source_test_ids'] == [candidate['base_test_id']]
+    assert len(candidate['provenance']['recipient_region']['context']) == 1
+    assert 'Put(4, receiver)' in candidate['edits'][0]['after']
+    assert not emit(corpus, [candidate])['unsupported']
+
+
+def test_go_cross_region_local_callee_shadow_stays_unknown(tmp_path):
+    corpus = corpus_for(tmp_path, GO_BOX + '''func TestDonor(t *testing.T) {
+    Put := func(amount int, box *Box) { box.value = amount }
+    if false { t.Log("unrelated") }
+    obj := NewBox()
+    Put(4, obj)
+    if obj.Read() != 4 { t.Fatal("wrong") }
+}
+func TestTarget(t *testing.T) {
+    receiver := NewBox()
+    if receiver.Read() != 0 { t.Fatal("wrong") }
+}
+''', 'go')
+    assert generate_state_regions(corpus)['candidates'] == []
+
+
+def test_go_callback_subtests_are_explicitly_outside_available_capsules(tmp_path):
+    corpus = corpus_for(tmp_path, GO_BOX + '''func TestNested(t *testing.T) {
+    t.Run("donor", func(t *testing.T) {
+        obj := NewBox()
+        Put(4, obj)
+        if obj.Read() != 4 { t.Fatal("wrong") }
+    })
+    t.Run("target", func(t *testing.T) {
+        obj := NewBox()
+        if obj.Read() != 0 { t.Fatal("wrong") }
+    })
+}
+''', 'go')
+    assert corpus['capsules'] == []
+    generated = generate_state_regions(corpus)
+    assert generated['candidates'] == []
+    assert generated['skipped']['no_observation_capsule']
+
+
+def test_typescript_regions_and_shorthand_literal_closure_preserve_property_keys(tmp_path):
+    corpus = corpus_for(tmp_path, '''import { Box } from './box';
+describe('scope', () => {
+    it('donor', () => {
+        if (condition) { unrelated(); }
+        class Unused {}
+        const obj = new Box();
+        const amount = 3;
+        const nested = {amount};
+        const options = {nested, fixed: true};
+        const alias = obj;
+        alias.add(options);
+        expect(obj.read()).toEqual(3);
+    });
+    it('target', () => {
+        const callback = () => 9;
+        const receiver = new Box();
+        const actual = receiver.read();
+        expect(actual).toEqual(0);
+    });
+});
+''', 'typescript')
+    assert generate_state_contexts(corpus)['candidates'] == []
+    generated = generate_state_regions(corpus)
+    candidate = next(row for row in generated['candidates']
+                     if corpus['tests'][row['base_test_id']]['name'] == 'target')
+    assert candidate['language'] == 'typescript'
+    assert candidate['arg_values'] == [{'nested': {'amount': 3}, 'fixed': True}]
+    inserted = candidate['edits'][0]['after']
+    assert 'amount: gc_ctx_' in inserted and 'nested: gc_ctx_' in inserted
+    assert 'receiver.add(gc_ctx_' in inserted
+    assert 'new Box' not in inserted and 'callback' not in inserted and 'Unused' not in inserted
+    assert candidate['provenance']['observation_state_witnesses']
+    assert not emit(corpus, [candidate])['unsupported']
+
+
+def test_typescript_explicit_blocks_keep_same_lexical_class_identity(tmp_path):
+    corpus = corpus_for(tmp_path, '''it('scenarios', () => {
+    class Local {
+        value = 0;
+        add(n) { this.value += n; }
+        read() { return this.value; }
+    }
+    {
+        const obj = new Local();
+        obj.add(2);
+        expect(obj.read()).toEqual(2);
+    }
+    {
+        const receiver = new Local();
+        expect(receiver.read()).toEqual(0);
+    }
+});
+''', 'typescript')
+    assert generate_state_contexts(corpus)['candidates'] == []
+    generated = generate_state_regions(corpus)
+    candidate = next(row for row in generated['candidates'] if row['arg_values'] == [2])
+    assert candidate['provenance']['producer_identity'][0] == 'lexical_declaration'
+    assert 'receiver.add(2)' in candidate['edits'][0]['after']
+    assert len(candidate['provenance']['recipient_region']['context']) == 1
+    assert not emit(corpus, [candidate])['unsupported']
+
+
+def test_typescript_unknown_shorthand_dependency_is_not_invented(tmp_path):
+    corpus = corpus_for(tmp_path, '''import { Box } from './box';
+it('donor', () => {
+    if (noise) { unrelated(); }
+    const obj = new Box();
+    obj.add({missing});
+    expect(obj.read()).toEqual(1);
+});
+it('target', () => {
+    const obj = new Box();
+    expect(obj.read()).toEqual(0);
+});
+''', 'typescript')
+    generated = generate_state_regions(corpus)
+    assert generated['candidates'] == []
+    assert generated['skipped']['missing_literal_dependency']
+
+
+def test_go_plain_assertion_guards_do_not_duplicate_core_contexts(tmp_path):
+    corpus = corpus_for(tmp_path, GO_BOX + '''func TestDonor(t *testing.T) {
+    obj := NewBox()
+    Put(4, obj)
+    if obj.Read() != 4 { t.Fatal("wrong") }
+}
+func TestTarget(t *testing.T) {
+    receiver := NewBox()
+    if receiver.Read() != 0 { t.Fatal("wrong") }
+}
+''', 'go')
+    assert generate_state_contexts(corpus)['candidates']
+    generated = generate_state_regions(corpus)
+    assert generated['candidates'] == [] and generated['attempts'] == 0
+
+
+@pytest.mark.parametrize('discard_return', [False, True])
+def test_go_region_emission_compiles_without_unused_transplanted_bindings(tmp_path, discard_return):
+    import os
+    import shutil
+    import subprocess
+    executable = shutil.which('go')
+    if executable is None:
+        pytest.skip('Go compiler unavailable')
+    operation = ('saved, err := Update(alias, copied)\n    _ = saved\n    _ = err'
+                 if discard_return else 'Put(copied, alias)')
+    corpus = corpus_for(tmp_path, GO_BOX + '''func Update(box *Box, amount int) (int, error) { box.value += amount; return box.value, nil }
+func TestDonor(t *testing.T) {
+    if false { t.Log("unrelated") }
+    obj := NewBox()
+    amount := 3
+    copied := amount
+    alias := obj
+    ''' + operation + '''
+    if obj.Read() != 3 { t.Fatal("wrong") }
+}
+func TestTarget(t *testing.T) {
+    receiver := NewBox()
+    actual := receiver.Read()
+    if actual != 0 { t.Fatal("wrong") }
+}
+''', 'go')
+    candidate = next(row for row in generate_state_regions(corpus)['candidates']
+                     if corpus['tests'][row['base_test_id']]['name'] == 'TestTarget')
+    emitted = emit(corpus, [candidate])
+    assert not emitted['unsupported']
+    for filename, code in emitted['files'].items():
+        (tmp_path / filename).write_text(code)
+    environment = dict(os.environ, GO111MODULE='off', GOPROXY='off', GOTOOLCHAIN='local',
+                       GOCACHE=str(tmp_path / 'go-cache'))
+    process = subprocess.run([executable, 'test', '-run', '^$'], cwd=tmp_path, env=environment,
+                             capture_output=True, text=True, timeout=60)
+    assert process.returncode == 0, process.stdout + process.stderr
+
+
+@pytest.mark.parametrize('language, code, target, expected_call', [
+    ('go', GO_BOX + '''func Update(box *Box, amount int) (int, error) { box.value += amount; return box.value, nil }
+func TestDonor(t *testing.T) {
+    obj := NewBox()
+    saved, err := Update(obj, 3)
+    _ = saved
+    _ = err
+    if obj.Read() != 3 { t.Fatal("wrong") }
+}
+func TestTarget(t *testing.T) {
+    receiver := NewBox()
+    actual := receiver.Read()
+    if actual != 0 { t.Fatal("wrong") }
+}
+''', 'TestTarget', 'Update(receiver, 3)'),
+    ('typescript', '''import { Box } from './box';
+it('donor', () => {
+    const obj = new Box();
+    const amount = 3;
+    const saved = obj.update({amount});
+    expect(obj.read()).toEqual(3);
+});
+it('target', () => {
+    const receiver = new Box();
+    const actual = receiver.read();
+    expect(actual).toEqual(0);
+});
+''', 'target', 'receiver.update({amount: gc_ctx_'),
+])
+def test_go_and_typescript_return_assignment_preserves_rhs_and_drops_binding(tmp_path, language, code, target, expected_call):
+    corpus = corpus_for(tmp_path, code, language)
+    assert generate_state_contexts(corpus)['candidates'] == []
+    generated = generate_state_regions(corpus)
+    candidate = next(row for row in generated['candidates']
+                     if corpus['tests'][row['base_test_id']]['name'] == target)
+    inserted = candidate['edits'][0]['after']
+    assert expected_call in inserted
+    assert 'saved' not in inserted and 'err' not in inserted
+    assert candidate['provenance']['discarded_result_bindings']
+    assert candidate['provenance']['observation_state_witnesses']
+    if language == 'typescript':
+        assert inserted.rstrip().endswith(';')
+        assert candidate['arg_values'] == [{'amount': 3}]
+    else:
+        assert candidate['arg_values'] == [3]
+    assert not emit(corpus, [candidate])['unsupported']
+
+
+def test_typescript_regions_do_not_cross_distinct_outer_test_scopes(tmp_path):
+    corpus = corpus_for(tmp_path, '''import { Box } from './box';
+describe('first', () => {
+    it('donor', () => {
+        if (noise) { unrelated(); }
+        const obj = new Box();
+        obj.add(3);
+        expect(obj.read()).toEqual(3);
+    });
+});
+describe('second', () => {
+    it('target', () => {
+        const obj = new Box();
+        expect(obj.read()).toEqual(0);
+    });
+});
+''', 'typescript')
+    assert generate_state_regions(corpus)['candidates'] == []
+
+
+def test_go_multi_return_rebinding_cannot_keep_old_receiver_identity(tmp_path):
+    corpus = corpus_for(tmp_path, GO_BOX + '''func Replace(box *Box) (*Box, error) { return NewBox(), nil }
+func TestDonor(t *testing.T) {
+    obj := NewBox()
+    var err error
+    obj, err = Replace(obj)
+    _ = err
+    Put(3, obj)
+    if obj.Read() != 3 { t.Fatal("wrong") }
+}
+func TestTarget(t *testing.T) {
+    receiver := NewBox()
+    if receiver.Read() != 0 { t.Fatal("wrong") }
+}
+''', 'go')
+    assert generate_state_contexts(corpus)['candidates'] == []
+    assert generate_state_regions(corpus)['candidates'] == []

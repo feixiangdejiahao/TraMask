@@ -67,7 +67,8 @@ def _reads(node):
     """Value references only; member/keyword/record keys are not binders."""
     for value in walk(node):
         if value.type == 'shorthand_property_identifier':
-            raise Unsupported('shorthand_property_binding_requires_expansion')
+            yield value
+            continue
         if value.type != 'identifier':
             continue
         parent = value.parent
@@ -132,11 +133,42 @@ def _constant(source, node, environment):
             raise Unsupported('missing_literal_dependency')
         return binding.value, (binding,)
     # The standard literal parser never evaluates identifiers or calls.
-    try:
-        return literal(source.text(node)), ()
-    except ValueError:
-        pass
+    if not (source.language == 'typescript' and node.type == 'object'):
+        try:
+            return literal(source.text(node)), ()
+        except ValueError:
+            pass
     sequences = {'list', 'tuple', 'array', 'literal_value'}
+    if source.language == 'typescript' and node.type == 'object':
+        values, dependencies = {}, []
+        for entry in node.named_children:
+            if entry.type == 'comment':
+                continue
+            if entry.type == 'shorthand_property_identifier':
+                key = source.text(entry)
+                binding = environment.get(key)
+                if binding is None or binding.kind != 'literal':
+                    raise Unsupported('missing_literal_dependency')
+                value, refs = binding.value, (binding,)
+            elif entry.type == 'pair':
+                key_node, value_node = child(entry, 'key'), child(entry, 'value')
+                if key_node is None or value_node is None or key_node.type == 'computed_property_name':
+                    raise Unsupported('nonliteral_object_key')
+                try:
+                    key = source.text(key_node) if key_node.type in {'identifier', 'property_identifier'} else literal(source.text(key_node))
+                except ValueError:
+                    raise Unsupported('nonliteral_object_key') from None
+                if type(key) not in {str, int}:
+                    raise Unsupported('nonliteral_object_key')
+                key = str(key)
+                value, refs = _constant(source, value_node, environment)
+            else:
+                raise Unsupported('nonliteral_object_entry')
+            if key == '__proto__':
+                raise Unsupported('object_prototype_entry_requires_semantic_analysis')
+            values[key] = value
+            dependencies.extend(refs)
+        return values, tuple(dependencies)
     if node.type in sequences:
         values, dependencies = [], []
         for nested in node.named_children:
@@ -224,7 +256,17 @@ def _test(index, record, capsules):
                         binding = Binding(name, 'unknown', i, expression=rhs)
                 environment[name] = binding
                 result.assignments[i] = binding
+                if any(n.type in CALLS for n in walk(rhs)):
+                    for reference in _reads(rhs):
+                        used = source.text(reference)
+                        if used in environment and environment[used].kind == 'literal':
+                            environment[used] = Binding(used, 'unknown', i)
                 continue
+            if target.type not in ATTRS | _INDEX:
+                for assigned in walk(target):
+                    if assigned.type in {'identifier', 'shorthand_property_identifier_pattern'}:
+                        name = source.text(assigned)
+                        environment[name] = Binding(name, 'unknown', i)
         # A literal container passed to unknown code may no longer be static.
         # This loses some contexts but never silently exports its initial value.
         try:
@@ -364,6 +406,14 @@ def _replace(source, node, substitutions):
     return raw.decode()
 
 
+def _binding_replacement(source, node, replacement):
+    # A shorthand property's name is both a key and a variable reference.
+    # Alpha-renaming the value must keep the original property key.
+    if node.type == 'shorthand_property_identifier':
+        return source.text(node) + ': ' + replacement
+    return replacement
+
+
 def _render(donor, operations, recipient, insertion, receiver, identifier):
     # Python locals and JS lexical declarations shadow the whole block,
     # including occurrences before their initializer. The all-declaration
@@ -394,13 +444,18 @@ def _render(donor, operations, recipient, insertion, receiver, identifier):
             dependency = environment.get(donor.source.text(reference))
             if dependency not in names:
                 raise Unsupported('literal_closure_not_closed')
-            substitutions.append((reference.start_byte, reference.end_byte, names[dependency]))
+            substitutions.append((reference.start_byte, reference.end_byte,
+                                  _binding_replacement(donor.source, reference, names[dependency])))
         rows.append((_replace(donor.source, statement, substitutions), False, binding.statement))
     for operation_index, operation in enumerate(operations):
         statement = donor.statements[operation['statement']]
-        substitutions = [(node.start_byte, node.end_byte, receiver if binding.kind == 'receiver' else names[binding])
+        substitutions = [(node.start_byte, node.end_byte, _binding_replacement(donor.source, node,
+                           receiver if binding.kind == 'receiver' else names[binding]))
                          for node, binding in operation['references']]
-        rows.append((_replace(donor.source, statement, substitutions), True, operation['statement']))
+        rendered = _replace(donor.source, statement, substitutions)
+        if donor.source.language == 'typescript' and 'discarded_binding' in operation:
+            rendered += ';'  # Keep a discarded RHS independent of the next expression.
+        rows.append((rendered, True, operation['statement']))
         for value, node in operation['arguments']:
             argument_sources.append({'operation': operation_index, 'index': len(argument_values),
                                      'span': span(donor.source, node)})

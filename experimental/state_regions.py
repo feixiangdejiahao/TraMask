@@ -1,9 +1,9 @@
-"""Additional Python state contexts from independent straight-line regions.
+"""Additional state contexts from independent straight-line regions.
 
-Original source, scopes, with/async-with managers, and local declarations stay
+Original source, lexical scopes, context managers, and local declarations stay
 in place. Only donor operations are transplanted. Region membership establishes
 syntactic dominance inside one statement list, not alias, effect, or semantic
-equivalence. The frozen state-context front end remains unchanged.
+equivalence. Binding closure and rendering share the state-context front end.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _declaration(node):
     value = node
     if value.type == 'decorated_definition':
         value = next((n for n in value.named_children if n.type in {'class_definition', 'function_definition'}), value)
-    return value if value.type in {'class_definition', 'function_definition'} else None
+    return value if value.type in {'class_definition', 'function_definition', 'class_declaration', 'function_declaration'} else None
 
 
 def _declaration_key(source, node):
@@ -40,10 +40,17 @@ def _declaration_key(source, node):
 
 
 def _regions(unit, record, capsules):
-    """Split at unsupported control; descend only into context-manager bodies."""
+    """Split at control/callbacks; enter explicit blocks and Python with bodies."""
     source = unit.source
-    expanded = any(n.type in state._CONTROL | state._NESTED for n in unit.body.named_children)
-    if any(n.type == 'decorated_definition' for n in unit.body.named_children):
+    def statements(body):
+        container = next((node for node in body.named_children if node.type == 'statement_list'), body)
+        return container.named_children
+    def assertion(statement):
+        return any(capsule['assertion_span']['start_byte'] == statement.start_byte
+                   and capsule['assertion_span']['end_byte'] == statement.end_byte for capsule in capsules)
+    expanded = any(n.type in state._CONTROL | state._NESTED | {'block', 'statement_block'}
+                   and not assertion(n) for n in statements(unit.body))
+    if any(n.type == 'decorated_definition' for n in statements(unit.body)):
         expanded = True
 
     def visit(body, declarations, context):
@@ -57,7 +64,7 @@ def _regions(unit, record, capsules):
             selected = []
             return region
 
-        for statement in body.named_children:
+        for statement in statements(body):
             if statement.type == 'comment':
                 continue
             declaration = _declaration(statement)
@@ -67,11 +74,11 @@ def _regions(unit, record, capsules):
                     yield region
                 visible[source.text(child(declaration, 'name'))] = declaration
                 continue
-            if statement.type == 'with_statement':
+            if statement.type in {'with_statement', 'block', 'statement_block'}:
                 region = flush()
                 if region is not None:
                     yield region
-                nested = child(statement, 'body')
+                nested = child(statement, 'body') if statement.type == 'with_statement' else statement
                 if nested is not None:
                     yield from visit(nested, visible, (*context, span(source, statement)))
                 continue
@@ -80,7 +87,9 @@ def _regions(unit, record, capsules):
                 if region is not None:
                     yield region
                 break
-            blocked = any(n.type in state._NESTED | state._CONTROL for n in walk(statement))
+            # A Go if/fatal assertion is one observation statement, not an
+            # unrelated branch to split away from its actual-value binding.
+            blocked = not assertion(statement) and any(n.type in state._NESTED | state._CONTROL for n in walk(statement))
             if blocked:
                 region = flush()
                 if region is not None:
@@ -116,7 +125,14 @@ def _region_test(index, region, capsules):
                   and capsule['assertion_span']['end_byte'] <= statement.end_byte}
     test = state.Test(record, unit, source, region.statements, assertions=assertions,
                       nodes={(n.start_byte, n.end_byte): n for statement in region.statements for n in walk(statement)})
-    environment = {name: state.Binding(name, 'unknown', -1) for name in unit.params}
+    local_names = set(unit.params)
+    if source.language != 'python':
+        local_names.update(region.parent.get('scope_bindings', ()))
+        for node in walk(unit.body):
+            if node.type in {'type_spec', 'class_declaration', 'function_declaration'}:
+                local_names.add(source.text(child(node, 'name')))
+        local_names.difference_update(region.declarations)
+    environment = {name: state.Binding(name, 'unknown', -1) for name in local_names}
     for i, statement in enumerate(region.statements):
         test.snapshots.append(dict(environment))
         assignment = state._assignment(statement)
@@ -151,6 +167,13 @@ def _region_test(index, region, capsules):
                     if used in environment and environment[used].kind == 'literal':
                         environment[used] = state.Binding(used, 'unknown', i)
             continue
+        if assignment and assignment[0].type not in state.ATTRS | state._INDEX:
+            # Multiple-return and destructuring assignments overwrite every
+            # local target. A prior receiver name must not keep its old origin.
+            for target in walk(assignment[0]):
+                if target.type in {'identifier', 'shorthand_property_identifier_pattern'}:
+                    name = source.text(target)
+                    environment[name] = state.Binding(name, 'unknown', i)
         if assignment or any(n.type in CALLS for n in walk(statement)):
             for reference in state._reads(statement):
                 name = source.text(reference)
@@ -160,7 +183,9 @@ def _region_test(index, region, capsules):
 
 
 def _external_shadowed(index, region, test, name):
-    """Python binders apply across regions, including for/with/import targets."""
+    """Retain whole-unit binders across regions, including for/with/import targets."""
+    if test.source.language != 'python':
+        return name in test.snapshots[0] and name not in region.declarations
     cache = getattr(index, '_state_region_python_bindings', None)
     if cache is None:
         cache = index._state_region_python_bindings = {}
@@ -233,7 +258,11 @@ def _operation(index, region, test, i, origin):
     effect: the edited observation still needs its may-state witness.
     """
     assignment = state._assignment(test.statements[i])
-    if (i in test.assertions or assignment is None or assignment[0].type != 'identifier'
+    target = assignment[0] if assignment is not None else None
+    simple_targets = target is not None and (target.type == 'identifier' or (
+        test.source.language == 'go' and target.type == 'expression_list'
+        and all(node.type == 'identifier' for node in target.named_children)))
+    if (i in test.assertions or assignment is None or not simple_targets
             or state._unwrap(assignment[1]).type not in CALLS):
         return state._operation(index, test, i, origin)
     target, expression = assignment
@@ -263,7 +292,7 @@ def _operation(index, region, test, i, origin):
             has_receiver = True
         else:
             identity = _producer(index, region, node, environment)
-            builtin = (fn is not None and fn.type == 'identifier'
+            builtin = (test.source.language == 'python' and fn is not None and fn.type == 'identifier'
                        and _builtin_available(index, region, test, test.source.text(fn)))
             if identity is None and not builtin:
                 raise state.Unsupported('rhs_external_callee_unresolved')
@@ -302,7 +331,7 @@ def _operation(index, region, test, i, origin):
 
 def _render(donor, operations, *args):
     # Keep original AST byte positions for substitutions/provenance. The
-    # frozen renderer receives RHS nodes in place of just these assignments.
+    # shared renderer receives RHS nodes in place of just these assignments.
     statements = list(donor.statements)
     constants = state._closure(binding for operation in operations for binding in operation['required'])
     if any(node.type == 'string' and node.start_point.row != node.end_point.row
@@ -324,10 +353,10 @@ def _external_declarations_match(donor, recipient, operations):
 
 
 def generate_state_regions(corpus, *, top_k=10, max_candidates=128, max_attempts=2000):
-    """Generate additional contexts involving an expanded Python region.
+    """Generate additional contexts involving an expanded lexical region.
 
     Plain-to-plain pairs are additional only for discarded call RHSs. Parameters, helper
-    oracles, loop/branch internals, and other languages are not expanded here.
+    oracles, loop/branch internals, and callback bodies are not expanded here.
     Every returned edit and capsule ID refers to the original corpus.
     """
     if any(type(value) is not int or value < 1 for value in (top_k, max_candidates, max_attempts)):
@@ -338,7 +367,7 @@ def generate_state_regions(corpus, *, top_k=10, max_candidates=128, max_attempts
         return {'candidates': candidates, 'skipped': dict(skipped), 'attempts': attempts,
                 'budget_exhausted': exhausted}
 
-    if corpus['language'] != 'python':
+    if corpus['language'] not in {'python', 'go', 'typescript'}:
         skipped['language_region_expansion_not_enabled'] += 1
         return result()
     sources = [Source(path, metadata['code'], metadata.get('language', corpus['language']))
@@ -361,6 +390,9 @@ def generate_state_regions(corpus, *, top_k=10, max_candidates=128, max_attempts
         scope = record.get('enclosing_scope_span')
         if unit is None or not scope:
             skipped['missing_source_or_enclosing_scope'] += 1
+            continue
+        if not capsules[record['id']]:
+            skipped['no_observation_capsule'] += 1
             continue
         for region in _regions(unit, record, capsules[record['id']]):
             local_capsules = [capsule for capsule in capsules[record['id']] if any(
@@ -463,7 +495,7 @@ def generate_state_regions(corpus, *, top_k=10, max_candidates=128, max_attempts
         aliases = sorted({bound.name for operation in operations for _, bound in operation['references']
                           if bound.kind == 'receiver'})
         candidates.append({'id': identifier, 'base_test_id': region.parent['id'],
-            'source_test_ids': [donor_region.parent['id']], 'language': 'python', 'kind': 'state_context',
+            'source_test_ids': [donor_region.parent['id']], 'language': corpus['language'], 'kind': 'state_context',
             'rule_id': state._id('state_region_rule', donor.record['id'], [operation['statement'] for operation in operations]),
             'imports': [], 'edits': [{'span': location, 'before': '', 'after': text}],
             'target_capsule_id': capsule['id'], 'arg_values': arguments,

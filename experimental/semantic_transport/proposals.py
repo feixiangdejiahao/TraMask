@@ -376,12 +376,30 @@ def _affected(capsule, context):
     return False
 
 
+def _source_string_values(corpus):
+    """Use the subject language's string escapes for transferred input facts."""
+    donors, corrected, unsupported = [], 0, 0
+    for donor in corpus['donors']:
+        row = donor
+        if donor.get('literal_known') and type(donor.get('literal_value')) is str:
+            value = oracle.parse_source_literal(donor['text'], corpus['language'])
+            if isinstance(value, oracle.Unknown) or type(value) is not str:
+                row = dict(donor, literal_known=False, literal_value=None)
+                unsupported += 1
+            elif value != donor['literal_value']:
+                row = dict(donor, literal_value=value)
+                corrected += 1
+        donors.append(row)
+    return dict(corpus, donors=donors), {'corrected': corrected, 'unsupported': unsupported}
+
+
 def generate(corpus, budget=Budget()):
     from experimental.finite_inputs import augment_corpus
     from experimental.local_literal_contexts import generate as local_contexts
     from experimental.port_exchange import generate as port_contexts
     from experimental.state_regions import generate_state_regions
     from experimental.observation_projection import generate_projections, Budget as ProjectionBudget
+    corpus, string_values = _source_string_values(corpus)
     corpus = augment_corpus(corpus)
     basic = engine.generate(corpus, engine.Budget(max_candidates=budget.max_candidates,
                            top_k=budget.top_k, max_test_bytes=budget.max_test_bytes))
@@ -450,7 +468,9 @@ def generate(corpus, budget=Budget()):
                 'priority': [parent.get('retrieval_rank') or 99999, int(capsule['incidental']),
                              int(not bool(capsule.get('retrieval_anchor_ids'))), capsule['assertion_span']['start_byte']],
                 'semantic_status': 'requires_observation_transformer'})
-    original = _select(corpus, candidates, budget.max_candidates)
+    from .source_witnesses import attach
+    witnessed = attach(corpus, _select(corpus, candidates, budget.max_candidates))
+    original = witnessed['candidates']
     projected = generate_projections(corpus, original, ProjectionBudget(max_candidates=budget.max_candidates))
     selected = _select(corpus, original + projected['candidates'], budget.max_candidates)
     return {'algorithm': 'dependency_guided_action_observation_composition_v2', 'budget': asdict(budget),
@@ -459,6 +479,8 @@ def generate(corpus, budget=Budget()):
                        'projected_observations': len(projected['candidates']),
                        'candidates': len(selected), 'shown': min(len(selected), budget.shown_candidates)},
             'finite_inputs': corpus.get('finite_inputs', {}),
+            'source_string_values': string_values,
+            'source_witnesses': {'attached': witnessed['attached'], 'skipped': witnessed['skipped']},
             'projection_counts': projected['counts'], 'projection_skipped': projected['skipped'],
             'skipped': dict(skipped), 'context_skipped': {'value': basic['skipped'], 'state': state['skipped'],
                 'region': regions['skipped'], 'local_literal': local['skipped'], 'port_exchange': ports['skipped']}}

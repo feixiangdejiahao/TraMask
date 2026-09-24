@@ -53,6 +53,11 @@ an added observation may have a different source expected slot from the original
 The optional guard is evaluated on these frozen inputs; false rejects a candidate
 and never becomes a runtime skip. No actual output or execution feedback is given.
 You cannot change test code, inputs, operations, observations, helpers or IDs.
+Some candidates provide source expectation witnesses with the same assertion
+frame: before pre, transformed arg, and known after. Your expression must also
+match each applicable witness. These are existing test expectations, not outputs
+recorded from the candidate implementation. They constrain a proposed relation
+but do not prove that it applies to the new combination.
 
 Allowed expressions: constants and containers, pre/arg indexing and slicing,
 arithmetic, comparison and boolean operators, conditional expressions, and the
@@ -162,7 +167,9 @@ def presentation(corpus: dict, evidence: dict, pending: dict) -> dict:
                                         "expected_source": ob.get("expected_source", {}),
                                         "source_expected_slot": expected_slot}
                                        for ob in row["observations"]],
-                      "expected_hole": hole})
+                      "expected_hole": hole,
+                      "witnesses": [{key: w[key] for key in ('pre', 'arg', 'after', 'observe')}
+                                    for w in row.get('witnesses', [])]})
     return {"issue": evidence.get("issue", ""), "candidates": shown,
             "source_tests": source_tests, "test_helpers": test_helpers,
             "omitted_helpers": omitted_helpers,

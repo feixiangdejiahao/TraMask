@@ -515,3 +515,63 @@ def test_target():
     result = generate_state_contexts(corpus)
     assert result['attempts'] == 1
     assert not result['budget_exhausted']
+
+
+def test_typescript_shorthand_static_object_expands_values_without_renaming_keys(tmp_path):
+    corpus = corpus_for(tmp_path, '''import { Box } from './box';
+it('donor', () => {
+    const obj = new Box();
+    const amount = 3;
+    const options = {amount, nested: {amount}, enabled: true};
+    obj.add(options);
+    expect(obj.read()).toEqual(3);
+});
+it('target', () => {
+    const receiver = new Box();
+    expect(receiver.read()).toEqual(0);
+});
+''', 'typescript')
+    result = generate_state_contexts(corpus)
+    candidate = for_target(corpus, result, 'target')[0]
+    assert candidate['arg_values'] == [{'amount': 3, 'nested': {'amount': 3}, 'enabled': True}]
+    assert candidate['edits'][0]['after'].count('amount: gc_ctx_') == 2
+    assert 'receiver.add(gc_ctx_' in candidate['edits'][0]['after']
+    assert candidate['provenance']['observation_state_witnesses']
+    assert not emit(corpus, [candidate])['unsupported']
+
+
+@pytest.mark.parametrize('argument', ['{missing}', '{...other}', '{[unknown]: 3}', '{__proto__: {}}', '{"__proto__": {}}'])
+def test_typescript_dynamic_or_prototype_object_entries_are_not_literal_inputs(tmp_path, argument):
+    corpus = corpus_for(tmp_path, '''import { Box } from './box';
+it('donor', () => {
+    const obj = new Box();
+    obj.add(''' + argument + ''');
+    expect(obj.read()).toEqual(3);
+});
+it('target', () => {
+    const receiver = new Box();
+    expect(receiver.read()).toEqual(0);
+});
+''', 'typescript')
+    result = generate_state_contexts(corpus)
+    assert not for_target(corpus, result, 'target')
+
+
+def test_typescript_literal_object_passed_to_assigned_call_is_no_longer_static(tmp_path):
+    corpus = corpus_for(tmp_path, '''import { Box, mutate } from './box';
+it('donor', () => {
+    const obj = new Box();
+    const amount = 3;
+    const options = {amount};
+    const saved = mutate(options);
+    obj.add(options);
+    expect(obj.read()).toEqual(3);
+});
+it('target', () => {
+    const receiver = new Box();
+    expect(receiver.read()).toEqual(0);
+});
+''', 'typescript')
+    result = generate_state_contexts(corpus)
+    assert not for_target(corpus, result, 'target')
+    assert result['skipped']['missing_literal_dependency']
