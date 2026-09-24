@@ -121,6 +121,97 @@ def _dominating_definition(source, current, test_span):
     return rhs
 
 
+def _parameter_expected(source, current, test_span, initial):
+    """A parameter row is an entry value, not necessarily the current oracle.
+
+    Retain only untouched entry bindings or a dominating literal replacement.
+    Loop backedges are included because a lexically later write may precede the
+    next execution of this assertion. No subject effects are evaluated here.
+    """
+    if current.type != 'identifier':
+        raise ValueError('parameter_expected_not_identifier')
+    name, scope = source.text(current), _scope(current)
+    if scope is None:
+        raise ValueError('parameter_expected_scope_missing')
+    body = child(scope, 'body') or scope
+    loops, ancestor = [], current.parent
+    while ancestor is not None and ancestor != scope:
+        if ancestor.type in {'for_statement', 'for_in_statement', 'while_statement',
+                             'do_statement', 'repeat_statement'}:
+            loops.append(ancestor)
+        ancestor = ancestor.parent
+
+    def in_loop(node):
+        return any(loop.start_byte <= node.start_byte < node.end_byte <= loop.end_byte for loop in loops)
+
+    def binds(node):
+        if node is None or node.type in {'attribute', 'member_expression', 'selector_expression',
+                                         'subscript', 'subscript_expression', 'index_expression'}:
+            return False
+        return (node.type == 'identifier' and source.text(node) == name
+                or any(binds(n) for n in node.named_children))
+
+    ordinary = {'assignment', 'augmented_assignment', 'assignment_expression', 'augmented_assignment_expression',
+                'assignment_statement', 'short_var_declaration', 'variable_declarator',
+                'var_spec', 'const_spec', 'update_expression', 'inc_statement', 'dec_statement',
+                'for_statement', 'for_in_statement'}
+    for node in walk(body):
+        if node.start_byte >= current.start_byte and not in_loop(node):
+            continue
+        # A captured parameter can be rebound even though the write is in a
+        # nested function. A same-named nested local is a separate binding.
+        if node.type in {'nonlocal_statement', 'global_statement'} and any(
+                source.text(n) == name for n in node.named_children):
+            raise ValueError('parameter_expected_has_indirect_binding_writes')
+        if _scope(node) != scope:
+            if (node.type in FUNCTIONS | {'class_definition', 'class_declaration'}
+                    and _scope(node.parent) == scope and source.text(child(node, 'name')) == name):
+                raise ValueError('parameter_expected_redefined_by_declaration')
+            continue
+        if node.type in ordinary:
+            target = child(node, 'left', 'name', 'argument', 'operand')
+        elif node.type == 'named_expression':
+            target = child(node, 'name')
+        elif node.type == 'as_pattern':
+            target = child(node, 'alias')
+        elif node.type in {'delete_statement', 'import_statement', 'import_from_statement'}:
+            target = node
+        else:
+            continue
+        if not binds(target):
+            continue
+        if in_loop(node):
+            raise ValueError('parameter_expected_loop_binding_write')
+        if node.type not in ordinary:
+            raise ValueError('parameter_expected_binding_write_unsupported')
+
+    rhs = _dominating_definition(source, current, test_span)
+    if rhs is not None:
+        value = oracle.parse_source_literal(source.text(rhs), source.language)
+        if isinstance(value, oracle.Unknown):
+            raise ValueError('parameter_expected_definition_not_literal')
+        provenance = {'kind': 'preceding_literal_definition', 'span': _position(source, rhs)}
+    else:
+        value, provenance = initial, {'kind': 'parameter_row', 'name': name}
+
+    def immutable(value):
+        return (type(value) in {str, bytes, int, float, bool, type(None)}
+                or type(value) in {tuple, frozenset} and all(immutable(v) for v in value))
+
+    if not immutable(value):
+        # Conservatively reject aliases, passing to unknown code, indexing or
+        # method calls. This also covers captures in nested closures. Literal
+        # parameter values have no external program effects to replay.
+        for node in walk(body):
+            if (rhs is not None and rhs.parent.start_byte <= node.start_byte
+                    and node.end_byte <= rhs.start_byte):
+                continue  # The selected literal assignment's own target.
+            if (node != current and node.type == 'identifier' and source.text(node) == name
+                    and (node.start_byte < current.start_byte or in_loop(node))):
+                raise ValueError('parameter_expected_mutable_use_before_observation')
+    return value, provenance
+
+
 def _expected(corpus, capsule, source, row):
     """One explicit source oracle; a single literal inside a constructor is a hole."""
     expression = capsule.get('expected')
@@ -133,7 +224,11 @@ def _expected(corpus, capsule, source, row):
     text = expression['text']
     position = expression['span']
     if text in row:
-        return position, row[text], {'kind': 'parameter_row', 'name': text}
+        current = _node(source, position)
+        if current is None:
+            raise ValueError('expected_node_missing')
+        value, provenance = _parameter_expected(source, current, capsule['test_span'], row[text])
+        return position, value, provenance
     value = oracle.parse_source_literal(text, corpus['language'])
     if not isinstance(value, oracle.Unknown):
         return position, value, {'kind': 'literal'}
@@ -282,12 +377,22 @@ def _affected(capsule, context):
 
 
 def generate(corpus, budget=Budget()):
+    from experimental.finite_inputs import augment_corpus
+    from experimental.local_literal_contexts import generate as local_contexts
+    from experimental.port_exchange import generate as port_contexts
+    from experimental.state_regions import generate_state_regions
+    from experimental.observation_projection import generate_projections, Budget as ProjectionBudget
+    corpus = augment_corpus(corpus)
     basic = engine.generate(corpus, engine.Budget(max_candidates=budget.max_candidates,
                            top_k=budget.top_k, max_test_bytes=budget.max_test_bytes))
     from .state_contexts import generate_state_contexts
     state = generate_state_contexts(corpus, top_k=budget.top_k, max_candidates=budget.max_candidates)
+    regions = generate_state_regions(corpus, top_k=budget.top_k, max_candidates=budget.max_candidates)
+    local = local_contexts(corpus, top_k=budget.top_k, max_candidates=budget.max_candidates)
+    ports = port_contexts(corpus, top_k=budget.top_k, max_candidates=budget.max_candidates)
     sources = {p: Source(p, v['code'], corpus['language']) for p, v in corpus['sources'].items()}
-    contexts = basic['candidates'] + state['candidates']
+    contexts = (basic['candidates'] + state['candidates'] + regions['candidates']
+                + local['candidates'] + ports['candidates'])
     donors = {d['id']: d for d in engine.expanded_donors(corpus)}
     by_test = defaultdict(list)
     for c in corpus['capsules']:
@@ -345,9 +450,26 @@ def generate(corpus, budget=Budget()):
                 'priority': [parent.get('retrieval_rank') or 99999, int(capsule['incidental']),
                              int(not bool(capsule.get('retrieval_anchor_ids'))), capsule['assertion_span']['start_byte']],
                 'semantic_status': 'requires_observation_transformer'})
+    original = _select(corpus, candidates, budget.max_candidates)
+    projected = generate_projections(corpus, original, ProjectionBudget(max_candidates=budget.max_candidates))
+    selected = _select(corpus, original + projected['candidates'], budget.max_candidates)
+    return {'algorithm': 'dependency_guided_action_observation_composition_v2', 'budget': asdict(budget),
+            'candidates': selected, 'shown_ids': [c['id'] for c in selected[:budget.shown_candidates]],
+            'counts': {'contexts': len(contexts), 'oracle_context_pairs': len(candidates),
+                       'projected_observations': len(projected['candidates']),
+                       'candidates': len(selected), 'shown': min(len(selected), budget.shown_candidates)},
+            'finite_inputs': corpus.get('finite_inputs', {}),
+            'projection_counts': projected['counts'], 'projection_skipped': projected['skipped'],
+            'skipped': dict(skipped), 'context_skipped': {'value': basic['skipped'], 'state': state['skipped'],
+                'region': regions['skipped'], 'local_literal': local['skipped'], 'port_exchange': ports['skipped']}}
+
+
+def _select(corpus, candidates, max_candidates):
     bins = defaultdict(lambda: defaultdict(lambda: defaultdict(deque)))
     for candidate in sorted(candidates, key=lambda c: (c['priority'], c['id'])):
-        bins[candidate['base_test_id']][candidate['context']['kind']][candidate['capsule_id']].append(candidate)
+        family = ('projection:' if candidate.get('projection') else '') + candidate['context']['kind']
+        observation = candidate.get('projection', {}).get('source_capsule_id', candidate['capsule_id'])
+        bins[candidate['base_test_id']][family][observation].append(candidate)
     # One candidate per parent per round; inside each parent alternate context
     # families, then observation capsules. Large tests cannot monopolize shown K.
     ordered = sorted(bins, key=lambda key: (corpus['tests'][key].get('retrieval_rank') or 99999, key))
@@ -357,7 +479,7 @@ def generate(corpus, budget=Budget()):
     capsule_order = {(parent, kind): deque(sorted(capsules, key=lambda cap: (capsules[cap][0]['priority'], cap)))
                      for parent, kinds in bins.items() for kind, capsules in kinds.items()}
     selected = []
-    while bins and len(selected) < budget.max_candidates:
+    while bins and len(selected) < max_candidates:
         for parent in ordered:
             if parent not in bins:
                 continue
@@ -375,16 +497,15 @@ def generate(corpus, budget=Budget()):
                 del bins[parent][kind]
             if not bins[parent]:
                 del bins[parent]
-            if len(selected) == budget.max_candidates:
+            if len(selected) == max_candidates:
                 break
-    return {'algorithm': 'dependency_guided_observation_transport_v1', 'budget': asdict(budget),
-            'candidates': selected, 'shown_ids': [c['id'] for c in selected[:budget.shown_candidates]],
-            'counts': {'contexts': len(contexts), 'oracle_context_pairs': len(candidates),
-                       'candidates': len(selected), 'shown': min(len(selected), budget.shown_candidates)},
-            'skipped': dict(skipped), 'context_skipped': {'value': basic['skipped'], 'state': state['skipped']}}
+    return selected
 
 
 def materialize(corpus, candidate, completion):
+    if candidate.get('projection'):
+        from experimental.observation_projection import materialize_projection
+        return materialize_projection(corpus, candidate, completion)
     if completion.get('candidate_id') != candidate['candidate_id']:
         raise ValueError('completion_candidate_mismatch')
     # Recompute the literal at the trust boundary. Even a direct caller cannot

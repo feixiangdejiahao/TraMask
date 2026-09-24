@@ -352,3 +352,75 @@ def test_parent_round_robin_keeps_large_tests_from_consuming_shown_budget(tmp_pa
     all_parents = {c['base_test_id'] for c in result['candidates']}
     assert len(all_parents) == 10
     assert len({c['base_test_id'] for c in result['candidates'][:10]}) == 10
+
+
+def parameter_expected(tmp_path, body, initial=1):
+    code = ('import pytest\n'
+            'def actual(value): return value\n'
+            '@pytest.mark.parametrize("value, expected", [(1, 1)])\n'
+            'def test_row(value, expected):\n' + body)
+    corpus = corpus_for(tmp_path, code)
+    capsule = corpus['capsules'][0]
+    return _expected(corpus, capsule, Source('test_toy.py', code, 'python'),
+                     {'value': 1, 'expected': initial})
+
+
+@pytest.mark.parametrize('prefix', [
+    '    expected += 10\n',
+    '    expected = actual(expected)\n',
+    '    expected, other = (11, 2)\n',
+    '    if value:\n        expected = 11\n',
+    '    (expected := 11)\n',
+    '    del expected\n',
+    '    def mutate():\n        nonlocal expected\n        expected = 11\n    mutate()\n',
+    '    with actual(value) as expected:\n        pass\n',
+])
+def test_parameter_expected_rebindings_never_export_entry_value(tmp_path, prefix):
+    with pytest.raises(ValueError):
+        parameter_expected(tmp_path, prefix + '    assert actual(value) == expected\n')
+
+
+@pytest.mark.parametrize('prefix', [
+    '    expected.append(10)\n',
+    '    alias = expected\n    alias.append(10)\n',
+    '    actual(expected)\n',
+    '    expected[0] = 10\n',
+    '    def mutate():\n        expected.append(10)\n    mutate()\n',
+])
+def test_mutable_parameter_expected_unknown_effects_never_export_entry_value(tmp_path, prefix):
+    with pytest.raises(ValueError, match='expected_'):
+        parameter_expected(tmp_path, prefix + '    assert actual(value) == expected\n', [1])
+
+
+@pytest.mark.parametrize('initial,post', [
+    (1, 'expected += 10'),
+    (1, 'expected = 11'),
+    ([1], 'expected.append(10)'),
+    ([1], 'alias = expected; alias.append(10)'),
+])
+def test_parameter_expected_checks_loop_backedge_writes(tmp_path, initial, post):
+    body = '    for iteration in range(2):\n        assert actual(value) == expected\n        ' + post + '\n'
+    with pytest.raises(ValueError, match='expected_'):
+        parameter_expected(tmp_path, body, initial)
+
+
+def test_parameter_expected_retains_readonly_scalar_and_fresh_literal_definition(tmp_path):
+    _, value, origin = parameter_expected(tmp_path, '    actual(expected)\n    assert actual(value) == expected\n')
+    assert value == 1 and origin['kind'] == 'parameter_row'
+    _, value, origin = parameter_expected(tmp_path, '    expected = 11\n    assert actual(value) == expected\n')
+    assert value == 11 and origin['kind'] == 'preceding_literal_definition'
+    _, value, origin = parameter_expected(tmp_path, '    assert actual(value) == expected\n', [1])
+    assert value == [1] and origin['kind'] == 'parameter_row'
+    _, value, _ = parameter_expected(tmp_path, '    def nested():\n        expected = 100\n    assert actual(value) == expected\n')
+    assert value == 1
+    _, value, origin = parameter_expected(tmp_path, '    expected = [11]\n    assert actual(value) == expected\n')
+    assert value == [11] and origin['kind'] == 'preceding_literal_definition'
+
+
+def test_redefined_mutable_parameter_still_checks_backedge_and_earlier_capture(tmp_path):
+    for body in [
+        '    expected = []\n    for iteration in range(2):\n        assert actual(value) == expected\n        expected.append(1)\n',
+        '    def mutate():\n        expected.append(10)\n    expected = []\n    mutate()\n    assert actual(value) == expected\n',
+    ]:
+        with pytest.raises(ValueError, match='expected_'):
+            parameter_expected(tmp_path, body)

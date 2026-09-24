@@ -1,8 +1,11 @@
 """Independent toys for observation transport; no subject repositories or case data."""
 import ast
 import json
+import os
+from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -15,6 +18,15 @@ from experimental.semantic_transport.oracle import (
 def candidate(pre=(['a'],), arg=('b',), **extra):
     return {'candidate_id': 'c0', 'language': 'python',
             'pre': list(pre), 'arg': list(arg), 'observations': [{'type': 'list'}], **extra}
+
+
+def test_canonical_json_does_not_reorder_source_mapping_values():
+    value = {'z': {'second': 2, 'first': 1}, 'a': 3}
+    wire = json.loads(json.dumps(encode_value(value), sort_keys=True))
+    restored = decode_value(wire)
+    assert list(restored) == ['z', 'a']
+    assert list(restored['z']) == ['second', 'first']
+    assert evaluate_expression('list(pre[0])', pre=[restored]) == ['z', 'a']
 
 
 def completion(expected='pre[0] + [arg[0]]', guard=None, **extra):
@@ -219,6 +231,72 @@ def test_static_source_literals_do_not_run_subject_calls_or_rewrite_strings():
 def test_python_literal_emission_preserves_values_and_escape_sequences():
     value = ('quotes\'"\\\n\x00😀\ud800', {'x': [True, None, -3.25]}, b'\x00\xff')
     assert ast.literal_eval(emit_literal(value, 'python')) == value
+
+
+def test_python_set_literals_and_completion_cache_are_stable_across_hash_seeds():
+    script = r'''
+import json
+from experimental.semantic_transport.oracle import encode_value, emit_literal, same_value, validate_completions
+value = {
+    'z_last_alphabetically': [
+        {'indigo', 'amber', 'violet', 'cyan'},
+        (frozenset({'one', 'two', 'three'}),),
+        set(),
+        frozenset(),
+    ],
+    'a_first_alphabetically': {
+        frozenset({'orange', 'green'}),
+        frozenset({frozenset({'left', 'right'}), frozenset({'top', 'bottom'})}),
+        ('tuple', frozenset({b'bytes', 'text', 7, None})),
+    },
+}
+literal = emit_literal(value, 'python')
+restored = eval(literal, {'__builtins__': {}}, {'set': set, 'frozenset': frozenset})
+assert same_value(value, restored)
+assert list(restored) == ['z_last_alphabetically', 'a_first_alphabetically']
+assert type(restored['z_last_alphabetically'][1]) is tuple
+assert type(restored['z_last_alphabetically'][1][0]) is frozenset
+assert type(restored['z_last_alphabetically'][2]) is set
+assert type(restored['z_last_alphabetically'][3]) is frozenset
+candidate = {'candidate_id': 'c0', 'language': 'python', 'pre': [encode_value(value)],
+             'arg': [], 'observations': [{'type': 'dict'}]}
+payload = {'completions': [{'candidate_id': 'c0', 'observe': 0, 'expected': 'pre[0]', 'guard': None}]}
+accepted = validate_completions(payload, [candidate])['accepted'][0]
+assert accepted['literal'] == literal
+print(json.dumps({'literal': literal, 'wire': encode_value(value), 'accepted': accepted}, ensure_ascii=True))
+'''
+    outputs = []
+    for seed in ['0', '1', '2', '13', '47', 'random']:
+        run = subprocess.run([sys.executable, '-c', script], text=True, capture_output=True,
+                             env=dict(os.environ, PYTHONHASHSEED=seed),
+                             cwd=Path(__file__).resolve().parents[1], check=True, timeout=10)
+        outputs.append(run.stdout)
+    assert len(set(outputs)) == 1
+
+
+@pytest.mark.parametrize('expression,value', [
+    ('list(pre[0])', {'alpha', 'beta'}),
+    ('tuple(pre[0])', frozenset({'alpha', 'beta'})),
+    ('list(pre[0])', set()),
+    ('str(pre[0])', {'alpha', 'beta'}),
+    ('str(pre[0])', [{'nested': (frozenset({'alpha', 'beta'}),)}]),
+    ('str(pre[0])', {frozenset({'alpha', 'beta'}): 'set used as a key'}),
+    ('str([pre[0]])', {'alpha', 'beta'}),
+])
+def test_order_sensitive_set_conversions_are_rejected_without_inventing_an_order(expression, value):
+    with pytest.raises(OracleError) as caught:
+        evaluate_expression(expression, [value])
+    assert caught.value.code == 'unordered_conversion'
+
+
+def test_unordered_values_may_remain_inside_ordered_containers_without_conversion():
+    value = [{'alpha', 'beta'}, frozenset({'gamma', 'delta'})]
+    result = evaluate_expression('tuple(pre[0])', [value])
+    assert type(result) is tuple
+    assert type(result[0]) is set and type(result[1]) is frozenset
+    assert result == tuple(value)
+    assert evaluate_expression('list(pre[0])', [{'z': 1, 'a': 2}]) == ['z', 'a']
+    assert evaluate_expression('str(pre[0])', [{'z': [1, 2], 'a': 3}]) == "{'z': [1, 2], 'a': 3}"
 
 
 def test_go_container_types_are_explicit_when_ambiguous_and_range_checked():

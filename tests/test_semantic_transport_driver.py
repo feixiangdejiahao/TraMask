@@ -90,8 +90,8 @@ class CompletionCacheTests(unittest.TestCase):
                 self.assertEqual(request["model"], "deepseek-v4-flash")
                 self.assertEqual(request["max_tokens"], 10000)
                 self.assertEqual(request["temperature"], 0)
-                self.assertEqual(request["thinking"], {"type": "disabled"})
-                self.assertEqual(request["reasoning_effort"], "none")
+                self.assertEqual(request["thinking"], {"type": "enabled"})
+                self.assertEqual(request["reasoning_effort"], "medium")
                 self.assertIn("json", request["messages"][0]["content"].lower())
                 self.assertEqual(request["response_format"], {"type": "json_object"})
                 self.assertEqual(result["usage"], raw["usage"])
@@ -346,6 +346,24 @@ class DriverStagesTests(unittest.TestCase):
             (args.output / "algorithm_snapshot" / own_name).write_text("changed")
             with self.assertRaisesRegex(ValueError, "Frozen input changed"):
                 transport.checked_inputs(args)
+
+    def test_frozen_execution_validates_old_bytes_without_regenerating_new_prompt(self):
+        corpus, evidence, pending = synthetic_inputs(0)
+        with TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            stack.enter_context(patch.object(transport.driver, "algorithm_hashes", return_value={}))
+            stack.enter_context(patch.object(transport, "transport_hashes", return_value={}))
+            stack.enter_context(patch.object(transport.proposals, "generate", return_value=pending))
+            source = self.source_preparation(root, corpus, evidence)
+            args = SimpleNamespace(case="synthetic", source_prepared=source, output=root / "prepared", rerun_id="r1")
+            transport.prepare(args)
+            transport.complete(args)
+            with patch.object(model, "SYSTEM", "A different future JSON prompt"), \
+                    patch.object(model, "load_completion", side_effect=AssertionError("Do not reinterpret old model replies")):
+                transport.checked_round(args, check_code=False)
+            (args.output / "rounds/r1/candidates.json").write_text("[{}]")
+            with self.assertRaisesRegex(ValueError, "artifact changed"):
+                transport.checked_round(args, check_code=False)
 
 
 if __name__ == "__main__":

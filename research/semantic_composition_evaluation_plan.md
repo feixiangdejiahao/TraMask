@@ -47,7 +47,7 @@ mini-swe-agent 的历史版本用于 trajectory 复现；生成测试的普通 p
 
 ## 4. 判定与计数
 
-固定主矩阵为 **7 case × 2 rounds = 14 单元**；`direct` 是单独消融，不能与两轮筛选产物混算。最少同时保存任务单元、唯一静态义务、运行参数叶子和去重缺陷四层计数。多参数叶子不冒充独立组合，跨轮重复项不冒充不同测试。
+固定主矩阵为 **7 case × 2 rounds = 14 单元**；旧 generic driver 的直接生成对照是单独消融，不能与两轮方法产物混算。新 semantic transport driver 采用 `rounds/r1|r2/frozen/direct`，其中内层 `direct` 只是复用物化适配器；两轮身份取 `completion_round`，不得误算为第三个消融。最少同时保存任务单元、唯一静态义务、运行参数叶子和去重缺陷四层计数。多参数叶子不冒充独立组合，跨轮重复项不冒充不同测试。
 
 每条义务的候选报警要求：至少一个匹配测试体失败；该义务全部声明来源控制及参数化叶子均为 pass；无相关 setup/collection、编译、超时、transport 或报告错误。skip/xfail、缺失、error、未声明控制均不能当作控制通过。全局错误保守阻断该运行的缺陷主张；若能证明错误不相关，须另留逐项依据，不能静默忽略。
 
@@ -81,3 +81,31 @@ mini-swe-agent 的历史版本用于 trajectory 复现；生成测试的普通 p
 5. **限制比较承诺。** direct、模型自由生成和筛选方法预算/能力不同，分别报告；保留两轮全部结果和总成本，不为时间压力追加“最好一轮”选择。发现率、参考报警率、错误 oracle 比例和真正的 FPR/recall/修复率继续区分。
 
 本文是新轮执行前计划，不代表新方法已经通过任何 pilot，也不为旧数据补作预注册。
+
+## 7. 新 driver 的独立评价实现
+
+只读复核 `experimental/semantic_transport/{proposals,oracle,state_contexts,model,contracts}.py` 和 `scripts/run_semantic_transport.py` 后，评价使用独立的 `scripts/evaluate_semantic_transport.py`，不导入生成器、runner、provider 或被测仓库。所有输出路径必须新建。
+
+```bash
+.venv/bin/python scripts/evaluate_semantic_transport.py inventory \
+  --experiment-root results/semantic_transport/batchN --output results/semantic_transport/batchN/inventory_v1.json
+
+# 独立审阅者填写 inventory 内 oracle_review_template，保留每条 artifact SHA。
+.venv/bin/python scripts/evaluate_semantic_transport.py seal \
+  --experiment-root results/semantic_transport/batchN \
+  --reviews results/semantic_transport/batchN/oracle_reviews_v1.json \
+  --output results/semantic_transport/batchN/oracle_audit_before_reference.json
+
+.venv/bin/python scripts/evaluate_semantic_transport.py evaluate \
+  --experiment-root results/semantic_transport/batchN \
+  --sealed-oracles results/semantic_transport/batchN/oracle_audit_before_reference.json \
+  --output results/semantic_transport/batchN/candidate_evaluation_v1.json
+```
+
+`inventory/evaluate` 默认不读取 reference result。只有显式 `evaluate --include-reference` 且 oracle seal 与当前全部生成身份一致时才读取；seal 前 reference 执行目录存在则拒绝封存。其检查证明所见路径/产物的时序和字节一致性，不形式化证明历史上从未访问其他参考副本。目标缺陷结论另用 `--target-reviews` 提供已确认缺陷、目标匹配、根因 ID 和证据；有效 oracle 的候选报警未经这一步仍是待确认报警。
+
+driver 的机械语义边界：纯表达式求值、类型/字面量渲染、源值来源、词法绑定和可选 source witness 只能拒绝已知不成立的候选；没有为通用组合提供正确性证明。state-context 的 may-effect witness 表明插入操作可能影响观察，不能当成 expected-value witness。审核必须覆盖完整冻结测试：选中断言之前保留的 `raises` 或其他断言、被中和断言的求值效果、被截去后缀/清理的影响，以及完整 expected 表达式，不能只核验被替换的单个 literal。
+
+当前冻结预算为 128 pending、24 shown、每轮至多 8 completion、一次调用、10,000 输出 tokens、temperature=0；最多 8 个物化候选自然低于 10 个最终测试上限。静态拒绝、模型省略、guard=false、表达式校验拒绝、物化拒绝和 API 协议失败分别保留；特别是 provider 在 JSON 模式下因请求格式拒绝时，属于通信/协议阻断，不能称为错误 oracle 或语义能力的漏检证据。它仍意味着该轮尚未完成严格十四单元目标。
+
+评价脚本的合成回归覆盖空 `errors` 下的 suite error、来源控制全部参数叶子、未声明/缺失控制、默认不读参考、未知 oracle 与参考差分分离、独立目标判定、全十四单元成功门槛，以及封存后产物变化。测试只使用临时合成 JSON，不执行被测程序或调用模型。

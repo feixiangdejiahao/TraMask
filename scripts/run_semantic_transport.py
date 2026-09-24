@@ -37,6 +37,9 @@ def write_json(path: Path, value: object) -> None:
 def transport_hashes() -> dict:
     paths = [*sorted((ROOT / "experimental/semantic_transport").glob("*.py")),
              ROOT / "experimental/llm_baseline.py",
+             ROOT / "experimental/finite_inputs.py", ROOT / "experimental/state_regions.py",
+             ROOT / "experimental/observation_projection.py", ROOT / "experimental/local_literal_contexts.py",
+             ROOT / "experimental/port_exchange.py",
              Path(__file__).resolve()]
     return {str(path.relative_to(ROOT)): driver.digest(path) for path in paths}
 
@@ -127,6 +130,10 @@ def checked_inputs(args, *, check_code=True) -> dict:
     if check_code and (manifest["algorithm_sha256"] != driver.algorithm_hashes()
                        or manifest["transport_algorithm_sha256"] != transport_hashes()):
         raise ValueError("Algorithm changed after preparation; use a new output directory")
+    if not check_code:
+        # Execution consumes already frozen bytes. Recreating an old prompt
+        # with a new generator is neither necessary nor a valid integrity test.
+        return manifest
     pending = json.loads((output / "pending.json").read_bytes())
     shown = json.loads((output / "input.json").read_bytes())
     model.validate_input(shown, pending)
@@ -234,6 +241,11 @@ def checked_round(args, *, check_code=True):
         raise ValueError("Round belongs to a different preparation or is incomplete")
     for name, expected_hash in {**manifest["algorithm_sha256"], **manifest["transport_algorithm_sha256"]}.items():
         _checked_file(adapted.output / "algorithm_snapshot", name, expected_hash)
+    if not check_code:
+        response = json.loads((adapted.output / "completion/manifest.json").read_bytes())
+        if not response.get("valid") or model.encoded(response) != model.encoded(marker["result"]):
+            raise ValueError("Round receipt differs from its frozen completion cache")
+        return inputs, manifest, case
     pending = json.loads((args.output / "pending.json").read_bytes())
     shown = json.loads((args.output / "input.json").read_bytes())
     response, validation = model.load_completion(adapted.output / "completion", shown, pending)

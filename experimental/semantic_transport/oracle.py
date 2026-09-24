@@ -108,8 +108,52 @@ def _copy_value(value: Any, limits: Limits = DEFAULT_LIMITS, *, allow_unknown=Fa
 _TAGS = {"$tuple", "$set", "$frozenset", "$bytes_hex", "$mapping", "$unknown"}
 
 
+def _stable_value_key(value):
+    """A type-sensitive structural order, independent of hash iteration order."""
+    typ = type(value)
+    if typ in {list, tuple}:
+        return (typ.__name__, tuple(_stable_value_key(v) for v in value))
+    if typ in {set, frozenset}:
+        return (typ.__name__, tuple(sorted(_stable_value_key(v) for v in value)))
+    if typ is dict:
+        # Insertion order is observable for dictionaries; do not sort their items.
+        return ('dict', tuple((_stable_value_key(k), _stable_value_key(v)) for k, v in value.items()))
+    return (typ.__name__, repr(value))
+
+
+def _python_literal(value):
+    """Canonical closed expressions; preserve ordered containers and exact types."""
+    typ = type(value)
+    if typ is list:
+        return '[' + ', '.join(_python_literal(v) for v in value) + ']'
+    if typ is tuple:
+        items = ', '.join(_python_literal(v) for v in value)
+        return '(' + items + (',' if len(value) == 1 else '') + ')'
+    if typ is dict:
+        return '{' + ', '.join(_python_literal(k) + ': ' + _python_literal(v)
+                               for k, v in value.items()) + '}'
+    if typ in {set, frozenset}:
+        if not value:
+            return 'set()' if typ is set else 'frozenset()'
+        items = '{' + ', '.join(_python_literal(v) for v in sorted(value, key=_stable_value_key)) + '}'
+        return items if typ is set else 'frozenset(' + items + ')'
+    return repr(value)
+
+
+def _contains_unordered(value):
+    """Whether a builtin str conversion would expose set iteration order."""
+    typ = type(value)
+    if typ in {set, frozenset}:
+        return True
+    if typ in {list, tuple}:
+        return any(_contains_unordered(v) for v in value)
+    if typ is dict:
+        return any(_contains_unordered(k) or _contains_unordered(v) for k, v in value.items())
+    return False
+
+
 def encode_value(value: Any, *, limits: Limits = DEFAULT_LIMITS) -> Any:
-    """JSON-safe values. Exact single-key tag-shaped dictionaries are escaped."""
+    """JSON-safe values preserving mapping order even with JSON key sorting."""
     if type(value) is Unknown:
         return {"$unknown": value.reason}
     value = _copy_value(value, limits, allow_unknown=True)
@@ -121,14 +165,14 @@ def encode_value(value: Any, *, limits: Limits = DEFAULT_LIMITS) -> Any:
         if typ is tuple:
             return {"$tuple": [enc(x) for x in v]}
         if typ in {set, frozenset}:
-            return {"$set" if typ is set else "$frozenset": [enc(x) for x in sorted(v, key=repr)]}
+            return {"$set" if typ is set else "$frozenset": [enc(x) for x in sorted(v, key=_stable_value_key)]}
         if typ is bytes:
             return {"$bytes_hex": v.hex()}
         if typ is list:
             return [enc(x) for x in v]
         if typ is dict:
-            if all(type(k) is str for k in v) and not (len(v) == 1 and next(iter(v)) in _TAGS):
-                return {k: enc(x) for k, x in v.items()}
+            # Model/cache JSON is canonically key-sorted. A pair array retains
+            # the source order, which list(dict) and str(dict) can observe.
             return {"$mapping": [[enc(k), enc(x)] for k, x in v.items()]}
         return v
 
@@ -335,7 +379,12 @@ def evaluate_expression(expression: str, pre=(), arg=(), *, limits: Limits = DEF
         if isinstance(node, ast.IfExp):
             return run(node.body if run(node.test) else node.orelse)
         if isinstance(node, ast.Call):
-            return checked(_BUILTINS[node.func.id](run(node.args[0])))
+            argument = run(node.args[0])
+            name = node.func.id
+            if ((name in {'list', 'tuple'} and type(argument) in {set, frozenset})
+                    or name == 'str' and _contains_unordered(argument)):
+                _fail('unordered_conversion', 'Order-sensitive conversion of a set/frozenset is unsupported')
+            return checked(_BUILTINS[name](argument))
         _fail("invalid_expression", f"Cannot evaluate node: {type(node).__name__}")
 
     try:
@@ -632,7 +681,7 @@ def emit_literal(value: Any, language: str, type_hint: str | None = None, *, lim
     """Emit a closed literal, rejecting ambiguous/unrepresentable target values."""
     value = _copy_value(value, limits)
     if language == "python":
-        return repr(value)
+        return _python_literal(value)
     if language == "go":
         if value is None and type_hint is None:
             return "nil"
