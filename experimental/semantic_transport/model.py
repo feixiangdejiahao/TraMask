@@ -47,7 +47,7 @@ selected observation cannot express the required property, omit that candidate.
 Only literals, pre/arg indexing, slicing, arithmetic, boolean/comparison operators,
 conditional expressions and len/str/tuple/list/set are allowed. No attributes,
 imports, comprehensions, calls to subject code or other names are permitted.
-Return exactly {"completions":[{"candidate_id":"c0","observe":0,
+Return exactly this JSON format: {"completions":[{"candidate_id":"c0","observe":0,
 "expected":"pre[0]","guard":null}]}. Omit unsupported candidates. Return at most
 8 completions. An empty list is allowed. No prose, markdown or other keys.
 '''

@@ -92,6 +92,8 @@ class CompletionCacheTests(unittest.TestCase):
                 self.assertEqual(request["temperature"], 0)
                 self.assertEqual(request["thinking"], {"type": "disabled"})
                 self.assertEqual(request["reasoning_effort"], "none")
+                self.assertIn("json", request["messages"][0]["content"].lower())
+                self.assertEqual(request["response_format"], {"type": "json_object"})
                 self.assertEqual(result["usage"], raw["usage"])
                 checked, validation = model.load_completion(root / "round", shown, pending)
                 self.assertTrue(checked["valid"])
