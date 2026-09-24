@@ -53,6 +53,12 @@ an added observation may have a different source expected slot from the original
 The optional guard is evaluated on these frozen inputs; false rejects a candidate
 and never becomes a runtime skip. No actual output or execution feedback is given.
 You cannot change test code, inputs, operations, observations, helpers or IDs.
+If expected_hole.mode is source_expected_template, the program owns the entire
+expected expression's shape. pre[source_expected_slot] is an ordered tuple of
+its primitive literal values, with slots described by value_holes. Return a
+tuple or list of the same length and exact primitive types. The program fills
+these values into its fixed expression; you cannot change constructor names,
+bindings, dictionary keys, field names, indexing, type syntax or container shape.
 Some candidates provide source expectation witnesses with the same assertion
 frame: before pre, transformed arg, and known after. Your expression must also
 match each applicable witness. These are existing test expectations, not outputs
@@ -159,6 +165,16 @@ def presentation(corpus: dict, evidence: dict, pending: dict) -> dict:
                 if projection else {'original_text': source_slice(row['expected_span']),
                     'original_source_span': row['expected_span'], 'source_expected_slot': 0,
                     'interpretation': 'Only this source expression is replaced. pre[0] is the value of this hole, which may be only one literal inside a larger expected expression.'})
+        if row.get('expected_template') is not None:
+            template = row['expected_template']
+            raw = template['text'].encode('utf-8')
+            hole.update(mode='source_expected_template',
+                        original_text=template['text'],
+                        value_holes=[{'vector_index': i, 'original_text': raw[item['start_byte']:item['end_byte']].decode('utf-8'),
+                                      'expression_byte_span': {'start_byte': item['start_byte'], 'end_byte': item['end_byte']},
+                                      'value_type': item['value_type']}
+                                     for i, item in enumerate(template['holes'])],
+                        interpretation='Return one tuple or list with the same arity and exact primitive types as pre[0]. Only these ordered literal values change; all other expected expression text is fixed by the program.')
         shown.append({"candidate_id": f"c{index}", "language": row["language"],
                       "source_test_ids": source_ids, "base_test_id": test_names[row["base_test_id"]],
                       "preview_body": row["preview_body"],

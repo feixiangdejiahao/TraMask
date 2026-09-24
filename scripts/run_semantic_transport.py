@@ -67,7 +67,7 @@ def prepare(args) -> dict:
     corpus = json.loads(payloads["corpus.json"])
     source_evidence = json.loads(payloads["evidence.json"])
     budget = proposals.Budget(max_candidates=128, shown_candidates=24, top_k=10)
-    pending = proposals.generate(corpus, budget)
+    pending = proposals.generate(corpus, budget, retrieval=json.loads(payloads["retrieval.json"]))
     shown = model.presentation(corpus, source_evidence, pending)
     # Use the same canonical JSON round trip as completion and cache replay.
     shown = json.loads(model.encoded(shown))

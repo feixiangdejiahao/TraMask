@@ -213,7 +213,7 @@ def _parameter_expected(source, current, test_span, initial):
 
 
 def _expected(corpus, capsule, source, row):
-    """One explicit source oracle; a single literal inside a constructor is a hole."""
+    """A static expected value or fixed source constructor with literal value holes."""
     expression = capsule.get('expected')
     if expression is None:
         helpers = [h.get('caller_expected') for h in capsule.get('helper_assertions', [])
@@ -241,25 +241,17 @@ def _expected(corpus, capsule, source, row):
             value = oracle.parse_source_literal(source.text(rhs), corpus['language'])
             if not isinstance(value, oracle.Unknown):
                 return position, value, {'kind': 'preceding_literal_definition', 'span': _position(source, rhs)}
-    literals = []
-    for n in walk(current):
-        if n.children and n.type not in {'string', 'raw_string_literal', 'interpreted_string_literal'}:
-            continue
-        try:
-            value = oracle.parse_source_literal(source.text(n), corpus['language'])
-        except (ValueError, TypeError):
-            continue
-        if isinstance(value, oracle.Unknown):
-            continue
-        if n.type in {'identifier', 'property_identifier', 'field_identifier'}:
-            continue
-        literals.append((n, value))
-    maximal = [(n, v) for n, v in literals if not any(
-        m != n and m.start_byte <= n.start_byte and n.end_byte <= m.end_byte for m, _ in literals)]
-    if len(maximal) == 1:
-        n, value = maximal[0]
-        return _position(source, n), value, {'kind': 'single_literal_in_source_expected', 'outer': text}
-    raise ValueError('expected_not_statically_available')
+    from .expected_templates import extract_template
+    template = extract_template(source, position, min_holes=1)
+    values = tuple(oracle.decode_value(hole['value']) for hole in template['holes'])
+    if len(values) == 1:
+        hole = template['holes'][0]
+        span = dict(position, start_byte=position['start_byte'] + hole['start_byte'],
+                    end_byte=position['start_byte'] + hole['end_byte'])
+        span.update(line=source.data[:span['start_byte']].count(b'\n') + 1,
+                    end_line=source.data[:span['end_byte']].count(b'\n') + 1)
+        return span, values[0], {'kind': 'single_literal_in_source_expected', 'outer': text}
+    return position, values, {'kind': 'source_expected_template', 'template': template}
 
 
 def _direct_statement(source, body, position):
@@ -358,6 +350,9 @@ def atomic_body(corpus, source, proposal, capsule, expected_span, expected_liter
         text = ('\n' + indent).join(statements) + '\n' + indent + text
     if corpus['language'] != 'python':
         text += '\n}'
+    if corpus['language'] == 'go':
+        from .go_slice_bindings import normalize_body
+        text = normalize_body(text)
     return text, neutralized
 
 
@@ -393,7 +388,9 @@ def _source_string_values(corpus):
     return dict(corpus, donors=donors), {'corrected': corrected, 'unsupported': unsupported}
 
 
-def generate(corpus, budget=Budget()):
+def generate(corpus, budget=Budget(), *, retrieval=None):
+    from .seed_selection import select as select_seeds
+    corpus, seed_selection = select_seeds(corpus, retrieval, top_k=budget.top_k)
     from experimental.finite_inputs import augment_corpus
     from experimental.local_literal_contexts import generate as local_contexts
     from experimental.port_exchange import generate as port_contexts
@@ -437,7 +434,8 @@ def generate(corpus, budget=Budget()):
             except (ValueError, TypeError):
                 pass
         relevant = [c for c in by_test[parent['id']] if _affected(c, context)]
-        relevant.sort(key=lambda c: (c['incidental'], not bool(c.get('retrieval_anchor_ids')), c['assertion_span']['start_byte']))
+        relevant.sort(key=lambda c: (c.get('retrieval_anchor_rank') or 99999, c['incidental'],
+                                    not bool(c.get('retrieval_anchor_ids')), c['assertion_span']['start_byte']))
         for capsule in relevant[:budget.contexts_per_observation]:
             try:
                 expected_span, value, provenance = _expected(corpus, capsule, source, original_row)
@@ -446,7 +444,12 @@ def generate(corpus, budget=Budget()):
                     original = source_text(corpus, provenance.get('span', expected_span)).strip()
                     match = re.match(r'((?:\[\d*\]\w+|map\[\w+\]\w+))\s*\{', original)
                     hint = match.group(1) if match else None
-                literal = oracle.emit_literal(value, corpus['language'], hint)
+                expected_template = provenance.get('template')
+                if expected_template is not None:
+                    from .expected_templates import render_template
+                    literal = render_template(expected_template, value, corpus['language'])
+                else:
+                    literal = oracle.emit_literal(value, corpus['language'], hint)
                 body, neutralized = atomic_body(corpus, source, context, capsule, expected_span, literal, new_row)
                 mechanical = validate_body(corpus, parent['id'], body)
                 if mechanical['status'] == 'unsupported':
@@ -465,8 +468,15 @@ def generate(corpus, budget=Budget()):
                                   **({'go_type': hint} if hint else {})}],
                 'parameter_bindings': {k: oracle.encode_value(v) for k, v in new_row.items()},
                 'preview_body': body, 'neutralized_assertions': neutralized,
-                'priority': [parent.get('retrieval_rank') or 99999, int(capsule['incidental']),
+                'priority': [parent.get('retrieval_rank') or 99999, capsule.get('retrieval_anchor_rank') or 99999,
+                             int(capsule['incidental']),
                              int(not bool(capsule.get('retrieval_anchor_ids'))), capsule['assertion_span']['start_byte']],
+                'retrieval_anchor': {'id': capsule.get('best_retrieval_anchor_id'),
+                                     'rank': capsule.get('retrieval_anchor_rank')},
+                'retrieval_parent': dict(parent.get('retrieval_provenance', {}),
+                                         effective_rank=parent.get('retrieval_rank'),
+                                         original_corpus_rank=parent.get('original_retrieval_rank')),
+                **({'expected_template': expected_template} if expected_template is not None else {}),
                 'semantic_status': 'requires_observation_transformer'})
     from .source_witnesses import attach
     witnessed = attach(corpus, _select(corpus, candidates, budget.max_candidates))
@@ -479,6 +489,7 @@ def generate(corpus, budget=Budget()):
                        'projected_observations': len(projected['candidates']),
                        'candidates': len(selected), 'shown': min(len(selected), budget.shown_candidates)},
             'finite_inputs': corpus.get('finite_inputs', {}),
+            'seed_selection': seed_selection,
             'source_string_values': string_values,
             'source_witnesses': {'attached': witnessed['attached'], 'skipped': witnessed['skipped']},
             'projection_counts': projected['counts'], 'projection_skipped': projected['skipped'],

@@ -130,6 +130,8 @@ def _origins(index, unit, root):
 
 def _binding_rhs(unit, name, at):
     """Resolve one live lexical binding; no joins, loop-carried or indirect writes."""
+    if unit.source.language == 'go' and name == '_':
+        return None  # The blank identifier discards a value; it never binds one.
     ordinary = {'assignment', 'assignment_statement', 'short_var_declaration',
                 'variable_declarator', 'var_spec', 'const_spec'}
     writes = ordinary | {'augmented_assignment', 'augmented_assignment_expression',
@@ -448,6 +450,9 @@ def _bank(corpus, index, budget, skipped):
             truth_relation = False
             try:
                 expected, seed, provenance = _expected(corpus, capsule, source, {})
+                if provenance.get('kind') == 'source_expected_template':
+                    skipped['observer_expected_template_not_transferred'] += 1
+                    continue
                 expected_node = _find(source, capsule['expected']['span']) if capsule.get('expected') else None
                 if (provenance['kind'] == 'single_literal_in_source_expected' and expected_node is not None
                         and _roots(index, unit, expected_node)):
@@ -665,6 +670,7 @@ def generate_projections(corpus, pending_candidates, budget=Budget()):
                     args, origins = _inputs(source, index, unit, statement, root, pending)
                     cid = _id('observation_projection', pending['id'], actual, template['capsule']['id'])
                     row = copy.deepcopy(pending)
+                    row.pop('expected_template', None)
                     row.pop('witnesses', None)  # Witnesses of a different observation do not transfer.
                     row.update(id=cid, candidate_id=cid, arg=args, preview_body=body,
                                pre=copy.deepcopy(pending.get('pre', [])) + [oracle.encode_value(template['seed'])],

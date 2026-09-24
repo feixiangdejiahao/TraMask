@@ -841,14 +841,18 @@ def validate_completions(payload: str | dict, candidates: list[dict], *, limits:
                     _fail("witness_refuted", "Proposed relation contradicts a supplied source expectation witness")
                 checked += 1
             hint = observation.get("go_type") if type(observation) is dict else None
-            literal = emit_literal(value, candidate.get("language", "python"),
-                                   hint or candidate.get("type_hint"), limits=limits)
+            if candidate.get("expected_template") is not None:
+                from .expected_templates import render_template
+                literal = render_template(candidate["expected_template"], value, candidate.get("language", "python"), limits=limits)
+            else:
+                literal = emit_literal(value, candidate.get("language", "python"),
+                                       hint or candidate.get("type_hint"), limits=limits)
             accepted.append({"candidate_id": cid, "observe": row["observe"],
                              "expected_expr": expected, "guard_expr": guard,
                              "value": encode_value(value, limits=limits), "literal": literal,
                              **dependencies, "witnesses_checked": checked,
                              "witnesses_inapplicable": inapplicable,
-                             "oracle_mode": "absolute_from_source_values"})
+                             "oracle_mode": "source_expected_template" if candidate.get("expected_template") is not None else "absolute_from_source_values"})
         except OracleError as exc:
             rejected.append({"candidate_id": cid, "code": exc.code, "reason": exc.reason})
         except (KeyError, TypeError, ValueError) as exc:

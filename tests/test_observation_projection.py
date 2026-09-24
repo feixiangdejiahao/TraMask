@@ -326,6 +326,38 @@ def multi_candidates(corpus):
     return generate_projections(corpus, pending, Budget(projections_per_action=12))
 
 
+def test_go_blank_identifier_has_no_object_binding_but_retains_rhs_effects():
+    from anchor_retrieval.index import Index
+    from anchor_retrieval.syntax import Source, child, walk
+
+    source = Source('blank_test.go', '''package toy
+import "testing"
+type Box struct { n int }
+func NewBox() *Box { return &Box{} }
+func (b *Box) Touch() *Box { b.n++; return b }
+func (b *Box) Size() int { return b.n }
+func TestBlank(t *testing.T) {
+ left := NewBox(); _ = left
+ right := NewBox(); _ = right
+ _ = left.Touch()
+ if left.Size() != 1 { t.Fatal("size") }
+}
+''', 'go')
+    index = Index([source], '')
+    unit = next(unit for unit in index.units.values() if unit.name == 'TestBlank')
+    flow = index.flow(unit.id)
+    assert '_' not in flow.env
+    assert not any(node.get('variable') == '_' for node in flow.nodes)
+    effect = next(call for call in flow.calls if flow.nodes[call.node]['text'] == 'left.Touch()')
+    assert effect.node in flow.slice([flow.assertions[0].node])
+    statement = next(node for node in walk(unit.body) if node.type == 'if_statement')
+    observed = child(child(statement, 'condition'), 'left')
+    roots = observation_projection._roots(index, unit, observed)
+    ports = observation_projection._target_ports(index, unit, statement, roots, Budget())
+    names = {source.text(node) for port in ports for node in port['nodes']}
+    assert names == {'left', 'right'}
+
+
 def pair_candidate(result, actual):
     return next(c for c in result['candidates'] if c['observations'][0]['text'] == (
                     'True if (' + actual + ') else False'

@@ -398,6 +398,8 @@ class Flow:
         if target is None:
             return
         text = self.source.text(target)
+        if self.source.language == 'go' and target.type == 'identifier' and text == '_':
+            return  # The RHS was evaluated, but Go's blank identifier has no binding.
         if target.type in {'tuple_pattern', 'pattern_list', 'expression_list', 'tuple', 'list_pattern', 'array_pattern'}:
             children = target.named_children
             for i, part in enumerate(children):
