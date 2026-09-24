@@ -354,22 +354,45 @@ class Flow:
         """Keep previous potentially stateful operations in later observations."""
         names = []
         if receiver is not None:
-            name = self.source.text(receiver).split('.')[0]
-            if name in self.env:
+            name = self._state_root(receiver)
+            if name is not None:
                 names.append(name)
         # Unknown/helper functions may mutate object arguments. Preserve an explicit may edge.
         for arg in args:
-            if arg.type == 'identifier' and self.source.text(arg) in self.env:
-                name = self.source.text(arg)
-                if any(not t.startswith('@builtin:') or t in {'@builtin:list', '@builtin:dict', '@builtin:set'}
-                       for t in self.env[name].types):
+            name = self._state_root(arg)
+            if name is not None:
+                types = self.env[name].types
+                if not types or any(not t.startswith('@builtin:') or t in {'@builtin:list', '@builtin:dict', '@builtin:set'}
+                                    for t in types):
                     names.append(name)
         for name in sorted(set(names)):
-            old = self.env[name]
-            merged = self.add('may_effect', name, node, [old, value], types=old.types,
-                              constants=old.constants, regexes=old.regexes, variable=name)
-            self.edge_kinds[merged.id, value.id] = 'may_effect'
-            self.env[name] = merged
+            self._state_effect(name, value, node)
+
+    def _state_root(self, node):
+        """Find a locally tracked access root, without claiming points-to facts."""
+        while node is not None:
+            if node.type == 'identifier':
+                name = self.source.text(node)
+                return name if name in self.env else None
+            if node.type in ATTRS:
+                node = attr_parts(node)[0]
+            elif node.type in {'subscript', 'subscript_expression', 'index_expression'}:
+                node = child(node, 'value', 'object', 'operand')
+            elif node.type == 'keyword_argument':
+                node = child(node, 'value')
+            elif node.type in {'parenthesized_expression', 'unary_expression',
+                               'list_splat', 'dictionary_splat'}:
+                node = child(node, 'operand', 'argument') or next(iter(node.named_children), None)
+            else:
+                return None
+        return None
+
+    def _state_effect(self, name, value, node, address=()):
+        old = self.env[name]
+        merged = self.add('may_effect', name, node, [old, value, *address], types=old.types,
+                          constants=old.constants, regexes=old.regexes, variable=name)
+        self.edge_kinds[merged.id, value.id] = 'may_effect'
+        self.env[name] = merged
 
     def assign(self, target, value: Value, rhs=None):
         if target is None:
@@ -384,11 +407,31 @@ class Flow:
                         self.nodes[projected.id]['factor'] = self.index.factor_key(regex, i + 1)
                 self.assign(part, projected)
             return
+        address = []
+        state_root = None
+        if target.type in ATTRS:
+            obj, _ = attr_parts(target)
+            address.append(self.expression(obj))
+            state_root = self._state_root(obj)
+        elif target.type in {'subscript', 'subscript_expression', 'index_expression'}:
+            obj = child(target, 'value', 'object', 'operand')
+            address.append(self.expression(obj))
+            index = child(target, 'subscript', 'index')
+            if index is not None:
+                address.append(self.expression(index))
+            state_root = self._state_root(obj)
         defined = self.add('definition', text, target, [value], types=value.types,
                            constants=value.constants, regexes=value.regexes, variable=text)
         if rhs is not None and rhs.type in ATTRS:
             self.nodes[defined.id]['alias'] = self.source.text(rhs)
         self.env[text] = defined
+        if state_root is not None:
+            # Updating a field/element also changes later observations of the
+            # receiver. Other names aliasing that receiver remain unproved.
+            # The address controls the heap update, not the assigned field's
+            # value provenance. Keep it on the state node so unrelated earlier
+            # field writes do not pollute field-specific constructor summaries.
+            self._state_effect(state_root, defined, target, address)
         if target.type in ATTRS:
             obj, field = attr_parts(target)
             base = self.source.text(obj)
@@ -474,12 +517,14 @@ class Flow:
             for n in node.named_children:
                 if not self.assertion_call(n):
                     self.statements(n)
-        elif kind in {'assignment', 'augmented_assignment', 'assignment_statement', 'short_var_declaration', 'variable_declarator', 'named_expression'}:
+        elif kind in {'assignment', 'augmented_assignment', 'assignment_expression',
+                      'augmented_assignment_expression', 'assignment_statement',
+                      'short_var_declaration', 'variable_declarator', 'named_expression'}:
             target = child(node, 'left', 'name')
             rhs = child(node, 'right', 'value')
             if rhs is not None:
                 value = self.expression(rhs)
-                if kind == 'augmented_assignment' and self.source.text(target) in self.env:
+                if kind in {'augmented_assignment', 'augmented_assignment_expression'} and self.source.text(target) in self.env:
                     old = self.env[self.source.text(target)]
                     value = self.add('update', self.source.text(node), node, [old, value], types=old.types | value.types)
                 # Go one-to-one tuple assignments retain separate value provenance.
@@ -490,21 +535,51 @@ class Flow:
                         self.assign(left, self.expression(right), right)
                 else:
                     self.assign(target, value, rhs)
-        elif kind in {'lexical_declaration', 'variable_declaration', 'var_declaration', 'const_declaration', 'var_spec', 'const_spec'}:
+        elif kind in {'var_spec', 'const_spec'}:
+            targets = node.children_by_field_name('name')
+            rhs = child(node, 'value')
+            rights = rhs.named_children if rhs is not None and rhs.type == 'expression_list' else []
+            if len(targets) == len(rights) and targets:
+                # Evaluate the complete RHS before introducing any new binding.
+                values = [self.expression(right) for right in rights]
+                for target, right, value in zip(targets, rights, values):
+                    self.assign(target, value, right)
+            else:
+                value = self.expression(rhs) if rhs is not None else self.add(
+                    'implicit_zero' if kind == 'var_spec' else 'unknown', '', node,
+                    types=self.index.type_names(self.source.text(child(node, 'type'))))
+                for target in targets:
+                    projected = self.add('projection', self.source.text(target), target, [value], types=value.types)
+                    self.assign(target, projected, rhs)
+        elif kind in {'lexical_declaration', 'variable_declaration', 'var_declaration', 'const_declaration'}:
             for n in node.named_children:
                 self.statements(n)
         elif kind in {'if_statement', 'for_statement', 'while_statement', 'for_in_statement', 'range_clause', 'switch_statement', 'expression_switch_statement', 'try_statement', 'with_statement'}:
+            range_clause = next((n for n in node.named_children if n.type == 'range_clause'), None)
             condition = child(node, 'condition', 'value', 'right')
-            if condition is not None:
-                self.guards.append(self.expression(condition).id)
-            # A walrus definition in a condition reaches the body.
+            if range_clause is not None:
+                condition = child(range_clause, 'right')
+            condition_value = self.expression(condition) if condition is not None else None
+            # A walrus definition in a condition reaches the body. Iteration
+            # definitions depend on the container, but zero iterations still
+            # preserve the incoming environment at the join.
             before = dict(self.env)
+            target = child(range_clause or node, 'left') if kind in {
+                'for_statement', 'for_in_statement', 'range_clause'} else None
+            if target is not None and condition_value is not None:
+                iteration = self.add('iteration', self.source.text(target), target, [condition_value])
+                self.assign(target, iteration)
+            if kind == 'range_clause':
+                return
+            body_environment = dict(self.env)
+            if condition is not None:
+                self.guards.append(condition_value.id)
             environments = [before]
             for branch in node.named_children:
-                if branch == condition:
+                if branch == condition or branch == range_clause or branch == target:
                     continue
                 if branch.type in BLOCKS or branch.type in {'else_clause', 'elif_clause', 'except_clause', 'finally_clause', 'case_statement', 'range_clause'}:
-                    self.env = dict(before)
+                    self.env = dict(body_environment)
                     self.statements(branch)
                     environments.append(dict(self.env))
                 elif kind in {'for_statement', 'for_in_statement'}:
