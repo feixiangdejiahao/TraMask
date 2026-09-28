@@ -75,6 +75,26 @@ def test_failed_control_blocks_otherwise_reviewed_failure(experiment):
     assert evaluate(experiment)["counts"]["target_gap_detected"] == 0
 
 
+def test_separate_source_phase_contexts_survive_later_timeout(experiment):
+    rows = json.loads(experiment.runs.read_text())
+    for row in rows:
+        context = experiment.runs.parent / (row['role'] + '_context.json')
+        dump(context, {'phase': row['role'], 'source_hash': row['role']})
+        row['execution_context'] = {'phase': row['role'], 'context_file': str(context),
+                                    'control_context': 'separate_unedited_source_snapshot'}
+    dump(experiment.runs, rows)
+    dump(experiment.generated, {'error': 'phase_timeout', 'timed_out': True, 'tests': []})
+    fill_reviews(experiment)
+    candidate = evaluate(experiment)['candidates'][0]
+    assert candidate['control_pass']
+    assert not candidate['generated_test_failure']
+    assert not candidate['target_gap_detected']
+    assert {row['phase'] for row in candidate['execution_contexts']} == {'control', 'generated'}
+    context.write_text('changed context')
+    with pytest.raises(ValueError, match='Frozen evidence changed'):
+        evaluate(experiment)
+
+
 def test_unobserved_declared_control_is_not_pass(experiment):
     dump(experiment.control, {"returncode": 0, "tests": [{"id": "different_test", "status": "pass"}]})
     fill_reviews(experiment)

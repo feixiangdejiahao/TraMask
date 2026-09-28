@@ -281,12 +281,25 @@ def load_runs(path: Path | None) -> tuple[list[dict], list[dict]]:
             manifest_path = manifest_path if manifest_path.is_absolute() else path.parent / manifest_path
             emitted = read(manifest_path)
             frozen.append(freeze_file(manifest_path))
+            materialization = manifest_path.parent / "materialization.json"
+            if materialization.exists():
+                frozen.append(freeze_file(materialization))
+            control_materialization = manifest_path.parent / "control_materialization.json"
+            if control_materialization.exists():
+                frozen.append(freeze_file(control_materialization))
+            for name in ("dependency_recovery.json", "control_dependency_recovery.json"):
+                evidence = manifest_path.parent / name
+                if evidence.exists():
+                    frozen.append(freeze_file(evidence))
             for mount in emitted.get("mounts", []):
                 source = Path(mount["source"])
                 if digest(source) != mount["sha256"]:
                     raise ValueError("Emitted source no longer matches executed manifest")
                 frozen.append(freeze_file(source))
             cached_manifests.add(record["manifest"])
+        context = record.get("execution_context", {}).get("context_file")
+        if context and Path(context).exists():
+            frozen.append(freeze_file(Path(context)))
         requested = record.get("test_ids", [])
         selected = [t for t in tests if any(matches_runtime(t["id"], name) for name in requested)]
         missing = [name for name in requested if not any(matches_runtime(t["id"], name) for t in tests)]
@@ -362,6 +375,7 @@ def evaluate(args) -> dict:
         semantic = {name: reviewed(row["review"][name]) for name in DIMENSIONS}
         detected = control_pass and raw_failure and all(v is True for v in semantic.values())
         result = {**fresh[key], **semantic, "control_pass": control_pass,
+                  "execution_contexts": [r["execution_context"] for r in related if r.get("execution_context")],
                   "generated_test_failure": raw_failure, "target_gap_detected": detected,
                   "generated_test_observed": any(r.get("tests") for r in generated),
                   "controlled_failure": control_pass and raw_failure,

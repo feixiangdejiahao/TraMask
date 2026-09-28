@@ -20,7 +20,12 @@ from experimental.semantic_transport.oracle import (
     OracleError, Unknown, decode_value, emit_literal, encode_value,
     evaluate_expression, parse_source_literal,
 )
-from .frontend import source_text
+
+
+def source_text(frontend: dict, source_span: dict) -> str:
+    """Read frozen source bytes without importing the evolving generator."""
+    data = frontend["sources"][source_span["path"]]["code"].encode()
+    return data[source_span["start_byte"]:source_span["end_byte"]].decode()
 
 
 PROTOCOL = "relational_semantics.v1"
