@@ -55,7 +55,7 @@
 
 **P3与N05：关系有了，期望错误。** P3改为modifier4仍保留Ctrl预期。N05将六个可见字符的宽度改为6，却仍期待丢失最后r的截断字符串；模型修订未修正这一语义。
 
-其余例子仍未构造目标关系，包括P5的GoCall/CompiledFunction组合、P6的共享可变闭包状态、N03重复watch与容量、N04相同数据库/表身份下的UPDATE不变量、N06独立合并并保留兄弟新增文件、N08正确exclusive high（现有s/s+1并非所需s+2）、N09延迟flush前的部分字段更新等。完整理由见三个`batch6_manual_review_*.json`；未offered静态候选仍保留unknown，不把手工找到的未执行场景加入成功数。
+其余例子仍未构造目标关系，包括P5的GoCall/CompiledFunction组合、P6的共享可变闭包状态、N03重复watch与容量、N04相同数据库/表身份下的UPDATE不变量、N06同base/parent下一侧修改已有child文本而另一侧只增加兄弟XML节点、N08正确exclusive high（现有s/s+1并非所需s+2）、N09延迟flush前的部分字段更新等。完整理由见三个`batch6_manual_review_*.json`；未offered静态候选仍保留unknown，不把手工找到的未执行场景加入成功数。
 
 ## 误报、预算与可执行性
 
