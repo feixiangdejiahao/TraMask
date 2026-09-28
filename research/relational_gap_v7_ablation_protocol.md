@@ -16,3 +16,5 @@ The fixed budget is all offered source hypotheses, at most128 per trial, without
 ```
 
 This is an additional experiment with additional execution cost, not an equal-cost improvement over batch6. The frozen batch6 inputs, driver and results remain unchanged.
+
+The initial gate-only scheduler was subsequently stopped after all17 preparations/emissions and **zero subject executions**. The interruption manifest records its PID, signal and zero-execution check. A separately frozen `resume_relational_gap_ablation.py` uses the already emitted files: one worker starts immediately in the free Docker slot while batch6 finishes its last case; the second joins the same fixed registry queue only after `batch6_pipeline/runs.json` exists. Thus both experiments together still use at most two containers. This is solely a resource-scheduling change: no preparation, emission or test is repeated, and no execution code, candidate or timeout changes. Final execution provenance and run index are under `batch7_resumed_pipeline/`.
