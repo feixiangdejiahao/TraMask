@@ -86,6 +86,8 @@ STEP 66 的诊断不是无效：它实际发现 insertion 重复输出，STEP 67
 
 候选代码也将 `HighestDurableSeqNum` 注释为 exclusive（`durability.go:35`），计算 `seqNumEnd = b.durableSeqNum + keyCount`（118行），但 register/signal 使用 `target <= high`（169/194行）。这不是 reviewer 事后才赋予“exclusive”解释：trajectory STEP 45 和 STEP 209 都明确知道区间右开。
 
+补充核对：STEP 117 / 候选 `durability_test.go:102,196` 已在初始化时执行 `WaitForDurability(0)` 和 `DurabilityNotify(0)`，tracker 初始 high=0。因此不能说全局没有 `target=high`。本文所说遗漏端点专指**非空 batch 完成后，由该批次产生的实际 exclusive high**；初始化的相等不覆盖这个来源/阶段。这要求关系反馈保留值的更新来源，单独统计比较结果会误判已经覆盖。
+
 STEP 117 的生成逻辑已经接近正确实验：“call DurabilityNotify(seqNum+count) before commit? Hard to coordinate ordering. Simpler: call … a future seqnum …”。实际代码却先订阅常量100，提交1条，另外只读 `DurabilityNotify(s)`；100的 channel 不检查是否 ready。STEP 118 没补 future assertion。`Wait(s+1)`不是边界错误证据，因为其 test 写了2条记录；STEP 209 甚至明确正确算出这一点。STEP 126 定向 tests 通过，STEP 234 race 定向 tests 通过，均未增加 `target=s+count` 的相等端点。
 
 **可确认的机制。** 生产操作返回的范围与消费目标之间的边界约束在 reasoning 中存在，但实际 tests 用内部点证明成功、远未来证明等待，遗漏恰好相等。future channel 的断言又因实现便利被删去。这是“计划与具体执行输入不一致”和“操作已发生但观察缺失”的联合例子。

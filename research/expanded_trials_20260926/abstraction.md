@@ -116,7 +116,7 @@ for q in recover_observations(executed_validations):
 
 等待实现读取 `target` 和 `highestDurableSeqNum`。候选代码自己把后者定义为排他上界，更新表达式为 `start+count`。程序分析把这两个值选为相关位置，得到 `<,=,>` 三个关系单元。
 
-A 覆盖 target<high，B 覆盖 target>high。target=high 没有见证。因此求解器无需理解“Pebble是什么”，只需在同一 DB 上构造一个 batch，令 `target=batch.start+batch.count`。最短例子写一条记录，立即订阅下一序号，然后检查当前未ready。
+A 覆盖非空 batch 完成后的 target<high，B 覆盖 target>high。**该 batch 完成来源和阶段下**的 target=high 没有见证。2026-09-28 补充核对：初始化的 Wait(0)/Notify(0) 已覆盖 high=0 时的相等，所以不带来源/阶段的三分关系表不足以发现此缺口。设计目标是在同一 DB 上构造一个 batch，令 `target=batch.start+batch.count`；不能把这段推演当成已实现的输入求解器。最短例子写一条记录，立即订阅下一序号，然后检查当前未ready。
 
 候选错误地用 `target<=high` 返回成功，所以组合失败。这是**关系的边界补齐**，而不是把“写入测试”和“等待测试”直接首尾连接。公开完整仓库测试与本轮候选函数组件重放都支持此根因；本轮组件中的起点10是合成值，未执行真实WAL。精确证据见 [G4](go_cases.md#g4pebble成功范围和未来等待的边界没有绑定到同一状态)。
 
