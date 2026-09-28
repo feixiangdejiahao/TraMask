@@ -13,6 +13,7 @@ import copy
 from anchor_retrieval.syntax import CALLS, Source, child, walk
 from generic_composition.engine import expected_only, slot_key
 from relational_gap.closure import ClosureBudget, canonical, identifier, missing_cells
+from relational_gap.structured_ports import carrier_ports
 from experimental.semantic_transport.oracle import parse_source_literal, Unknown
 
 
@@ -55,8 +56,14 @@ def _fingerprint(node, source, locals_, *, erase_arguments=False):
 def recover_rows(corpus, frontend, *, budget=CellBudget()):
     sources = {path: Source(path, value['code'], value['language'])
                for path, value in corpus['sources'].items()}
-    maps = {}
+    maps, ports = {}, {}
+    bindings = {row['id']: row for row in frontend.get('bindings', [])}
     calls = {item['id']: item for item in frontend['calls']}
+    calls_by_test, bindings_by_test = defaultdict(list), defaultdict(list)
+    for row in calls.values():
+        calls_by_test[row['test_id']].append(row)
+    for row in bindings.values():
+        bindings_by_test[row['test_id']].append(row)
     observations = defaultdict(list)
     for item in frontend['observations']:
         if item['kind'] == 'assertion':
@@ -71,6 +78,7 @@ def recover_rows(corpus, frontend, *, budget=CellBudget()):
     for test_id, test in sorted(corpus['tests'].items(), key=lambda p: (p[1].get('retrieval_rank') or 10**9, p[0])):
         local_names = {name: n for n, name in enumerate(test.get('scope_bindings', []))}
         source = sources[test['span']['path']]
+        local_frontend = {'calls': calls_by_test[test_id], 'bindings': bindings_by_test[test_id]}
         if source.path not in maps:
             maps[source.path] = _nodes(source)
         for obs in observations[test_id]:
@@ -93,23 +101,39 @@ def recover_rows(corpus, frontend, *, budget=CellBudget()):
                 for argument in call['arguments']:
                     if argument.get('spread'):
                         continue
-                    options = []
+                    options = {}
                     for donor in donors_by_test[test_id]:
-                        if _pos(donor['span']) == _pos(argument['span']):
-                            options.append(donor)
+                        if donor['id'] not in ports:
+                            ports[donor['id']] = carrier_ports(source, donor, local_frontend)
+                        for port in ports[donor['id']]:
+                            if _pos(port['call_span']) != _pos(call['span']) or port['argument_slot'] != argument['slot']:
+                                continue
+                            path = port.get('structural_path', [])
+                            if not path and _pos(donor['span']) != _pos(argument['span']):
+                                bound = argument.get('binding') or {}
+                                origin = bindings.get(bound.get('origin_binding_id'))
+                                value_span = (origin.get('value') or {}).get('span') if origin else None
+                                if (not origin or bound.get('resolution') != 'local_value_binding' or origin.get('contexts')
+                                        or not value_span or _pos(value_span) != _pos(donor['span'])):
+                                    continue
+                            key = canonical(path)
+                            options.setdefault(key, {'path': path, 'donors': {}})['donors'][_pos(donor['span'])] = donor
+                    # Prefer independent leaves over their enclosing record. A
+                    # leaf's field/index path is part of its coordinate identity.
+                    leaves = [row for row in options.values() if not any(
+                        len(row['path']) < len(other['path']) and other['path'][:len(row['path'])] == row['path']
+                        for other in options.values())]
+                    for row in sorted(leaves, key=lambda item: canonical(item['path'])):
+                        if len(row['donors']) != 1:
                             continue
-                        for port in donor.get('input_slots', []):
-                            if _pos(port['call_span']) == _pos(call['span']) and port['argument_slot'] == argument['slot']:
-                                options.append(donor)
-                                break
-                    # Nested leaves are not independent whole argument values.
-                    options = [d for d in options if not any(_inside(d['span'], o['span']) and _pos(d['span']) != _pos(o['span']) for o in options)]
-                    if len(options) != 1:
-                        continue
-                    donor = options[0]
-                    axis = f'{ordinal}:{argument.get("keyword") or argument["slot"]}'
-                    coordinates[axis] = donor['literal_value']
-                    edits[axis] = donor
+                        donor = next(iter(row['donors'].values()))
+                        axis = f'{ordinal}:{argument.get("keyword") or argument["slot"]}'
+                        if row['path']:
+                            axis += ':' + canonical(row['path'])
+                        coordinates[axis] = donor['literal_value']
+                        edits[axis] = donor
+                        if len(coordinates) >= budget.max_coordinates:
+                            break
                     if len(coordinates) >= budget.max_coordinates:
                         break
                 if len(coordinates) >= budget.max_coordinates:
