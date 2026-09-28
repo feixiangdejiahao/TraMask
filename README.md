@@ -1,6 +1,6 @@
 # 遗漏组合测试：带观察的关系见证
 
-研究定位更新：`(q, ρ)` 暂保留为问题和评价表示。重新阅读原始轨迹后，发现部分交互已被讨论、执行后接受错误解释，或在后续修改后失效，不能统称为“没想到组合”。见 [17 条轨迹的验证逻辑重审](research/trajectory_logic_20260928/README.md)及[判别上下文合成提案](research/distinguishing_context_method.md)。新提案以观察需求指导输入与后续操作的联合构造，尚未实现，也未确立新颖性或效果；[STARS 阅读](research/stars_abstraction_review.md)说明了设计依据。下文记录现有实现及真实结果。
+最新研究设计见 [用关系形状指导测试搜索](research/relation_search_method.md)：从源码和验证提取有界的参与值，按同一对象、观察阶段下的联合关系分组，执行输入编辑并用实际新形状更新搜索。它不再以获得竞争实现为前提；原[判别上下文方案](research/distinguishing_context_method.md)保留为被否决的设计记录。新方向只有[独立机制原型](experimental/relation_frontier_demo/README.md)，尚未完成真实 trial 实现或证明效果、新颖性。原始证据见 [17 条轨迹重审](research/trajectory_logic_20260928/README.md)，设计原则来自 [STARS 阅读](research/stars_abstraction_review.md)。下文记录旧实现及真实结果。
 
 当前原型以 `(q, ρ)` 为研究单位：`q` 是已有测试的观察，`ρ` 是输入、对象或操作之间的关系。程序恢复验证代码、提出关系见证并物化测试；模型只补充受限的局部期望表达式。关系构造、期望正确和真实缺陷检出分别评价，当前实现仍是有界关系域的组合，尚不是统一完备的关系求解器。模型为 **`deepseek-v4-flash`**，使用 `.env` 中已授权的 provider。
 

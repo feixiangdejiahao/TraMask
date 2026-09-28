@@ -1,6 +1,6 @@
 # 动作、观察与小期望变换
 
-本文件保留历史动作/观察组合方案。2026-09-28 重新阅读 STARS 和 17 条原始 trajectory 后，新的[判别上下文合成提案](distinguishing_context_method.md)给出以观察需求反向指导程序构造的候选核心；[证据重审](trajectory_logic_20260928/README.md)纠正了部分案例的“未组合”归因。新提案尚未实现，不能与历史实验成绩混用。
+本文件保留历史动作/观察组合方案。最新研究设计为[用关系形状指导测试搜索](relation_search_method.md)；中间的[判别上下文方案](distinguishing_context_method.md)因依赖难以获得的竞争解释而被否决。[证据重审](trajectory_logic_20260928/README.md)纠正了部分案例的“未组合”归因。新设计只有独立机制原型，不能与历史实验成绩混用。
 
 2026-09-28：新增十条失败轨迹及原七条 pilot 已进入新的 17-trial 发现集实验。当前方法见 [观察相关的关系单元](relational_gap_method_v2.md)，最新完整结果和逐例限制见 [本轮五小时报告](relational_gap_timebox_20260928.md)。下面保留此前七例方法及其历史结果，不能与新方法的指标混读。新增轨迹和研究来源见 [发现集报告](expanded_trials_20260926/README.md) 与 [关系闭包假说](expanded_trials_20260926/abstraction.md)。
 

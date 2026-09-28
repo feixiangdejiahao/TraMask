@@ -1,6 +1,6 @@
 # 从验证见证补齐关系，而不是拼接完整测试
 
-后续研究提案见[判别上下文合成](distinguishing_context_method.md)，原始 trajectory 的成因修正见[17 条验证逻辑重审](trajectory_logic_20260928/README.md)。下文为旧实现记录，不代表新提案已运行。
+后续研究设计见[用关系形状指导测试搜索](relation_search_method.md)；此前[判别上下文合成](distinguishing_context_method.md)已被否决。原始 trajectory 的成因修正见[17 条验证逻辑重审](trajectory_logic_20260928/README.md)。下文为旧实现记录，新设计只有独立机制验证，没有新 pilot 成绩。
 
 2026-09-28 研究定位修订：阅读 STARS 后，确认 `(q, ρ)` 能描述目标和评价结果，却尚不能直接导出统一的构造算法。**它不再被视为已成立的核心算法贡献。** 三个问题观察保留，以下方法与结果作为已实现原型记录；重审依据及新设计应满足的标准见 [STARS 阅读与方法重审](stars_abstraction_review.md)。本次没有新的生成实验或性能改进声明。
 
