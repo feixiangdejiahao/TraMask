@@ -2,11 +2,11 @@
 
 当前原型以 `(q, ρ)` 为研究单位：`q` 是已有测试的观察，`ρ` 是输入、对象或操作之间的关系。程序恢复验证代码、提出关系见证并物化测试；模型只补充受限的局部期望表达式。关系构造、期望正确和真实缺陷检出分别评价，当前实现仍是有界关系域的组合，尚不是统一完备的关系求解器。模型为 **`deepseek-v4-flash`**，使用 `.env` 中已授权的 provider。
 
-**第六批完整评价确认检出 3/17 个 trial：N02、N07、N10。** 17 个 trial 对应 14 个不同 task，都是已见开发集。第七批完整源断言恢复消融仍在运行；已独立确认新增 P2，但不能把跨批成功直接合为本批成绩。全部检出的目标尚未达到，误报尚未穷尽标注，也没有 issue resolution rate 提升证据。
+**最好完整配置检出 4/17 个 trial：P2、N02、N07、N10，仍漏检 13/17。** 第六批为 3/17，第七批统一恢复完整源断言后重新运行全部 17 例，确认上述 4 例。17 个 trial 对应 14 个不同 task，都是已见开发集。全部检出的目标尚未达到，误报尚未穷尽标注，也没有 issue resolution rate 提升证据。
 
 - [当前方法与实现边界](research/relational_gap_method_v2.md)
 - [本轮五小时结果与逐例缺口](research/relational_gap_timebox_20260928.md)
-- [第六批独立评价](research/relational_gap_batch6_evaluation.md)与[第五批评价](research/relational_gap_batch5_evaluation.md)
+- [第七批独立评价](research/relational_gap_batch7_evaluation.md)、[第六批评价](research/relational_gap_batch6_evaluation.md)与[第五批评价](research/relational_gap_batch5_evaluation.md)
 - [新增十条轨迹与组合特征](research/expanded_trials_20260926/README.md)
 - [完整原断言恢复消融协议](research/relational_gap_v7_ablation_protocol.md)
 

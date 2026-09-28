@@ -5,6 +5,7 @@
 - [当前方法与能力边界](relational_gap_method_v2.md)
 - [本轮五小时报告](relational_gap_timebox_20260928.md)：17 个已见 trial 的进展、逐例缺口、误报与泛化限制。
 - [第六批独立评价](relational_gap_batch6_evaluation.md)：确认 N02、N07、N10，共 3/17。
+- [第七批独立评价](relational_gap_batch7_evaluation.md)：完整源断言恢复消融确认 P2、N02、N07、N10，共 4/17，仍漏检 13/17。
 - [第五批评价](relational_gap_batch5_evaluation.md)及[完整原断言恢复消融协议](relational_gap_v7_ablation_protocol.md)。
 - [新增十条轨迹](expanded_trials_20260926/README.md)与[关系特征及论文依据](expanded_trials_20260926/abstraction.md)。
 - [原七例人工分析](manual_case_analysis.md)及[人工标注](manual_annotations.json)。
