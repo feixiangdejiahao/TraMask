@@ -133,7 +133,14 @@ class _Kernel:
     def closed(self, test_id, position, seen=()):
         node = self.node(position)
         if node is None:
-            raise Unsupported('closed_input_node_missing')
+            # Tree-sitter includes outer parentheses in some actual-argument
+            # spans; Python's AST does not. Only close literal expressions in
+            # this fallback, so no lexical binding is inferred from a reparse.
+            try:
+                ast.literal_eval(_expression_node(self.text(position)))
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                raise Unsupported('closed_input_node_missing') from None
+            return {'text': self.text(position), 'span': position, 'binding_path': []}
         try:
             ast.literal_eval(node)
             return {'text': self.text(position), 'span': position, 'binding_path': []}
@@ -307,6 +314,11 @@ def _literal_family(node):
     return type(value).__name__
 
 
+def _expression_node(text):
+    # Source expression spans may omit parentheses around multiline literals.
+    return ast.parse('(' + text + '\n)', mode='eval').body
+
+
 def _generator_coordinates(kernel, recipient, actual, limit):
     position = kernel.span(recipient['call']['span']['path'], actual)
     if not isinstance(actual.func, ast.Name) or actual.args or actual.keywords:
@@ -359,7 +371,13 @@ def _generator_coordinates(kernel, recipient, actual, limit):
                        for row in kernel.bindings[test_id]):
                     raise Unsupported('generator_capture_changes_before_consumption')
                 closed = kernel.closed(test_id, binding['value']['span'])
-                family = _literal_family(ast.parse(closed['text'], mode='eval').body)
+                # AST source spans omit enclosing parentheses. Adjacent
+                # multiline literals still need an expression context when
+                # parsed independently, including a newline after comments.
+                try:
+                    family = _literal_family(_expression_node(closed['text']))
+                except (ValueError, TypeError, SyntaxError):
+                    raise Unsupported('generator_capture_literal_family_unknown') from None
                 if isinstance(value, ast.Subscript) and family not in {'str', 'bytes'}:
                     raise Unsupported('generator_slice_literal_family_not_supported')
                 captured.append({'span': closed['span'], 'kind': 'local_generator_capture',
@@ -549,7 +567,7 @@ def _close_context(kernel, donor, recipient, identifier):
             if binding is not None:
                 closed = kernel_.closed(donor['test_id'], kernel_.span(source_path, node))
                 dependencies.append(closed['span'])
-                return ast.copy_location(ast.parse(closed['text'], mode='eval').body, node)
+                return ast.copy_location(_expression_node(closed['text']), node)
             globals_.add(node.id)
             return node
 
@@ -673,22 +691,25 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
             source_value = kernel.closed(donor['test_id'], source_arg['span'])
             target_value = kernel.closed(recipient['test_id'], coordinate['span'])
             if coordinate['kind'] in {'local_generator_yield', 'local_generator_capture'} and _literal_family(
-                    ast.parse(source_value['text'], mode='eval').body) != coordinate['literal_family']:
+                    _expression_node(source_value['text'])) != coordinate['literal_family']:
                 raise Unsupported('generator_source_literal_family_mismatch')
-            if ast.dump(ast.parse(source_value['text'], mode='eval'), include_attributes=False) == ast.dump(
-                    ast.parse(target_value['text'], mode='eval'), include_attributes=False):
+            if ast.dump(_expression_node(source_value['text']), include_attributes=False) == ast.dump(
+                    _expression_node(target_value['text']), include_attributes=False):
                 continue
             context, imports, closure = _close_context(kernel, donor, recipient, identifier)
             invocation = kernel.text(recipient['invocation_span'])
             normal_checks = _normal_result_checks(kernel, recipient)
+            replacement = source_value['text']
+            if '\n' in replacement:
+                replacement = '(' + replacement + '\n)'
             edits = []
             if route == 'invocation':
                 offset = recipient['invocation_span']['start_byte']
                 lo, hi = target_arg['span']['start_byte'] - offset, target_arg['span']['end_byte'] - offset
                 raw = invocation.encode()
-                invocation = (raw[:lo] + source_value['text'].encode() + raw[hi:]).decode()
+                invocation = (raw[:lo] + replacement.encode() + raw[hi:]).decode()
             else:
-                edits.append({'span': coordinate['span'], 'before': kernel.text(coordinate['span']), 'after': source_value['text']})
+                edits.append({'span': coordinate['span'], 'before': kernel.text(coordinate['span']), 'after': replacement})
             invocation_node = ast.parse(invocation, mode='eval').body
             flag = None
             if recipient.get('assigned_name'):

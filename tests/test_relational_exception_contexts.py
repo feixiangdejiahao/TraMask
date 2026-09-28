@@ -778,6 +778,25 @@ def test_generator_capture_mutated_by_producer_is_not_assumed_closed():
     assert not candidates_for(corpus, frontend, 'test_state')
 
 
+@pytest.mark.parametrize('multiline_donor', [False, True])
+def test_multiline_implicit_literal_capture_remains_one_source_coordinate(multiline_donor):
+    subject = ASSIGNED_SUBJECT
+    if multiline_donor:
+        subject = subject.replace("content=b'bad!xxxx'", "content=(b'bad!'\n                               b'xxxx')")
+    code = subject + CAPTURED_RECIPIENT.replace(
+        "payload = b'abcdwxyz'", "payload = (b'abcd'\n               b'wxyz')")
+    corpus, frontend = corpus_for(code)
+    candidate, = candidates_for(corpus, frontend, 'test_state')
+    assert candidate['relation']['input_carrier'] == 'local_generator_capture'
+    namespace, test_name, output = namespace_for(corpus, candidate)
+    for control in output['controls']:
+        namespace['events'].clear()
+        namespace[control['test_name']]()
+    namespace['events'].clear()
+    namespace[test_name]()
+    assert ('chunk', b'bad!') in namespace['events']
+
+
 def test_assignment_result_check_outside_original_with_scope_is_guarded():
     corpus, frontend = corpus_for(ITERATOR_SUBJECT + 'from contextlib import nullcontext\n' + ITERATOR_DONOR + '''def test_state():
     receiver = Reader(b'good')
