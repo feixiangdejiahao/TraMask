@@ -1,14 +1,22 @@
-# 遗漏组合测试：动作与观察组合原型
+# 遗漏组合测试：带观察的关系见证
 
-把测试分为动作、观察和期望。程序提取并组合动作切片、迁移已有观察；模型只补充小的期望值表达式，不编写测试正文。表达式受限并不保证期望正确，oracle 仍需独立评价。当前模型为 **`deepseek-v4-flash`**，通过 `.env` 中的 provider 调用。此前的 `A : B :: C : D` 源码类比方法保留为历史基线。
+当前原型以 `(q, ρ)` 为研究单位：`q` 是已有测试的观察，`ρ` 是输入、对象或操作之间的关系。程序恢复验证代码、提出关系见证并物化测试；模型只补充受限的局部期望表达式。关系构造、期望正确和真实缺陷检出分别评价，当前实现仍是有界关系域的组合，尚不是统一完备的关系求解器。模型为 **`deepseek-v4-flash`**，使用 `.env` 中已授权的 provider。
 
-**当前通用版本尚未确认检出七个 pilot 中的目标缺陷。** 旧领域算子原型曾达到 7/7，但算子是在已知这些缺陷之后设计的，存在过拟合，不能作为通用方法的结果。旧文档与运行方式已[归档](research/archive/README_pilot.md)，代码标签为 `combination-v0.1-pilot`。
+**第六批完整评价确认检出 3/17 个 trial：N02、N07、N10。** 17 个 trial 对应 14 个不同 task，都是已见开发集。第七批完整源断言恢复消融仍在运行；已独立确认新增 P2，但不能把跨批成功直接合为本批成绩。全部检出的目标尚未达到，误报尚未穷尽标注，也没有 issue resolution rate 提升证据。
 
-- [当前方法：动作、观察与小期望变换](research/method_design.md)
-- [本轮实验与失败记录](research/semantic_transport_results.md)
-- [本轮独立评价约定](research/semantic_composition_evaluation_plan.md)
+- [当前方法与实现边界](research/relational_gap_method_v2.md)
+- [本轮五小时结果与逐例缺口](research/relational_gap_timebox_20260928.md)
+- [第六批独立评价](research/relational_gap_batch6_evaluation.md)与[第五批评价](research/relational_gap_batch5_evaluation.md)
+- [新增十条轨迹与组合特征](research/expanded_trials_20260926/README.md)
+- [完整原断言恢复消融协议](research/relational_gap_v7_ablation_protocol.md)
+
+旧领域算子原型曾达到七个 pilot 的 7/7，但算子在已知缺陷后设计，存在过拟合，不能作为当前方法的结果。旧文档与运行方式已[归档](research/archive/README_pilot.md)，代码标签为 `combination-v0.1-pilot`。以下保留先前方法的研究记录：
+
+- [前一方法：动作、观察与小期望变换](research/method_design.md)
+- [前一方法实验与失败记录](research/semantic_transport_results.md)
+- [前一方法独立评价约定](research/semantic_composition_evaluation_plan.md)
 - [历史类比方格基线](research/method_design_analogy_baseline.md)
-- [本轮五小时实验记录](research/semantic_transport_timebox_report.md)
+- [前一方法五小时实验记录](research/semantic_transport_timebox_report.md)
 - [上一轮五小时实验交付与保留基线](research/timeboxed_experiment_report.md)
 - [跨版本实验、失败与模型成本](research/generic_generation_cross_version_results.md)
 - [实验评价约定](research/generic_generation_evaluation_plan.md)与[版本选择规则](research/generic_version_selection.md)
@@ -24,7 +32,17 @@
 .venv/bin/python -m pytest tests -q
 ```
 
-当前方法入口为 `scripts/run_semantic_transport.py`，先从已有 source-only preparation 构造新候选；模型补全与执行分开：
+当前静态生成入口为 `scripts/run_relational_gap.py`，执行入口为 `scripts/execute_relational_gap_v6.py`；断言恢复消融使用 `scripts/prepare_relational_gap_ablation.py` 和无模型调用的 `scripts/execute_relational_gap_v7.py`。参数与冻结边界见上述报告和执行协议。已有结果可只读复核：
+
+```bash
+.venv/bin/python scripts/evaluate_relational_gap.py evaluate \
+  --batch-root results/relational_gap_20260928/batch6 \
+  --emitted-root results/relational_gap_20260928/batch6_emitted \
+  --reviews results/relational_gap_20260928/batch6_reviews_audited.json \
+  --output /tmp/relational-gap-batch6-recheck.json
+```
+
+下列命令属于历史动作组合方法。入口 `scripts/run_semantic_transport.py` 先从已有 source-only preparation 构造候选；模型补全与执行分开：
 
 ```bash
 .venv/bin/python scripts/run_semantic_transport.py prepare \
@@ -94,9 +112,12 @@ done
 
 | 位置 | 作用 |
 |---|---|
-| `experimental/semantic_transport/` | 当前动作上下文搜索、小期望表达式及冻结接口；各语言与参数前端实现同一抽象 |
-| `experimental/observation_projection.py` | 当前源观察切片迁移 |
-| `scripts/run_semantic_transport.py` | 当前方法的 prepare、complete、freeze、run 入口 |
+| `relational_gap/` | 当前关系坐标、有限单元、源见证构造、观察选择及恢复消融 |
+| `scripts/run_relational_gap.py` | 当前静态准备入口 |
+| `scripts/execute_relational_gap_v6.py`、`execute_relational_gap_v7.py` | 源假设和模型变体执行、无模型断言恢复消融 |
+| `experimental/semantic_transport/` | 先前动作上下文搜索、小期望表达式及冻结接口；部分工具仍被复用 |
+| `experimental/observation_projection.py` | 源观察切片迁移工具 |
+| `scripts/run_semantic_transport.py` | 先前动作组合方法入口 |
 | `anchor_retrieval/` | 断言识别、定义—使用与可能状态依赖、相关测试排序 |
 | `generic_composition/` | 源码语法项、测试语料、固定候选筛选、物化与执行接口 |
 | `experimental/generic_v2/analogy.py` | 历史源码类比与重构等式 |
