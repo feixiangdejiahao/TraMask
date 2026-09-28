@@ -42,7 +42,7 @@ def algorithm_files():
         'structured_ports', 'state_cells', 'atomic_observations', 'scalar_cells',
         'symbolic_strings', 'exception_contexts', 'regex_cells', 'call_contexts',
         'sequence_cells', 'seed_ranking', 'balanced_reachability', 'resource_roots',
-        'producer_contexts', 'witness_composition')]
+        'producer_contexts', 'witness_composition', 'parsed_field_coordinates', 'regex_presence')]
     return sorted([*generation, Path(__file__).resolve(),
                    *ROOT.glob('anchor_retrieval/*.py'), ROOT/'generic_composition/corpus.py',
                    ROOT/'generic_composition/emitter.py', ROOT/'generic_composition/engine.py',
@@ -67,6 +67,8 @@ def prepare(args):
     from relational_gap.symbolic_strings import generate_symbolic_strings, SymbolicStringBudget
     from relational_gap.exception_contexts import generate_exception_contexts, ExceptionBudget
     from relational_gap.regex_cells import generate_regex_cells, RegexBudget
+    from relational_gap.parsed_field_coordinates import generate_parsed_field_cells, ParsedFieldBudget
+    from relational_gap.regex_presence import generate_regex_presence, RegexPresenceBudget
     from relational_gap.call_contexts import generate_call_contexts, ContextBudget
     from relational_gap.sequence_cells import generate_sequence_cells, SequenceBudget
     from relational_gap.seed_ranking import rank_seeds
@@ -118,6 +120,8 @@ def prepare(args):
     strings = generate_symbolic_strings(corpus, budget=SymbolicStringBudget(max_candidates=args.max_candidates // 4))
     exceptions = generate_exception_contexts(corpus, frontend, budget=ExceptionBudget(max_candidates=args.max_candidates // 4))
     regex = generate_regex_cells(corpus, frontend, budget=RegexBudget(max_candidates=args.max_candidates // 4))
+    parsed = generate_parsed_field_cells(corpus, frontend, budget=ParsedFieldBudget(max_candidates=args.max_candidates // 4))
+    presence = generate_regex_presence(corpus, frontend, budget=RegexPresenceBudget(max_candidates=args.max_candidates // 4))
     contexts = generate_call_contexts(corpus, frontend, budget=ContextBudget(max_candidates=args.max_candidates // 4))
     sequences = generate_sequence_cells(corpus, frontend, budget=SequenceBudget(max_candidates=args.max_candidates // 4))
     producers = generate_producer_contexts(corpus, frontend, budget=ProducerBudget(max_candidates=args.max_candidates // 4))
@@ -127,7 +131,7 @@ def prepare(args):
     generated['candidates'] = merge_candidates(generated['candidates'],
                                               cells['candidates']+sql['candidates']+states['candidates']+
                                               scalars['candidates']+strings['candidates']+exceptions['candidates']+
-                                              regex['candidates']+contexts['candidates']+sequences['candidates']+
+                                              regex['candidates']+parsed['candidates']+presence['candidates']+contexts['candidates']+sequences['candidates']+
                                               producers['candidates']+compositions['candidates'],
                                               limit=args.max_candidates)
     raw_candidates = generated['candidates']
@@ -154,6 +158,8 @@ def prepare(args):
     generated['counts']['symbolic_string_witnesses'] = len(strings['candidates'])
     generated['counts']['exception_witnesses'] = len(exceptions['candidates'])
     generated['counts']['regex_witnesses'] = len(regex['candidates'])
+    generated['counts']['parsed_field_witnesses'] = len(parsed['candidates'])
+    generated['counts']['regex_presence_witnesses'] = len(presence['candidates'])
     generated['counts']['call_context_witnesses'] = len(contexts['candidates'])
     generated['counts']['sequence_witnesses'] = len(sequences['candidates'])
     generated['counts']['producer_witnesses'] = len(producers['candidates'])
@@ -183,6 +189,8 @@ def prepare(args):
                                             'symbolic_string': {k:v for k,v in strings.items() if k != 'candidates'},
                                             'exception': {k:v for k,v in exceptions.items() if k != 'candidates'},
                                             'regex': {k:v for k,v in regex.items() if k != 'candidates'},
+                                            'parsed_field': {k:v for k,v in parsed.items() if k != 'candidates'},
+                                            'regex_presence': {k:v for k,v in presence.items() if k != 'candidates'},
                                             'call_context': {k:v for k,v in contexts.items() if k != 'candidates'},
                                             'sequence': {k:v for k,v in sequences.items() if k != 'candidates'},
                                             'producer': {k:v for k,v in producers.items() if k != 'candidates'},
