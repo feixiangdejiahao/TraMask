@@ -117,15 +117,65 @@ assert value() == 3
     assert result['record']['reason'] == 'eager_definition_depends_on_moved_script_binding'
 
 
-def test_import_after_executable_setup_preserves_order_by_remaining_unsupported():
+def test_import_after_executable_setup_preserves_order_and_global_binding(monkeypatch):
+    import builtins
+    import types
     source = script('''setup()
 import imaginary
 assert imaginary.check()
 ''')
     result = wrap_python_script(source)
+    assert result['status'] == 'wrapped'
+    events = []
+    module = types.ModuleType('imaginary')
+    module.check = lambda: True
+    original_import = builtins.__import__
+    def import_hook(name, *args, **kwargs):
+        if name == 'imaginary':
+            events.append('import')
+            return module
+        return original_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', import_hook)
+    namespace = {'setup': lambda: events.append('setup')}
+    exec(result['source'].code, namespace)
+    assert events == []
+    namespace[result['record']['wrapper_name']]()
+    assert events == ['setup', 'import']
+    assert namespace['imaginary'] is module
+
+
+def test_late_import_remains_visible_to_retained_generator_helper():
+    result = wrap_python_script(script('''events = []
+events.append('setup')
+from math import sqrt as root
+def gen():
+    yield root(9)
+values = list(gen())
+assert values == [3]
+'''))
+    namespace = execute_wrapped(result)
+    assert namespace['events'] == ['setup']
+    assert list(namespace['gen']()) == [3]
+    assert 'root' in result['record']['global_bindings']
+    frontend = extract_frontend([result['source']])
+    corpus = to_emitter_corpus(frontend)
+    assert all(test['name'] != '<script>' for test in corpus['tests'].values())
+    test_id, = corpus['tests']
+    emitted = emit(corpus, [{'id': 'same_source', 'base_test_id': test_id, 'edits': []}])
+    assert not emitted['unsupported']
+    assert 'def gen():' in emitted['files'][result['source'].path]
+    assert not any('gen' == item.get('test_name') for item in emitted['obligations'])
+
+
+def test_late_import_is_not_lifted_across_eager_definition_dependency():
+    result = wrap_python_script(script('''ready = True
+from math import pi
+def value(default=pi):
+    return default
+assert value() > 3
+'''))
     assert result['status'] == 'unsupported'
-    assert result['source'] is source
-    assert result['record']['reason'] == 'import_after_executable_setup_requires_order_preservation'
+    assert result['record']['reason'] == 'eager_definition_depends_on_moved_script_binding'
 
 
 def test_dynamic_locals_and_annotations_do_not_silently_change_scope():

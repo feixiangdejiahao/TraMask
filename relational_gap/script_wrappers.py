@@ -342,7 +342,12 @@ def _wrap_parsed(source, tree, base_record):
                              and any(alias.name == 'annotations' for alias in node.names) for node in tree.body)
     for index, node in enumerate(tree.body):
         docstring = index == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) or docstring:
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and moved:
+            # Late imports are executable statements. Keep their original
+            # position in the wrapper and declare their names global, so
+            # retained helpers observe the same module binding after import.
+            moved.append(node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) or docstring:
             retained.append(node)
         elif _main_guard(node):
             main_guards.append(node)
