@@ -1,5 +1,5 @@
 from anchor_retrieval.syntax import Source
-from relational_gap.history import recover_history, namespace_go_validation
+from relational_gap.history import recover_history, namespace_go_validation, go_duplicate_declarations
 
 
 def trajectory(*commands):
@@ -51,3 +51,55 @@ func TestSample(t *testing.T) { got := helper(1); _ = "helper"; _ = got; _ = x.h
     assert 'helper_rh_abc(1)' in result.code
     assert '"helper"' in result.code and 'x.helper' in result.code
     assert 'TestSample_rh_abc' in result.code
+
+
+def test_python_editor_containing_vitest_is_not_misparsed_as_typescript():
+    data = trajectory("python3 - <<'PY'\nfrom pathlib import Path\np = Path('small.test.ts')\np.write_text('import {test} from \"vitest\"; test(\"x\", () => {});')\nPY")
+    versions, _ = recover_history(data, 'typescript')
+    assert len(versions) == 1
+    assert versions[0].language == 'typescript'
+    assert versions[0].written_path == 'small.test.ts'
+    assert versions[0].code.startswith('import {test}')
+
+
+def test_go_namespace_never_turns_blank_identifier_into_a_binding():
+    source = Source('sample_test.go', '''package p
+var _ = helper
+func helper(x int) int { return x }
+func TestSample(t *testing.T) { _, err := load(); _ = err; _, err = load() }
+''', 'go', 'trajectory')
+    result, names = namespace_go_validation(source, 'abc')
+    assert '_' not in names
+    assert 'var _ = helper_rh_abc' in result.code
+    assert '_, err := load()' in result.code
+    assert '_, err = load()' in result.code
+    assert '__rh_' not in result.code
+
+
+def test_unknown_old_source_edit_assertion_is_not_a_runtime_test():
+    data = trajectory("python3 - <<'PY'\np = 'production.py'\ns = open(p).read()\nassert 'old' in s\ns = s.replace('old', 'new')\nopen(p, 'w').write(s)\nPY")
+    versions, report = recover_history(data, 'python')
+    assert not versions
+    assert report['skipped']['source_edit_script_not_runtime_validation'] == 1
+
+
+def test_go_duplicate_check_distinguishes_legal_scopes_and_discarded_names():
+    source = Source('sample_test.go', '''package p
+var _, _ = 1, 2
+func init() {}
+func init() {}
+func (a A) Read() {}
+func (b B) Read() {}
+func TestOne(t *testing.T) {}
+func TestOne(t *testing.T) {}
+var a, b = 1, 2
+const b = 3
+''', 'go')
+    assert go_duplicate_declarations(source) == ['TestOne', 'b']
+
+
+def test_go_namespace_renames_all_names_of_multiple_declarations():
+    source = Source('sample_test.go', 'package p\nvar a, b = 1, 2\n', 'go')
+    result, names = namespace_go_validation(source, 'abc')
+    assert names == ['a', 'b']
+    assert 'var a_rh_abc, b_rh_abc = 1, 2' in result.code

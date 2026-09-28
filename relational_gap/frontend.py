@@ -69,8 +69,12 @@ class _FrontendIndex(Index):
             return original
         def paths(base):
             base = posixpath.normpath(base)
-            return [path for path in (base, base + ".ts", base + ".tsx", base + ".mts", base + ".cts",
-                                      base + "/index.ts", base + "/index.tsx") if path in self.sources]
+            stem, suffix = posixpath.splitext(base)
+            emitted = {".js": [".ts", ".tsx"], ".jsx": [".tsx", ".ts"],
+                       ".mjs": [".mts", ".ts"], ".cjs": [".cts", ".ts"]}
+            candidates = [base, *(stem + extension for extension in emitted.get(suffix, [])),
+                          base + ".ts", base + ".tsx", base + ".mts", base + ".cts", base + "/index.ts", base + "/index.tsx"]
+            return list(dict.fromkeys(path for path in candidates if path in self.sources))
         if module.startswith("."):
             base = posixpath.join(posixpath.dirname(self.sources[source_path].lookup_path), module)
             return list(dict.fromkeys(original + paths(base)))
@@ -325,6 +329,8 @@ def _parameters(unit):
             continue
         default = child(parameter, "value")
         target = child(parameter, "name", "pattern")
+        if parameter.type == "typed_parameter" and target is None:
+            target = next((n for n in parameter.named_children if n.type in {"identifier", "list_splat_pattern", "dictionary_splat_pattern"}), None)
         if parameter.type in {"identifier", "list_splat_pattern", "dictionary_splat_pattern"}:
             target = parameter
         variadic = ("variadic" in parameter.type or "splat" in parameter.type

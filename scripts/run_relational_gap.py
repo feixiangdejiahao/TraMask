@@ -34,11 +34,20 @@ def digest(path):
 
 
 def algorithm_files():
-    return sorted([*ROOT.glob('relational_gap/*.py'), Path(__file__).resolve(),
+    # This is the preparation dependency boundary. New, unintegrated research
+    # modules and provider changes must not silently alter a frozen generation.
+    generation = [ROOT/'relational_gap'/f'{name}.py' for name in (
+        'inputs', 'frontend', 'history', 'source_dependencies', 'transforms',
+        'cells', 'closure', 'identity', 'script_wrappers', 'embedded_relations',
+        'structured_ports', 'state_cells', 'atomic_observations', 'scalar_cells',
+        'symbolic_strings', 'exception_contexts')]
+    return sorted([*generation, Path(__file__).resolve(),
                    *ROOT.glob('anchor_retrieval/*.py'), ROOT/'generic_composition/corpus.py',
                    ROOT/'generic_composition/emitter.py', ROOT/'generic_composition/engine.py',
                    ROOT/'generic_composition/edits.py', ROOT/'experimental/local_literal_contexts.py',
-                   ROOT/'experimental/finite_inputs.py', ROOT/'experimental/observation_projection.py'])
+                   ROOT/'experimental/finite_inputs.py', ROOT/'experimental/observation_projection.py',
+                   ROOT/'experimental/state_regions.py', ROOT/'experimental/semantic_transport/state_contexts.py',
+                   ROOT/'experimental/semantic_transport/oracle.py'])
 
 
 def prepare(args):
@@ -49,6 +58,12 @@ def prepare(args):
     from relational_gap.cells import generate_cells, merge_candidates, annotate_novelty, CellBudget
     from experimental.finite_inputs import augment_corpus
     from relational_gap.script_wrappers import prepare_script_sources
+    from relational_gap.embedded_relations import generate_embedded_relations, EmbeddedRelationBudget
+    from relational_gap.state_cells import generate_state_cells, StateBudget
+    from relational_gap.atomic_observations import atomize_candidates, AtomicBudget
+    from relational_gap.scalar_cells import generate_scalar_cells, ScalarBudget
+    from relational_gap.symbolic_strings import generate_symbolic_strings, SymbolicStringBudget
+    from relational_gap.exception_contexts import generate_exception_contexts, ExceptionBudget
     case = next(c for c in json.loads(args.registry.read_text()) if c['id'] == args.case)
     output = args.output
     output.mkdir(parents=True, exist_ok=False)
@@ -86,11 +101,41 @@ def prepare(args):
                              max_sources_per_target=24)
     generated = enumerate_transforms(corpus, frontend, budget)
     cells = generate_cells(corpus, frontend, budget=CellBudget(max_candidates=args.max_candidates // 4))
+    sql = generate_embedded_relations(corpus, frontend, budget=EmbeddedRelationBudget(max_candidates=args.max_candidates // 4,
+                                                                                    top_k=len(selected)))
+    states = generate_state_cells(corpus, budget=StateBudget(max_candidates=args.max_candidates // 4))
+    scalars = generate_scalar_cells(corpus, frontend, budget=ScalarBudget(max_candidates=args.max_candidates // 4))
+    strings = generate_symbolic_strings(corpus, budget=SymbolicStringBudget(max_candidates=args.max_candidates // 4))
+    exceptions = generate_exception_contexts(corpus, frontend, budget=ExceptionBudget(max_candidates=args.max_candidates // 4))
     generated['candidates'] = annotate_novelty(corpus, frontend, generated['candidates'])
-    generated['candidates'] = merge_candidates(generated['candidates'], cells['candidates'], limit=args.max_candidates)
+    generated['candidates'] = merge_candidates(generated['candidates'],
+                                              cells['candidates']+sql['candidates']+states['candidates']+
+                                              scalars['candidates']+strings['candidates']+exceptions['candidates'],
+                                              limit=args.max_candidates)
+    raw_candidates = generated['candidates']
+    for candidate in raw_candidates:
+        if candidate.get('target_capsule_id'):
+            candidate['source_observation_id'] = candidate['target_capsule_id']
+    atomic = atomize_candidates(corpus, frontend, raw_candidates,
+                                AtomicBudget(max_candidates=args.max_candidates * 2, max_q_per_candidate=2))
+    by_parent = {}
+    for candidate in atomic['candidates']:
+        by_parent.setdefault(candidate['parent_candidate_id'], []).append(candidate)
+    first, rest = [], []
+    for candidate in raw_candidates:
+        variants = by_parent.get(candidate['id'], [])
+        first.append(variants[0] if variants else candidate)
+        rest.extend(variants[1:])
+    generated['candidates'] = merge_candidates([], first + rest, limit=args.max_candidates)
     generated['relation_cells'] = {k: v for k, v in cells.items() if k not in {'candidates', 'rows'}}
     generated['counts']['candidates'] = len(generated['candidates'])
     generated['counts']['cell_witnesses'] = len(cells['candidates'])
+    generated['counts']['sql_witnesses'] = len(sql['candidates'])
+    generated['counts']['state_witnesses'] = len(states['candidates'])
+    generated['counts']['scalar_witnesses'] = len(scalars['candidates'])
+    generated['counts']['symbolic_string_witnesses'] = len(strings['candidates'])
+    generated['counts']['exception_witnesses'] = len(exceptions['candidates'])
+    generated['counts']['atomic'] = atomic['counts']
     # Hash before and after; concurrent development cannot silently change a frozen batch.
     final_hashes = {name: digest(ROOT/name) for name in source_hashes}
     if source_hashes != final_hashes:
@@ -108,8 +153,15 @@ def prepare(args):
     write(output/'corpus.json', corpus)
     write(output/'candidates.json', generated)
     write(output/'source_cells.json', {k: v for k, v in cells.items() if k != 'candidates'})
+    write(output/'generation_domains.json', {'sql': {k:v for k,v in sql.items() if k != 'candidates'},
+                                            'state': {k:v for k,v in states.items() if k != 'candidates'},
+                                            'scalar': {k:v for k,v in scalars.items() if k != 'candidates'},
+                                            'symbolic_string': {k:v for k,v in strings.items() if k != 'candidates'},
+                                            'exception': {k:v for k,v in exceptions.items() if k != 'candidates'},
+                                            'atomic': {k:v for k,v in atomic.items() if k != 'candidates'}})
     (output/'issue.md').write_bytes(Path(case['issue']).read_bytes())
-    files = ['case.json','selection.json','frontend.json','corpus.json','candidates.json','issue.md']
+    files = ['case.json','selection.json','frontend.json','corpus.json','candidates.json',
+             'source_cells.json','generation_domains.json','issue.md']
     manifest = {'status':'prepared','case':args.case,'created_at':datetime.now(timezone.utc).isoformat(),
                 'algorithm_sha256':source_hashes,'files_sha256':{name:digest(output/name) for name in files},
                 'elapsed_seconds':time.monotonic()-started, 'budget':asdict(budget),

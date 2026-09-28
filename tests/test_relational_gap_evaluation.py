@@ -109,3 +109,75 @@ def test_package_qualified_subtests_match_declared_parent():
     assert matches_runtime("example.org/project::TestGenerated/case_a", "TestGenerated")
     assert matches_runtime("tests.module::test_generated[value]", "test_generated")
     assert not matches_runtime("example.org/project::TestGeneratedOther/case_a", "TestGenerated")
+    assert matches_runtime(" requiredIf gc_123", "requiredIf gc_123")
+    assert not matches_runtime(" requiredIf gc_123_other", "requiredIf gc_123")
+
+
+def test_parent_match_uses_explicit_go_relocation_provenance():
+    target = {"source_tests": [{"role": "primary", "id": "old_test.go:3:TestOld", "name": "TestOld", "path_aliases": ["old_test.go"]}]}
+    identifier = "relocated_test.go:8:TestOld_rh_123456789abc"
+    metadata = {"kind": "historical_validation", "original_target_path": "old_test.go",
+                "relocated_globals": ["TestOld"], "sha256": "123456789abc" + "0" * 52}
+    assert parent_hit(identifier, target, {"files": {"relocated_test.go": metadata}})
+    assert not parent_hit(identifier, target, {"files": {"relocated_test.go": {"original_target_path": "old_test.go"}}})
+    assert not parent_hit(identifier, target, {"files": {"relocated_test.go": {**metadata, "sha256": "f" * 64}}})
+
+
+def test_parent_match_uses_explicit_script_wrapper_provenance():
+    target = {"source_tests": [{"role": "primary", "id": "trajectory/step-1.py:1:<script>", "name": "<script>", "path_aliases": ["trajectory/step-1.py"]}]}
+    identifier = "test_relocated.py:5:test_relational_script_a"
+    selection = {"files": {"test_relocated.py": {"trajectory_source": "trajectory/step-1.py"}},
+                 "script_wrappers": [{"source_path": "test_relocated.py", "wrapper_name": "test_relational_script_a", "status": "wrapped"}]}
+    assert parent_hit(identifier, target, selection)
+    assert not parent_hit(identifier, target, {**selection, "script_wrappers": []})
+    assert not parent_hit("other.py:5:test_relational_script_a", target, selection)
+
+
+def test_atomic_candidate_requires_frozen_parent_and_unchanged_sources(experiment):
+    experiment.emitted_root = experiment.batch_root.parent / "emitted"
+    accepted = experiment.emitted_root / "P1/accepted.json"
+    child = {"id": "q_atomic", "parent_candidate_id": "candidate",
+             "base_test_id": "tests/test_input.py:10:test_anchor"}
+    dump(accepted, [child])
+    runs = json.loads(experiment.runs.read_text())
+    for row in runs:
+        row["candidate_id"] = "q_atomic"
+    dump(experiment.runs, runs)
+    fill_reviews(experiment)
+    report = evaluate(experiment)
+    assert report["counts"]["all_dimensions_proven"] == 1
+    assert len(report["candidates"]) == 2
+    dump(accepted, [{**child, "base_test_id": "other.py:1:test_other"}])
+    with pytest.raises(ValueError, match="changed source-parent provenance"):
+        inventory(experiment)
+
+
+def test_shared_control_binding_stays_within_execution_manifest(experiment):
+    first, second = experiment.batch_root.parent / "a.json", experiment.batch_root.parent / "b.json"
+    dump(first, {})
+    dump(second, {})
+    bad_control = experiment.batch_root.parent / "bad_control.json"
+    dump(bad_control, {"tests": [{"id": "test_original", "status": "fail"}]})
+    dump(experiment.runs, [
+        {"case": "P1", "candidate_id": "candidate", "role": "generated", "manifest": str(first),
+         "result": str(experiment.generated), "test_ids": ["test_generated"], "control_ids": ["test_original"]},
+        {"case": "P1", "candidate_id": None, "role": "control", "manifest": str(first),
+         "result": str(experiment.control), "test_ids": ["test_original"]},
+        {"case": "P1", "candidate_id": None, "role": "control", "manifest": str(second),
+         "result": str(bad_control), "test_ids": ["test_original"]},
+    ])
+    fill_reviews(experiment)
+    report = evaluate(experiment)
+    assert report["counts"]["all_dimensions_proven"] == 1
+    assert report["candidates"][0]["control_runs"] == 1
+
+
+def test_atomic_candidate_already_frozen_uses_exact_identity(experiment):
+    experiment.emitted_root = experiment.batch_root.parent / "emitted"
+    dump(experiment.emitted_root / "P1/accepted.json", [{"id": "candidate",
+         "parent_candidate_id": "pre_atomic_internal_id", "base_test_id": "tests/test_input.py:10:test_anchor"}])
+    fill_reviews(experiment)
+    report = evaluate(experiment)
+    assert len(report["candidates"]) == 1
+    assert report["stage_counts"]["admitted_candidates"] == 1
+    assert report["counts"]["all_dimensions_proven"] == 1

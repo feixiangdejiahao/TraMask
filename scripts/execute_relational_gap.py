@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from relational_gap.provider import dispatch, encoded
-from relational_gap.semantics import prepare_requests, validate_response, SemanticBudget
+from relational_gap.semantics_v2 import prepare_requests, validate_response, SemanticBudget
 
 
 def write(path, value):

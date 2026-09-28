@@ -41,7 +41,7 @@ def main():
         parser.error("Provider concurrency must be between one and four")
     ledger = Path(str(args.prefix) + "_pipeline")
     ledger.mkdir(parents=True, exist_ok=False)
-    code = [ROOT / p for p in ("relational_gap/semantics.py", "relational_gap/provider.py",
+    code = [ROOT / p for p in ("relational_gap/semantics.py", "relational_gap/semantics_v2.py", "relational_gap/provider.py",
                                "scripts/execute_relational_gap.py", "generic_composition/emitter.py")]
     hashes = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in code}
     write(ledger / "frozen_driver.json", {"files_sha256": hashes, "provider_concurrency": args.workers,

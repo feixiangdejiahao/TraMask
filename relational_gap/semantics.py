@@ -8,6 +8,7 @@ proof of a contract or a runtime bug verdict.
 """
 from __future__ import annotations
 
+import ast
 import copy
 from dataclasses import asdict, dataclass
 import hashlib
@@ -107,6 +108,37 @@ def _holes(corpus, frontend, candidate, source_cache, budget):
             # Context retention can still be admitted explicitly by the model.
             continue
         expected = observation.get("expected")
+        # Truth assertions have an implicit Boolean expectation. Expose only
+        # that expectation; the observed expression stays program-owned and is
+        # evaluated exactly once. This is equivalent to a Boolean expected hole,
+        # not permission for the model to replace the check with a constant.
+        if not expected and language == "python" and observation.get("predicate") == "assert":
+            observed = observation.get("observed") or {}
+            position = observed.get("span")
+            if not position or not _inside(position, test["span"]):
+                continue
+            if any(_overlap(position, edit["span"]) for edit in candidate.get("edits", [])):
+                unknowns.append({"observation_id": observation["id"], "reason": "candidate_already_edits_truth_expression"})
+                continue
+            text = source_text(corpus, position)
+            try:
+                tree = ast.parse(text, mode="eval").body
+            except (SyntaxError, ValueError):
+                continue
+            negative = isinstance(tree, ast.UnaryOp) and isinstance(tree.op, ast.Not)
+            expression = ast.get_source_segment(text, tree.operand) if negative else text
+            if expression is None:
+                continue
+            if len(holes) >= budget.expected_holes:
+                unknowns.append({"observation_id": observation["id"], "reason": "expected_hole_budget"})
+                continue
+            holes.append({"id": _id(candidate["id"], "truth_expected", position),
+                          "observation_id": observation["id"], "span": position, "expected_span": position,
+                          "before": text, "kind": "truth_expectation", "pre_index": len(pre),
+                          "type_hint": None, "exact_type": "bool", "observed_expression": expression,
+                          "source_expected": not negative})
+            pre.append(not negative)
+            continue
         if not expected or not expected.get("span") or not _inside(expected["span"], test["span"]):
             continue
         original_span = expected["span"]
@@ -179,7 +211,7 @@ def _source_evidence(corpus, frontend, candidates, budget):
     for candidate in candidates:
         spans.extend(candidate.get("provenance", {}).get("source_spans", []))
         basis = candidate.get("oracle", {}).get("basis") or {}
-        if basis.get("span"):
+        if isinstance(basis, dict) and basis.get("span"):
             spans.append(basis["span"])
         relation = candidate.get("relation", {})
         for key in ("default_declaration_span", "comparison_span", "source_before_span", "source_after_span"):
@@ -373,7 +405,12 @@ def validate_response(request: dict, payload: str | dict, *, corpus: dict | None
                 value = evaluate_expression(update["expr"], pre, arg)
                 if hole["exact_type"] is not None and type(value).__name__ != hole["exact_type"]:
                     raise ValueError("source_template_leaf_type_changed")
-                literal = emit_literal(value, context["language"], hole["type_hint"])
+                if hole["kind"] == "truth_expectation":
+                    literal = (hole["before"] if value == hole["source_expected"] else
+                               ("(" + hole["observed_expression"] + ")" if value else
+                                "not (" + hole["observed_expression"] + ")"))
+                else:
+                    literal = emit_literal(value, context["language"], hole["type_hint"])
                 if literal != hole["before"]:
                     edit = {"span": hole["span"], "before": hole["before"], "after": literal,
                             "role": "semantic_expected", "observation_id": hole["observation_id"]}

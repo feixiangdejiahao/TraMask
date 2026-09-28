@@ -13,7 +13,8 @@ import re
 import posixpath
 
 from anchor_retrieval.syntax import SKIP, Source, diff_lines, is_test_path, trajectory_sources, units, walk
-from relational_gap.history import recover_history, namespace_go_validation
+from relational_gap.history import recover_history, namespace_go_validation, go_duplicate_declarations
+from relational_gap.source_dependencies import dependency_closure
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,13 @@ def select_sources(case: dict, budget: SourceBudget = SourceBudget()) -> tuple[l
     production = sorted((name for name in files if not is_test_path(name)), key=priority)
     selected = tests[:budget.max_test_files] + production[:budget.max_production_files]
     selected.sort(key=priority)
+    resolution, config_unknowns = module_configuration(repository) if language == 'typescript' else ({}, [])
+    graph_files = dict(files)
+    if language == 'go' and (repository/'go.mod').exists():
+        graph_files['go.mod'] = (repository/'go.mod').read_text()
+    dependencies = dependency_closure(graph_files, selected, language, max_additional=256, max_depth=4,
+                                      **resolution)
+    selected.extend(path for path in dependencies['additional_paths'] if path in files and path not in selected)
     sources, size, metadata = [], 0, {}
     for name in selected:
         payload = files[name].encode()
@@ -119,6 +127,10 @@ def select_sources(case: dict, budget: SourceBudget = SourceBudget()) -> tuple[l
     # Newer source bodies are first; exact duplicate validation files add no evidence.
     for source in reversed(history):
         if source.language != language:
+            continue
+        if language == 'go' and (duplicates := go_duplicate_declarations(source)):
+            omitted.append({'path': source.path, 'reason': 'duplicate_go_file_declarations',
+                            'names': duplicates, 'step': source.step})
             continue
         digest = hashlib.sha256(source.data).hexdigest()
         if digest in history_seen or len(source.data) > budget.max_file_bytes:
@@ -187,8 +199,8 @@ def select_sources(case: dict, budget: SourceBudget = SourceBudget()) -> tuple[l
                             'sha256': digest, 'executed_on_final_candidate': False,
                             'requires_source_control_replay': True}
     sources.sort(key=lambda source: source.path)
-    resolution, config_unknowns = module_configuration(repository) if language == 'typescript' else ({}, [])
     return sources, {'budget': asdict(budget), 'source_bytes': size, 'history_recovery': recovery,
+                     'source_dependencies': dependencies,
                      'module_resolution': resolution, 'module_configuration_unknowns': config_unknowns,
                      'available_test_files': len(tests), 'available_production_files': len(production),
                      'selected_files': len(sources), 'changed_symbols': sorted(changed_symbols),

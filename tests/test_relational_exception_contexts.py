@@ -1,0 +1,440 @@
+"""Independent resource lifecycle toys; no repository/evaluator fixtures."""
+import json
+
+import pytest
+
+from anchor_retrieval.syntax import Source
+from generic_composition.emitter import emit
+from relational_gap.exception_contexts import ExceptionBudget, generate_exception_contexts
+from relational_gap.frontend import extract_frontend, to_emitter_corpus
+
+
+SUBJECT = '''import pytest
+events = []
+class Device:
+    def __init__(self, payload, mode='source'):
+        self.payload, self.mode, self.closed = payload, mode, False
+        events.append(('construct', payload, mode))
+    def read(self):
+        try:
+            if self.payload == b'bad': raise ValueError('broken-7')
+            return 'ready'
+        finally:
+            self.closed = True
+            events.append(('close', self.mode))
+
+'''
+
+DONOR = '''def test_bad():
+    obj = Device(b'bad')
+    with pytest.raises(ValueError, match=r'broken-\\d+'):
+        obj.read()
+
+'''
+
+
+def corpus_for(code):
+    frontend = extract_frontend([Source('test_exceptions.py', code, 'python')])
+    return to_emitter_corpus(frontend), frontend
+
+
+def candidates_for(corpus, frontend, name):
+    test_id = next(key for key, row in corpus['tests'].items() if row['name'] == name)
+    return [row for row in generate_exception_contexts(corpus, frontend)['candidates'] if row['base_test_id'] == test_id]
+
+
+def namespace_for(corpus, candidate):
+    output = emit(corpus, [candidate])
+    assert not output['unsupported']
+    namespace = {}
+    for code in output['files'].values():
+        exec(compile(code, '<exception-state-witness>', 'exec'), namespace)
+    return namespace, output['obligations'][0]['test_name'], output
+
+
+def test_constructor_input_and_source_matcher_replace_normal_assert_and_keep_later_state_q():
+    corpus, frontend = corpus_for(SUBJECT + DONOR + '''def test_state():
+    receiver = Device(b'good', mode='recipient')
+    assert receiver.read() == 'ready'
+    assert receiver.closed is True
+''')
+    candidates = candidates_for(corpus, frontend, 'test_state')
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate['relation']['input_route'] == 'receiver_constructor'
+    assert candidate['relation']['argument_binding']['status'] == 'source_actual_formal'
+    assert candidate['edits'][0]['before'] == "b'good'" and candidate['edits'][0]['after'] == "b'bad'"
+    wrapper = candidate['edits'][1]
+    assert wrapper['before'] == "assert receiver.read() == 'ready'"
+    assert 'pytest.raises(ValueError' in wrapper['after'] and 'broken-' in wrapper['after']
+    assert wrapper['after'].count('receiver.read()') == 1
+    q = next(q for q in corpus['capsules'] if q['id'] == candidate['target_capsule_id'])
+    assert q['observed']['text'] == 'receiver.closed'
+    assert candidate['source_observation_id'] == q['id']
+    replaced = candidate['provenance']['replaced_normal_observation_ids']
+    assert len(replaced) == 1 and replaced != [q['id']]
+    assert wrapper['role'] == 'source_exception_context'
+    assert candidate['oracle']['assertion_ids'] == [q['id']]
+    namespace, test_name, _ = namespace_for(corpus, candidate)
+    namespace[test_name]()
+    assert namespace['events'] == [('construct', b'bad', 'recipient'), ('close', 'recipient')]
+    json.dumps(candidate)
+
+
+def test_invocation_formals_align_keyword_order_and_other_actuals_stay_receiving_values():
+    corpus, frontend = corpus_for('''import pytest
+events = []
+class Device:
+    def __init__(self): self.closed = False
+    def accept(self, payload, count):
+        self.closed = True
+        events.append((payload, count))
+        if payload == b'bad': raise ValueError('invalid')
+
+def test_bad():
+    source = Device()
+    with pytest.raises(ValueError, match='invalid'):
+        source.accept(payload=b'bad', count=1)
+
+def test_state():
+    target = Device()
+    target.accept(count=7, payload=b'good')
+    assert target.closed is True
+''')
+    candidates = candidates_for(corpus, frontend, 'test_state')
+    candidate = next(row for row in candidates if row['provenance']['source_argument_span']['start_byte'] ==
+                     next(a['span']['start_byte'] for c in frontend['calls'] if c['callee'] == 'source.accept'
+                          for a in c['arguments'] if a['keyword'] == 'payload'))
+    assert len(candidate['edits']) == 1
+    assert candidate['relation']['argument_binding']['source']['slot'] == 0
+    assert candidate['relation']['argument_binding']['target']['slot'] == 1
+    namespace, test_name, _ = namespace_for(corpus, candidate)
+    namespace[test_name]()
+    assert namespace['events'] == [(b'bad', 7)]
+
+
+def test_literal_alias_closure_and_receiver_aliases_preserve_source_binding_provenance():
+    corpus, frontend = corpus_for(SUBJECT + '''def test_bad():
+    payload = b'bad'
+    alias_payload = payload
+    first = Device(alias_payload)
+    alias = first
+    with pytest.raises(ValueError):
+        alias.read()
+
+def test_state():
+    obj = Device(b'good')
+    reader = obj
+    reader.read()
+    observer = obj
+    assert observer.closed is True
+''')
+    candidate = candidates_for(corpus, frontend, 'test_state')[0]
+    assert len(candidate['provenance']['source_literal_binding_path']) == 2
+    assert candidate['provenance']['receiver_mapping'] == {'alias': 'reader'}
+    assert 'alias_payload' not in candidate['edits'][0]['after']
+    namespace, test_name, _ = namespace_for(corpus, candidate)
+    namespace[test_name]()
+    assert namespace['events'][0][1] == b'bad'
+
+
+def test_try_except_preserves_source_exception_check_and_alpha_renames_catch_variable():
+    corpus, frontend = corpus_for(SUBJECT + '''def test_bad():
+    message = ('broken-7',)
+    source = Device(b'bad')
+    try:
+        source.read()
+    except ValueError as caught:
+        assert caught.args == message
+    else:
+        assert False, 'source expected the exception'
+
+def test_state():
+    caught = 'recipient value'
+    message = 'different local'
+    receiver = Device(b'good')
+    receiver.read()
+    assert receiver.closed is True
+    assert caught == 'recipient value'
+    assert message == 'different local'
+''')
+    candidate = candidates_for(corpus, frontend, 'test_state')[0]
+    text = candidate['edits'][-1]['after']
+    assert 'except ValueError as gc_exc_' in text
+    assert "('broken-7',)" in text and 'source expected the exception' in text
+    assert ' == message' not in text
+    assert candidate['provenance']['exception_closure']['catch_binding_renames']['caught'].startswith('gc_exc_')
+    namespace, test_name, _ = namespace_for(corpus, candidate)
+    namespace[test_name]()
+
+
+def test_pytest_capture_alias_does_not_overwrite_recipient_local():
+    corpus, frontend = corpus_for(SUBJECT + '''def test_bad():
+    obj = Device(b'bad')
+    with pytest.raises(ValueError, match='broken-7') as info:
+        obj.read()
+
+def test_state():
+    info = 'keep'
+    receiver = Device(b'good')
+    receiver.read()
+    assert receiver.closed is True
+    assert info == 'keep'
+''')
+    candidate = candidates_for(corpus, frontend, 'test_state')[0]
+    assert ' as gc_exc_' in candidate['edits'][-1]['after']
+    namespace, test_name, _ = namespace_for(corpus, candidate)
+    namespace[test_name]()
+
+
+def test_missing_cleanup_effect_in_current_program_does_not_block_witness_generation():
+    corpus, frontend = corpus_for('''import pytest
+class Device:
+    def __init__(self, payload): self.payload, self.closed = payload, False
+    def read(self):
+        if self.payload == b'bad': raise ValueError('broken')
+        self.closed = True
+        return 'ready'
+
+def test_bad():
+    source = Device(b'bad')
+    with pytest.raises(ValueError):
+        source.read()
+
+def test_state():
+    target = Device(b'good')
+    assert target.read() == 'ready'
+    assert target.closed is True
+''')
+    candidate = candidates_for(corpus, frontend, 'test_state')[0]
+    namespace, test_name, output = namespace_for(corpus, candidate)
+    for control in output['controls']:
+        namespace[control['test_name']]()
+    with pytest.raises(AssertionError):
+        namespace[test_name]()
+    assert candidate['relation']['applicability'] == 'unknown_requires_independent_admission'
+
+
+def test_saved_q_is_pinned_after_invocation_but_earlier_snapshot_other_object_and_rebinding_are_not():
+    corpus, frontend = corpus_for(SUBJECT + DONOR + '''def test_later_snapshot():
+    receiver = Device(b'good')
+    receiver.read()
+    saved = receiver.closed
+    assert saved is True
+
+def test_earlier_snapshot():
+    receiver = Device(b'good')
+    saved = receiver.closed
+    receiver.read()
+    assert saved is False
+
+def test_other_receiver():
+    receiver = Device(b'good')
+    other = Device(b'good')
+    receiver.read()
+    assert other.closed is False
+
+def test_rebound():
+    receiver = Device(b'good')
+    receiver.read()
+    receiver = Device(b'good')
+    assert receiver.closed is False
+''')
+    assert candidates_for(corpus, frontend, 'test_later_snapshot')
+    assert not candidates_for(corpus, frontend, 'test_earlier_snapshot')
+    assert not candidates_for(corpus, frontend, 'test_other_receiver')
+    assert not candidates_for(corpus, frontend, 'test_rebound')
+
+
+def test_recipient_context_manager_setup_and_cleanup_remain_in_original_scope():
+    corpus, frontend = corpus_for(SUBJECT + '''from contextlib import contextmanager
+@contextmanager
+def surrounding():
+    events.append('enter')
+    try: yield
+    finally: events.append('leave')
+
+''' + DONOR + '''def test_state():
+    with surrounding():
+        receiver = Device(b'good')
+        receiver.read()
+        assert receiver.closed is True
+''')
+    candidates = candidates_for(corpus, frontend, 'test_state')
+    assert candidates, generate_exception_contexts(corpus, frontend)['skipped']
+    namespace, test_name, _ = namespace_for(corpus, candidates[0])
+    namespace[test_name]()
+    assert namespace['events'] == ['enter', ('construct', b'bad', 'source'), ('close', 'source'), 'leave']
+
+
+def test_effectful_expected_expression_and_shadowed_exception_import_are_not_captured():
+    corpus, frontend = corpus_for(SUBJECT + DONOR + '''def expected(): return 'ready'
+
+def test_effectful():
+    receiver = Device(b'good')
+    assert receiver.read() == expected()
+    assert receiver.closed is True
+
+def test_shadowed():
+    pytest = 'recipient local'
+    receiver = Device(b'good')
+    receiver.read()
+    assert receiver.closed is True
+''')
+    assert not candidates_for(corpus, frontend, 'test_effectful')
+    assert not candidates_for(corpus, frontend, 'test_shadowed')
+    result = generate_exception_contexts(corpus, frontend)
+    assert any('exception_context_bindings_not_closed' in reason for reason in result['skipped'])
+
+
+def test_different_constructor_types_do_not_align_by_member_name():
+    corpus, frontend = corpus_for(SUBJECT + DONOR + '''class Other:
+    def __init__(self, payload): self.closed = False
+    def read(self): self.closed = True
+
+def test_state():
+    receiver = Other(b'good')
+    receiver.read()
+    assert receiver.closed is True
+''')
+    assert not candidates_for(corpus, frontend, 'test_state')
+
+
+def test_unknown_input_calls_are_not_executed_or_transferred_as_closed_values():
+    corpus, frontend = corpus_for(SUBJECT + '''def side_effect():
+    raise RuntimeError('generation must never call this')
+
+def test_bad():
+    obj = Device(side_effect())
+    with pytest.raises(ValueError):
+        obj.read()
+
+def test_state():
+    receiver = Device(b'good')
+    receiver.read()
+    assert receiver.closed is True
+''')
+    result = generate_exception_contexts(corpus, frontend)
+    assert not result['candidates']
+    assert result['skipped']['input_expression_not_closed_literal']
+
+
+def test_parent_budget_and_pinned_observations_are_deterministic():
+    corpus, frontend = corpus_for(SUBJECT + DONOR + ''.join(f'''def test_{name}():
+    receiver = Device(b'good')
+    receiver.read()
+    assert receiver.closed is True
+
+''' for name in ['north', 'south', 'east']))
+    budget = ExceptionBudget(max_candidates=3)
+    result = generate_exception_contexts(corpus, frontend, budget)
+    assert len(result['candidates']) == 3
+    assert len({row['base_test_id'] for row in result['candidates']}) == 3
+    assert len({row['target_capsule_id'] for row in result['candidates']}) == 3
+    assert result['budget_exhausted']
+    assert result == generate_exception_contexts(corpus, frontend, budget)
+
+
+def test_invalid_budget_is_rejected():
+    corpus, frontend = corpus_for(SUBJECT + DONOR)
+    with pytest.raises(ValueError, match='positive integers'):
+        generate_exception_contexts(corpus, frontend, ExceptionBudget(max_candidates=0))
+
+
+def test_source_exception_and_framework_imports_close_across_test_files(monkeypatch):
+    import sys
+    import types
+
+    production = '''class Failure(Exception): pass
+class Device:
+    def __init__(self, payload): self.payload, self.closed = payload, False
+    def read(self):
+        self.closed = True
+        if self.payload == b'bad': raise Failure('broken')
+'''
+    sources = [Source('sample_resource.py', production, 'python'),
+               Source('test_bad.py', '''import pytest as checks
+from sample_resource import Device, Failure
+
+def test_bad():
+    source = Device(b'bad')
+    with checks.raises(Failure, match='broken'):
+        source.read()
+''', 'python'),
+               Source('test_state.py', '''from sample_resource import Device
+
+def test_state():
+    receiver = Device(b'good')
+    receiver.read()
+    assert receiver.closed is True
+''', 'python')]
+    frontend = extract_frontend(sources)
+    corpus = to_emitter_corpus(frontend)
+    candidates = candidates_for(corpus, frontend, 'test_state')
+    assert candidates, generate_exception_contexts(corpus, frontend)['skipped']
+    candidate = candidates[0]
+    assert {row['name'] for row in candidate['imports']} == {'checks', 'Failure'}
+    module = types.ModuleType('sample_resource')
+    exec(production, module.__dict__)
+    monkeypatch.setitem(sys.modules, 'sample_resource', module)
+    output = emit(corpus, [candidate])
+    assert not output['unsupported']
+    namespace = {}
+    exec(output['files']['test_state.py'], namespace)
+    namespace[output['obligations'][0]['test_name']]()
+
+
+def test_shared_match_literal_is_closed_without_capturing_recipient_name():
+    corpus, frontend = corpus_for(SUBJECT + '''def test_bad():
+    pattern = r'broken-\\d+'
+    source = Device(b'bad')
+    with pytest.raises(ValueError, match=pattern):
+        source.read()
+
+def test_state():
+    pattern = 'not the donor matcher'
+    receiver = Device(b'good')
+    receiver.read()
+    assert receiver.closed is True
+    assert pattern == 'not the donor matcher'
+''')
+    candidate = candidates_for(corpus, frontend, 'test_state')[0]
+    assert 'match=pattern' not in candidate['edits'][-1]['after']
+    assert candidate['provenance']['exception_closure']['closed_dependency_spans']
+    namespace, test_name, _ = namespace_for(corpus, candidate)
+    namespace[test_name]()
+
+
+def test_standalone_invocation_composes_with_existing_atomic_q_selection():
+    from relational_gap.atomic_observations import atomize_candidates
+
+    corpus, frontend = corpus_for(SUBJECT + DONOR + '''def test_state():
+    receiver = Device(b'good')
+    receiver.read()
+    assert receiver.closed is True
+''')
+    candidate = candidates_for(corpus, frontend, 'test_state')[0]
+    atomized = atomize_candidates(corpus, frontend, [candidate])
+    assert not atomized['unknowns']
+    assert len(atomized['candidates']) == 1
+    atomic = atomized['candidates'][0]
+    assert atomic['observation_id'] == candidate['target_capsule_id']
+    namespace, test_name, _ = namespace_for(corpus, atomic)
+    namespace[test_name]()
+
+
+def test_direct_assert_exception_wrapper_survives_atomic_observation_selection():
+    from relational_gap.atomic_observations import atomize_candidates
+
+    corpus, frontend = corpus_for(SUBJECT + DONOR + '''def test_state():
+    receiver = Device(b'good')
+    assert receiver.read() is None
+    assert receiver.closed is True
+''')
+    candidate = candidates_for(corpus, frontend, 'test_state')[0]
+    atomized = atomize_candidates(corpus, frontend, [candidate])
+    assert not atomized['unknowns']
+    atomic, = atomized['candidates']
+    assert atomic['atomic_observation']['source_exception_guard_ids']
+    namespace, test_name, _ = namespace_for(corpus, atomic)
+    namespace[test_name]()

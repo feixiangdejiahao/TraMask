@@ -67,16 +67,27 @@ def test_parts(identifier: str) -> tuple[str, str]:
 def parent_hit(identifier: str, target: dict, selection: dict) -> bool:
     path, name = test_parts(identifier)
     aliases = {path}
+    names = {name}
     source = selection.get("files", {}).get(path, {})
-    for key in ("trajectory_source", "original_written_path", "target_path"):
+    for key in ("trajectory_source", "original_written_path", "target_path", "original_target_path"):
         if source.get(key):
             aliases.add(source[key])
+    # Historical globals are namespaced by the recorded original source hash.
+    # Never infer identity merely by stripping a familiar-looking suffix.
+    if source.get("kind") == "historical_validation" and source.get("sha256"):
+        for original in source.get("relocated_globals", []):
+            if name == original + "_rh_" + source["sha256"][:12]:
+                names.add(original)
+    for wrapper in selection.get("script_wrappers", []):
+        if (wrapper.get("status") == "wrapped" and wrapper.get("source_path") == path
+                and wrapper.get("wrapper_name") == name):
+            names.add("<script>")
     for anchor in target["source_tests"]:
         if anchor["role"] != "primary":
             continue
         if identifier == anchor["id"]:
             return True
-        if name == anchor["name"] and aliases.intersection(anchor["path_aliases"]):
+        if anchor["name"] in names and aliases.intersection(anchor["path_aliases"]):
             return True
     return False
 
@@ -129,6 +140,42 @@ def load_batches(args, census):
     keys = [(r["case"], r["candidate_id"]) for r in entries]
     if len(keys) != len(set(keys)):
         raise ValueError("Repeated case/candidate across additional batch roots")
+    emitted_root = getattr(args, "emitted_root", None)
+    if emitted_root:
+        originals = {(row["case"], row["candidate_id"]): row for row in entries}
+        for path in sorted(emitted_root.glob("*/accepted.json")):
+            case = path.parent.name
+            files.append(freeze_file(path))
+            seen = set()
+            for candidate in read(path):
+                identifier = candidate["id"]
+                if identifier in seen:
+                    raise ValueError("Repeated accepted candidate ID")
+                seen.add(identifier)
+                # Atomic isolation may already belong to frozen preparation.
+                # Prefer that exact candidate; only new admission-time child
+                # IDs require following their declared static parent.
+                parent_id = identifier if (case, identifier) in originals else candidate.get("parent_candidate_id")
+                parent = originals.get((case, parent_id))
+                if parent is None:
+                    raise ValueError("Atomic candidate has no frozen static parent")
+                parents = list(dict.fromkeys(value for value in
+                    [candidate.get("base_test_id"), candidate.get("focus_test_id"),
+                     *candidate.get("source_test_ids", [])] if value))
+                if parents != parent["source_parent_ids"]:
+                    raise ValueError("Atomic candidate changed source-parent provenance")
+                admitted = {**parent, "candidate_id": identifier,
+                            "generation_parent_candidate_id": candidate.get("parent_candidate_id"),
+                            "static_candidate_sha256": parent["candidate_sha256"],
+                            "candidate_sha256": canonical(candidate),
+                            "parent_candidate_id": parent_id,
+                            "candidate_stage": "semantic_atomic_candidate" if identifier != parent_id else "semantic_candidate"}
+                if identifier == parent_id:
+                    # Some source tests have one indivisible observation and
+                    # keep their static ID while acquiring an expected edit.
+                    parent.update(admitted)
+                else:
+                    entries.append(admitted)
     return entries, files
 
 
@@ -153,7 +200,7 @@ def runtime_tests(path: Path) -> tuple[list[dict], list[str], list[Path]]:
     tests = document.get("tests")
     if tests is not None:
         rows = [{"id": t.get("id", t.get("name")), "status": normal_status(t.get("status", "unknown")),
-                 "kind": t.get("kind"), "message": t.get("message", "")} for t in tests]
+                 "kind": t.get("kind"), "message": t.get("message", t.get("detail", ""))} for t in tests]
     elif (path.parent / "junit.xml").exists():
         file = path.parent / "junit.xml"
         used.append(file)
@@ -190,6 +237,8 @@ def runtime_tests(path: Path) -> tuple[list[dict], list[str], list[Path]]:
 
 
 def matches_runtime(actual: str, requested: str) -> bool:
+    # Vitest fullName joins an empty root-suite name with a leading space.
+    actual, requested = actual.strip(), requested.strip()
     local = actual.rsplit("::", 1)[-1]
     return any(value == requested or value.startswith(requested + "[") or value.startswith(requested + "/")
                for value in (actual, local))
@@ -207,6 +256,7 @@ def load_runs(path: Path | None) -> tuple[list[dict], list[dict]]:
         if record["role"] == "control" and not record.get("candidate_id"):
             for generated in records:
                 if (generated["role"] == "generated" and generated["case"] == record["case"]
+                        and generated.get("manifest") == record.get("manifest")
                         and set(record.get("test_ids", [])) & set(generated.get("control_ids", []))):
                     expanded.append({**record, "candidate_id": generated["candidate_id"],
                                      "association": "generated.control_ids"})
@@ -313,6 +363,7 @@ def evaluate(args) -> dict:
         detected = control_pass and raw_failure and all(v is True for v in semantic.values())
         result = {**fresh[key], **semantic, "control_pass": control_pass,
                   "generated_test_failure": raw_failure, "target_gap_detected": detected,
+                  "generated_test_observed": any(r.get("tests") for r in generated),
                   "controlled_failure": control_pass and raw_failure,
                   "confirmed_false_alarm": control_pass and raw_failure and semantic["correct_oracle"] is False,
                   "unresolved_controlled_failure": control_pass and raw_failure and semantic["correct_oracle"] is None,
@@ -325,6 +376,12 @@ def evaluate(args) -> dict:
     for target in census["cases"]:
         rows = [r for r in verdicts if r["case"] == target["case"]]
         cases.append({"case": target["case"], "candidate_count": len(rows),
+                      "frozen_static_candidates": sum(r.get("candidate_stage") != "semantic_atomic_candidate" for r in rows),
+                      "admitted_candidates": sum(r.get("candidate_stage") in {"semantic_candidate", "semantic_atomic_candidate"} for r in rows),
+                      "attempted_candidates": sum(bool(r["generated_runs"]) for r in rows),
+                      "observed_candidates": sum(r["generated_test_observed"] for r in rows),
+                      "admitted_target_parent_hit": any(r["test_hit"] and r.get("candidate_stage") in {"semantic_candidate", "semantic_atomic_candidate"} for r in rows),
+                      "executed_target_parent_hit": any(r["test_hit"] and r["generated_test_observed"] for r in rows),
                       "retrieval_test_hit": any(r["selected_target_ids"] for r in rows),
                       "test_hit": any(r["test_hit"] for r in rows),
                       "scenario_hit": any(r["scenario_hit"] is True for r in rows),
@@ -336,6 +393,8 @@ def evaluate(args) -> dict:
     return {"version": VERSION, "census_sha256": review["census"]["sha256"],
             "reviews_sha256": digest(args.reviews), "denominator": len(cases),
             "counts": {name: sum(row[name] for row in cases) for name in dimensions},
+            "stage_counts": {name: sum(row[name] for row in cases) for name in
+                ("frozen_static_candidates", "admitted_candidates", "attempted_candidates", "observed_candidates", "admitted_target_parent_hit", "executed_target_parent_hit")},
             "candidate_outcome_counts": {name: sum(row[name] for row in verdicts) for name in
                 ("generated_test_failure", "controlled_failure", "confirmed_false_alarm", "unresolved_controlled_failure")},
             "all_17_targets_proven": len(cases) == 17 and all(r["all_dimensions_proven"] for r in cases),
@@ -348,6 +407,8 @@ def main() -> None:
     parser.add_argument("stage", choices=("inventory", "evaluate"))
     parser.add_argument("--batch-root", type=Path, required=True)
     parser.add_argument("--additional-batch-root", type=Path, action="append", default=[])
+    parser.add_argument("--emitted-root", type=Path,
+                        help="Frozen accepted candidates, including program-owned atomic children")
     parser.add_argument("--census", type=Path, default=DEFAULT_CENSUS)
     parser.add_argument("--runs", type=Path)
     parser.add_argument("--reviews", type=Path)

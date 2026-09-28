@@ -100,3 +100,57 @@ def test_batch_byte_limit_keeps_only_selected_test_contexts():
     assert result["skipped"]
     aliases = [cid for request in result["requests"] for cid in request["candidate_aliases"].values()]
     assert aliases == ["opaque_generated_" + str(i) for i in range(len(aliases))]
+
+
+def truth_fixture(condition='not result'):
+    code = f'''class Probe:
+    def __init__(self, value):
+        self.value = value
+    def __bool__(self):
+        observations.append(self.value)
+        return self.value
+observations = []
+def test_value():
+    result = Probe(False)
+    assert {condition}
+'''
+    frontend = extract_frontend([Source('test_truth.py', code, 'python')])
+    corpus = to_emitter_corpus(frontend)
+    call = next(c for c in frontend['calls'] if c['callee'] == 'Probe')
+    candidate = {'id': 'truth_example', 'base_test_id': frontend['tests'][0]['id'],
+                 'edits': [{'span': call['arguments'][0]['span'], 'before': 'False', 'after': 'True'}]}
+    prepared = prepare_requests(corpus, frontend, [candidate], 'An enabled probe is true.')
+    return corpus, prepared['requests'][0]
+
+
+def test_implicit_truth_expectation_changes_only_polarity_and_observes_once():
+    corpus, request = truth_fixture()
+    wire = json.loads(request['prompt'])['candidates'][0]
+    assert wire['holes'][0]['fixed_type'] == 'bool'
+    assert wire['holes'][0]['observed_truth_of'] == 'result'
+    assert wire['holes'][0]['old_expected'] is False
+    accepted = validate_response(request, {'accepted': [row(expr='True')]}, corpus=corpus)
+    assert len(accepted['accepted']) == 1
+    generated = emit(corpus, accepted['accepted'])
+    namespace = {}
+    exec(generated['files']['test_truth.py'], namespace)
+    namespace['test_gc_truth_example']()
+    assert namespace['observations'] == [True]
+    assert accepted['accepted'][0]['edits'][-1]['after'] == '(result)'
+
+
+def test_truth_expectation_retaining_old_value_does_not_rewrite_observation():
+    corpus, request = truth_fixture()
+    accepted = validate_response(request, {'accepted': [row(expr='pre[0]')]}, corpus=corpus)
+    assert len(accepted['accepted'][0]['edits']) == 1
+    assert accepted['accepted'][0]['oracle']['mode'] == 'semantic_retain_all'
+
+
+def test_truth_expected_hole_cannot_become_constant_or_integer():
+    corpus, request = truth_fixture()
+    rejected = validate_response(request, {'accepted': [row(expr='1')]}, corpus=corpus)
+    assert not rejected['accepted']
+    assert rejected['rejected'][0]['reason'] == 'source_template_leaf_type_changed'
+    positive_corpus, positive_request = truth_fixture('result')
+    accepted = validate_response(positive_request, {'accepted': [row(expr='False')]}, corpus=positive_corpus)
+    assert accepted['accepted'][0]['edits'][-1]['after'] == 'not (result)'
