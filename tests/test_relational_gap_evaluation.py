@@ -54,6 +54,27 @@ def test_retrieval_and_runtime_failure_do_not_prove_semantics(experiment):
     assert not report["all_17_targets_proven"]
 
 
+def test_source_lane_is_not_model_admission_and_variants_are_distinct(experiment):
+    experiment.emitted_root = experiment.batch_root.parent / "emitted"
+    source = {"id": "candidate", "static_parent_id": "candidate", "execution_lane": "source_q",
+              "base_test_id": "tests/test_input.py:10:test_anchor"}
+    revised = {**source, "id": "llm_revision", "execution_lane": "llm_q",
+               "parent_candidate_id": "candidate", "edits": [{"role": "semantic_expected", "after": "4"}]}
+    dump(experiment.emitted_root / "P1/accepted.json", [source, revised])
+    fill_reviews(experiment, semantic=False)
+    report = evaluate(experiment)
+    assert report["stage_counts"]["frozen_static_candidates"] == 1
+    assert report["stage_counts"]["admitted_candidates"] == 0
+    assert report["stage_counts"]["source_q_candidates"] == 1
+    assert report["stage_counts"]["llm_q_candidates"] == 1
+    assert report["execution_lane_counts"]["source_q"]["controlled_failures"] == 1
+    assert report["counts"]["target_gap_detected"] == 0
+    source["edits"] = [{"after": "tampered"}]
+    dump(experiment.emitted_root / "P1/accepted.json", [source, revised])
+    with pytest.raises(ValueError, match="Source-q execution changed"):
+        inventory(experiment)
+
+
 def test_all_independent_dimensions_can_support_one_target(experiment):
     fill_reviews(experiment)
     report = evaluate(experiment)

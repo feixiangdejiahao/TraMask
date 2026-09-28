@@ -122,6 +122,7 @@ def load_batch(root: Path, census: dict) -> tuple[list[dict], list[dict]]:
             entries.append({"case": case, "candidate_id": candidate["id"],
                             "batch_directory": str(folder.resolve()), "candidate_rank": rank,
                             "candidate_sha256": canonical(candidate), "source_parent_ids": parents,
+                            "source_edits_sha256": canonical(candidate.get("edits", [])),
                             "target_parent_ids": [p for p in parents if parent_hit(p, known[case], selection)],
                             "selected_target_ids": [p for p in selected if parent_hit(p, known[case], selection)],
                             "test_hit": any(parent_hit(p, known[case], selection) for p in parents)})
@@ -146,6 +147,9 @@ def load_batches(args, census):
         for path in sorted(emitted_root.glob("*/accepted.json")):
             case = path.parent.name
             files.append(freeze_file(path))
+            lanes_file = path.parent / "execution_lanes.json"
+            if lanes_file.exists():
+                files.append(freeze_file(lanes_file))
             seen = set()
             for candidate in read(path):
                 identifier = candidate["id"]
@@ -155,7 +159,7 @@ def load_batches(args, census):
                 # Atomic isolation may already belong to frozen preparation.
                 # Prefer that exact candidate; only new admission-time child
                 # IDs require following their declared static parent.
-                parent_id = identifier if (case, identifier) in originals else candidate.get("parent_candidate_id")
+                parent_id = identifier if (case, identifier) in originals else candidate.get("static_parent_id", candidate.get("parent_candidate_id"))
                 parent = originals.get((case, parent_id))
                 if parent is None:
                     raise ValueError("Atomic candidate has no frozen static parent")
@@ -164,12 +168,22 @@ def load_batches(args, census):
                      *candidate.get("source_test_ids", [])] if value))
                 if parents != parent["source_parent_ids"]:
                     raise ValueError("Atomic candidate changed source-parent provenance")
+                lane = candidate.get("execution_lane")
+                if lane is not None:
+                    if lane not in {"source_q", "llm_q"} or candidate.get("static_parent_id") != parent_id:
+                        raise ValueError("Execution lane has invalid explicit static parent")
+                    if lane == "source_q" and canonical(candidate.get("edits", [])) != parent["source_edits_sha256"]:
+                        raise ValueError("Source-q execution changed the frozen source edits")
                 admitted = {**parent, "candidate_id": identifier,
                             "generation_parent_candidate_id": candidate.get("parent_candidate_id"),
-                            "static_candidate_sha256": parent["candidate_sha256"],
+                            "static_candidate_sha256": parent.get("static_candidate_sha256", parent["candidate_sha256"]),
                             "candidate_sha256": canonical(candidate),
                             "parent_candidate_id": parent_id,
                             "candidate_stage": "semantic_atomic_candidate" if identifier != parent_id else "semantic_candidate"}
+                if lane:
+                    admitted.update(execution_lane=lane, static_parent_id=parent_id,
+                                    emission_variant=identifier != parent_id,
+                                    candidate_stage="source_hypothesis" if lane == "source_q" else "llm_revision")
                 if identifier == parent_id:
                     # Some source tests have one indivisible observation and
                     # keep their static ID while acquiring an expected edit.
@@ -390,11 +404,14 @@ def evaluate(args) -> dict:
     for target in census["cases"]:
         rows = [r for r in verdicts if r["case"] == target["case"]]
         cases.append({"case": target["case"], "candidate_count": len(rows),
-                      "frozen_static_candidates": sum(r.get("candidate_stage") != "semantic_atomic_candidate" for r in rows),
+                      "frozen_static_candidates": sum(r.get("candidate_stage") != "semantic_atomic_candidate" and not r.get("emission_variant") for r in rows),
                       "admitted_candidates": sum(r.get("candidate_stage") in {"semantic_candidate", "semantic_atomic_candidate"} for r in rows),
+                      "source_q_candidates": sum(r.get("execution_lane") == "source_q" for r in rows),
+                      "llm_q_candidates": sum(r.get("execution_lane") == "llm_q" for r in rows),
                       "attempted_candidates": sum(bool(r["generated_runs"]) for r in rows),
                       "observed_candidates": sum(r["generated_test_observed"] for r in rows),
                       "admitted_target_parent_hit": any(r["test_hit"] and r.get("candidate_stage") in {"semantic_candidate", "semantic_atomic_candidate"} for r in rows),
+                      "offered_source_target_parent_hit": any(r["test_hit"] and r.get("execution_lane") == "source_q" for r in rows),
                       "executed_target_parent_hit": any(r["test_hit"] and r["generated_test_observed"] for r in rows),
                       "retrieval_test_hit": any(r["selected_target_ids"] for r in rows),
                       "test_hit": any(r["test_hit"] for r in rows),
@@ -408,7 +425,12 @@ def evaluate(args) -> dict:
             "reviews_sha256": digest(args.reviews), "denominator": len(cases),
             "counts": {name: sum(row[name] for row in cases) for name in dimensions},
             "stage_counts": {name: sum(row[name] for row in cases) for name in
-                ("frozen_static_candidates", "admitted_candidates", "attempted_candidates", "observed_candidates", "admitted_target_parent_hit", "executed_target_parent_hit")},
+                ("frozen_static_candidates", "admitted_candidates", "source_q_candidates", "llm_q_candidates", "attempted_candidates", "observed_candidates", "admitted_target_parent_hit", "offered_source_target_parent_hit", "executed_target_parent_hit")},
+            "execution_lane_counts": {lane: {"candidates": sum(r.get("execution_lane") == lane for r in verdicts),
+                "observed": sum(r.get("execution_lane") == lane and r["generated_test_observed"] for r in verdicts),
+                "controlled_failures": sum(r.get("execution_lane") == lane and r["controlled_failure"] for r in verdicts),
+                "confirmed_target_candidates": sum(r.get("execution_lane") == lane and r["target_gap_detected"] for r in verdicts)}
+                for lane in ("source_q", "llm_q")},
             "candidate_outcome_counts": {name: sum(row[name] for row in verdicts) for name in
                 ("generated_test_failure", "controlled_failure", "confirmed_false_alarm", "unresolved_controlled_failure")},
             "all_17_targets_proven": len(cases) == 17 and all(r["all_dimensions_proven"] for r in cases),
