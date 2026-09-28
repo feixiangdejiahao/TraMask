@@ -109,6 +109,12 @@ class _Kernel:
         if not name or key in seen or len(seen) > self.budget.max_depth:
             return {"kind": "unknown", "underlying": name, "aliases": []}
         choices = [a for a in self.aliases if a["name"] == name and a["span"]["path"] == path and a["scope_span"] is None]
+        if not choices and self.sources[path].language == 'go' and '.' in name:
+            qualifier, separator, member = name.partition('.')
+            if separator and qualifier.isidentifier() and member.isidentifier():
+                directories = self._imported_go_directories(path, qualifier)
+                choices = [a for a in self.aliases if a['name'] == member and a['scope_span'] is None
+                           and posixpath.dirname(a['span']['path']) in directories]
         if not choices and self.sources[path].language == "go":
             choices = [a for a in self.aliases if a["name"] == name and a["scope_span"] is None
                        and posixpath.dirname(a["span"]["path"]) == posixpath.dirname(path)]
@@ -127,6 +133,54 @@ class _Kernel:
         if name.startswith(('*', '[', 'map[', 'chan ', '<-chan ', 'func(', 'interface', 'struct')):
             return {"kind": "non_integer", "underlying": name, "aliases": []}
         return {"kind": "unknown", "underlying": name, "aliases": []}
+
+    def _imported_go_directories(self, path, qualifier):
+        """Resolve a package through source imports and supplied go.mod facts.
+
+        Package basenames alone are insufficient: a module can use another
+        package name, and two dependencies can expose the same type spelling.
+        """
+        modules = self.frontend.get('module_resolution', {}).get('go_modules', {})
+        source = self.sources[path]
+        directories = set()
+        for node in walk(source.root):
+            if node.type != 'import_spec':
+                continue
+            imported, alias = child(node, 'path'), child(node, 'name')
+            if imported is None:
+                continue
+            try:
+                module = literal(source.text(imported))
+            except ValueError:
+                continue
+            if not isinstance(module, str):
+                continue
+            matching = [(root, prefix) for root, prefix in modules.items()
+                        if module == prefix or module.startswith(prefix + '/')]
+            if not matching:
+                continue
+            longest = max(len(prefix) for _, prefix in matching)
+            targets = {posixpath.normpath(posixpath.join(root, module[len(prefix):].lstrip('/')))
+                       for root, prefix in matching if len(prefix) == longest}
+            if len(targets) != 1:
+                continue
+            directory = targets.pop()
+            directory = '' if directory == '.' else directory
+            if alias is not None:
+                if source.text(alias) == qualifier:
+                    directories.add(directory)
+                continue
+            package_names = set()
+            for target_path, target in self.sources.items():
+                if target.language != 'go' or posixpath.dirname(target_path) != directory:
+                    continue
+                for declaration in target.root.named_children:
+                    if declaration.type == 'package_clause':
+                        package_names.update(target.text(n) for n in declaration.named_children
+                                             if n.type in {'package_identifier', 'identifier'})
+            if package_names == {qualifier}:
+                directories.add(directory)
+        return directories
 
     def cast_type(self, source, function_node):
         """Only source-resolved Go conversions, never a name-shaped Python call."""
@@ -394,8 +448,14 @@ def generate_scalar_cells(corpus: dict, frontend: dict, *, budget: ScalarBudget 
                             and not any(n.get('kind') == 'literal' for n in _visit(actual_ir))):
                         kernel.skipped['numeric_actual_domain_unknown'] += 1
                         continue
-                    if any(v.get("oracle_dependency") and v.get("test_id") == test_id
-                           and v["span"] == arg["span"] for v in frontend.get("values", [])):
+                    # A literal feeding an observed call can also occur in a
+                    # broad oracle dependence slice. Reject actual expected
+                    # expression locations, not such may-dependence labels.
+                    if any(q.get('test_id') == test_id and q.get('expected')
+                           and q['expected']['span']['path'] == arg['span']['path']
+                           and q['expected']['span']['start_byte'] <= arg['span']['start_byte']
+                           and arg['span']['end_byte'] <= q['expected']['span']['end_byte']
+                           for q in corpus.get('capsules', ())):
                         kernel.skipped["expected_dependency"] += 1
                         continue
                     hypotheses = []
@@ -444,16 +504,23 @@ def generate_scalar_cells(corpus: dict, frontend: dict, *, budget: ScalarBudget 
                             continue
                         edit = {"span": arg["span"], "before": arg["text"], "after": after}
                         cid = "scalar_" + _id(test_id, edit)
+                        relation = {"domain": "source_scalar_constraint", "cell": cell, "construction": kind,
+                                    "operator": constraint["operator"], "constraint_span": constraint["span"],
+                                    "comparison_span": constraint["span"], "function_id": origin["id"],
+                                    "call_span": call["span"], "argument_slot": slot, "binding_path": path,
+                                    "numeric_type": type_info, "counteroperand_status": "unrecoverable_or_nonlinear" if kind == "unknown_boundary_neighbor" else "source_expression_recovered",
+                                    "status": "hypothesis_runtime_relation_unconfirmed", "evaluation": "original_actual_occurs_once_or_closed_integer"}
                         if cid in pool:
+                            # One concrete edit can be supported by several
+                            # source predicates. Deduplicate executions, not
+                            # derivations needed for later witness composition.
+                            evidence = pool[cid].setdefault('source_constraint_derivations', [pool[cid]['relation']])
+                            if relation not in evidence:
+                                evidence.append(relation)
                             continue
                         pool[cid] = {"id": cid, "base_test_id": test_id, "focus_test_id": test_id, "source_test_ids": [test_id],
                                      "kind": "scalar_source_constraint", "language": source.language, "edits": [edit], "imports": [],
-                                     "relation": {"domain": "source_scalar_constraint", "cell": cell, "construction": kind,
-                                                  "operator": constraint["operator"], "constraint_span": constraint["span"],
-                                                  "comparison_span": constraint["span"], "function_id": origin["id"],
-                                                  "call_span": call["span"], "argument_slot": slot, "binding_path": path,
-                                                  "numeric_type": type_info, "counteroperand_status": "unrecoverable_or_nonlinear" if kind == "unknown_boundary_neighbor" else "source_expression_recovered",
-                                                  "status": "hypothesis_runtime_relation_unconfirmed", "evaluation": "original_actual_occurs_once_or_closed_integer"},
+                                     "relation": relation,
                                      "oracle": {"mode": "retain_all", "source_test_id": test_id, "applicability": "requires_independent_admission"},
                                      "provenance": {"source_spans": [constraint["span"], arg["span"], *[a["span"] for a in type_info["aliases"]]],
                                                     "target_span": arg["span"]},

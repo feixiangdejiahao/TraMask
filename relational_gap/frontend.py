@@ -988,6 +988,7 @@ def extract_frontend(
     sources: Iterable[Source], *, patch: str = "", test_ids: Iterable[str] | None = None,
     max_production_depth: int = 3, max_production_units: int = 256, max_tests: int | None = None,
     module_aliases: dict | None = None, module_base_url: str | None = None,
+    go_modules: dict | None = None,
 ) -> dict:
     """Extract exact source facts; stable ordering is by path/byte position.
 
@@ -998,6 +999,10 @@ def extract_frontend(
     """
     if max_production_depth < 0 or max_production_units < 0 or (max_tests is not None and max_tests < 0):
         raise ValueError("frontend bounds must be nonnegative")
+    go_modules = dict(go_modules or {})
+    if any(not isinstance(root, str) or not isinstance(module, str) or not module
+           or root.startswith('/') or '..' in root.split('/') for root, module in go_modules.items()):
+        raise ValueError('go_modules requires repository-relative roots and explicit module paths')
     sources = sorted(list(sources), key=lambda s: s.path)
     if len({s.path for s in sources}) != len(sources):
         raise ValueError("source paths must be unique")
@@ -1023,6 +1028,7 @@ def extract_frontend(
         tests = tests[:max_tests]
     result = {"schema_version": SCHEMA_VERSION,
               "module_resolution": {"aliases": index.module_aliases, "base_url": index.module_base_url,
+                                    "go_modules": go_modules,
                                     "evidence": "caller_supplied_explicit_config"},
               "sources": {s.path: {"code": s.code, "language": s.language, "origin": s.origin,
                                    "step": s.step, "written_path": s.written_path, "parse_error": s.root.has_error}

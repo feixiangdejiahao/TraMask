@@ -143,7 +143,17 @@ def compose_witnesses(corpus, frontend, candidates, *, budget: CompositionBudget
     observations = {row['id']: row for row in corpus.get('capsules', ())}
     scalars = defaultdict(list)
     producers = []
-    for row in candidates:
+    def derivations():
+        for row in candidates:
+            if row.get('kind') != 'scalar_source_constraint' or not row.get('source_constraint_derivations'):
+                yield row
+                continue
+            for relation in row['source_constraint_derivations']:
+                # Keep the concrete parent's identity, but retain the precise
+                # source derivation that licenses this composition.
+                yield dict(row, relation=relation)
+
+    for row in derivations():
         try:
             if row.get('kind') == 'scalar_source_constraint':
                 edit, offset = _scalar(corpus, row)
@@ -229,6 +239,8 @@ def compose_witnesses(corpus, frontend, candidates, *, budget: CompositionBudget
                                                 'producer_argument_after': argument['after'], 'offset': offset,
                                                 'scalar_source_spans': copy.deepcopy(scalar_row.get('provenance', {}).get('source_spans', [])),
                                                 'retained_observation_id': q, 'oracle_edits': False, 'neutralizations': False}
+        composed['provenance']['composition']['scalar_derivation'] = copy.deepcopy(scalar_row['relation'])
+        composed['provenance']['composition']['scalar_source_spans'].append(copy.deepcopy(scalar_row['relation']['comparison_span']))
         composed['provenance']['source_spans'].extend(copy.deepcopy(scalar_row.get('provenance', {}).get('source_spans', [])))
         composed['selection']['composition_schedule'] = 'base_test_then_producer_parent_round_robin'
         outputs.append(composed)

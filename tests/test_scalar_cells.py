@@ -75,6 +75,76 @@ def test_go_alias_resolves_same_package_declaration_and_exact_rhs():
     assert [a["name"] for a in info["aliases"]] == ["Stamp", "Base"]
 
 
+def imported_alias_program(import_spec='"example.test/demo/model"', spelling='records.Tick',
+                           target='uint32', modules=None):
+    sources = [
+        Source('model/types.go', 'package records\ntype Tick ' + target + '\n', 'go'),
+        Source('other/types.go', 'package records\ntype Tick string\n', 'go'),
+        Source('sample_test.go', 'package sample\nimport ("testing"; ' + import_spec + ')\n'
+               + 'func accepts(value ' + spelling + ') bool { return value <= 4 }\n'
+               + 'func TestValue(t *testing.T) { if !accepts(2) { t.Fatal("bad") } }\n', 'go'),
+    ]
+    frontend = extract_frontend(sources, go_modules=modules)
+    corpus = to_emitter_corpus(frontend)
+    return generate_scalar_cells(corpus, frontend)
+
+
+@pytest.mark.parametrize('import_spec,spelling', [
+    ('"example.test/demo/model"', 'records.Tick'),
+    ('ticks "example.test/demo/model"', 'ticks.Tick'),
+])
+def test_go_imported_type_uses_module_and_declared_package_identity(import_spec, spelling):
+    result = imported_alias_program(import_spec, spelling, modules={'': 'example.test/demo'})
+    assert replacements(result) == {'3', '4', '5'}
+    for candidate in result['candidates']:
+        info = candidate['relation']['numeric_type']
+        assert info['kind'] == 'integer' and info['underlying'] == 'uint32'
+        assert [a['span']['path'] for a in info['aliases']] == ['model/types.go']
+
+
+@pytest.mark.parametrize('modules,spelling', [
+    (None, 'records.Tick'),
+    ({'': 'unrelated.test/module'}, 'records.Tick'),
+    ({'': 'example.test/demo'}, 'model.Tick'),
+    ({'': 'example.test/demo'}, 'unknown.Tick'),
+])
+def test_go_imported_type_is_not_inferred_from_directory_or_type_spelling(modules, spelling):
+    result = imported_alias_program(modules=modules, spelling=spelling)
+    assert result['candidates']
+    assert all(c['relation']['numeric_type']['kind'] != 'integer' for c in result['candidates'])
+
+
+def test_go_imported_noninteger_type_rejects_scalar_arithmetic():
+    result = imported_alias_program(target='string', modules={'': 'example.test/demo'})
+    assert not result['candidates']
+    assert result['counts']['skipped']['non_integer_formals']
+
+
+def test_observed_call_input_is_not_discarded_by_broad_oracle_dependency_label():
+    corpus, frontend, original = build('''def accepts(value: int):
+    return value <= 4
+def test_value():
+    assert accepts(2) is True
+''')
+    actual = next(c['arguments'][0] for c in frontend['calls'] if c['callee'] == 'accepts')
+    value = next(v for v in frontend['values'] if v['span'] == actual['span'])
+    value['oracle_dependency'] = True
+    assert not value.get('expected_in')
+    updated = generate_scalar_cells(corpus, frontend)
+    assert replacements(updated) == replacements(original) == {'3', '4', '5'}
+
+
+def test_actual_inside_expected_expression_is_never_modified():
+    corpus, frontend, _ = build('''def expected(value: int):
+    return value <= 4
+def test_value():
+    observed = True
+    assert observed == expected(2)
+''')
+    result = generate_scalar_cells(corpus, frontend)
+    assert not result['candidates']
+
+
 def test_source_mask_generates_only_observed_bit_operations():
     _, _, result = build('''package sample
 import "testing"

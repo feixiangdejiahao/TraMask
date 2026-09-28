@@ -83,6 +83,27 @@ def test_composition_retains_prefix_q_and_parents_without_mutating_inputs():
     json.dumps(result)
 
 
+def test_identical_edits_keep_all_source_constraints_for_composition():
+    code = CODE.replace(
+        "    def wait(self, position: int): events.append(('wait', position)); return position > self.current",
+        "    def wait(self, position: int):\n"
+        "        if position == 0: return False\n"
+        "        return position > self.current").replace('receiver.wait(1000)', 'receiver.wait(0)')
+    corpus, facts, producers, scalars = prepare(code)
+    producer, = producers
+    selected = matching_scalar(producer, scalars)
+    assert selected['relation']['construction'] == 'exact_affine_boundary'
+    assert any(r['construction'] == 'unknown_boundary_neighbor'
+               for r in selected['source_constraint_derivations'])
+    signatures = [json.dumps(c['edits'], sort_keys=True) for c in scalars]
+    assert len(signatures) == len(set(signatures))
+    combined = compose_witnesses(corpus, facts, producers + scalars)
+    assert len(combined['candidates']) == 2
+    for candidate in combined['candidates']:
+        assert candidate['relation']['scalar_relation']['construction'] == 'unknown_boundary_neighbor'
+        assert candidate['provenance']['composition']['scalar_derivation'] == candidate['relation']['scalar_relation']
+
+
 def test_original_controls_and_positive_neighbour_pass_and_negative_remains_unconfirmed():
     corpus, facts, producers, scalars = prepare()
     result = compose_witnesses(corpus, facts, producers + scalars)

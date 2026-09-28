@@ -107,6 +107,10 @@ def select_sources(case: dict, budget: SourceBudget = SourceBudget()) -> tuple[l
         graph_files['go.mod'] = (repository/'go.mod').read_text()
     dependencies = dependency_closure(graph_files, selected, language, max_additional=256, max_depth=4,
                                       **resolution)
+    if language == 'go' and 'go.mod' in graph_files:
+        module = re.search(r'(?m)^\s*module\s+(?:"([^"]+)"|([^\s]+))', graph_files['go.mod'])
+        if module:
+            resolution['go_modules'] = {'': module.group(1) or module.group(2)}
     selected.extend(path for path in dependencies['additional_paths'] if path in files and path not in selected)
     sources, size, metadata = [], 0, {}
     for name in selected:
