@@ -141,7 +141,12 @@ def learn_literal_edits(before: str, after: str, *, max_tokens: int = 256,
     if all(tag == "replace" and j - i == l - k == 1
            and token_sort(a[i]) == token_sort(b[k]) == "decimal"
            for tag, i, j, k, l in changed):
-        result.append(LiteralEdit(a, b, alignment, "offset"))
+        offset = LiteralEdit(a, b, alignment, "offset")
+        # Integer arithmetic canonicalizes leading zeroes. Keep a numeric rule
+        # only when it reproduces the demonstrated source spelling; the exact
+        # literal edit remains available for formatted numeric fragments.
+        if offset.apply(before) == after:
+            result.append(offset)
     assert all(rule.apply(before) == after for rule in result)
     return result
 
