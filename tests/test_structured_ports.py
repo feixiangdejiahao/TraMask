@@ -1,9 +1,11 @@
 """Independent literal-container carrier fixtures."""
 import ast
+import sqlite3
 
 import pytest
 
 from anchor_retrieval.syntax import Source
+from generic_composition.emitter import emit
 from relational_gap.embedded_relations import generate_embedded_relations
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relational_gap.structured_ports import carrier_ports, structural_slot_key
@@ -115,7 +117,7 @@ def test_other():
     assert not [c for c in result["candidates"] if c["relation"]["value_basis"] == "source_assignment"]
 
 
-def test_predicate_fragment_requires_same_slot_sql_evidence():
+def test_predicate_fragment_strong_embedding_requires_same_slot_sql_evidence():
     code = '''def test_values():
     read("count > 6")
     consume(["UPDATE rows SET title = 3 WHERE id = 1"])
@@ -130,7 +132,9 @@ def test_query_source():
     assert all(c["relation"]["read_embedded_form"] == "predicate_fragment" for c in result["candidates"])
     assert all(c["relation"]["read_embedding_evidence"]["kind"] == "same_structural_slot_source_select" for c in result["candidates"])
     _, frontend, corpus = fixture(code.replace('read("SELECT', 'different("SELECT'))
-    assert not generate_embedded_relations(corpus, frontend)["candidates"]
+    weak = generate_embedded_relations(corpus, frontend)["candidates"]
+    assert len(weak) == 3
+    assert all(c["relation"]["table_identity"] == "unknown_fragment_to_write" for c in weak)
 
 
 def test_predicate_fragment_keeps_container_field_alignment():
@@ -143,7 +147,9 @@ def test_query_source():
     assert True
 '''
     _, frontend, corpus = fixture(code)
-    assert not generate_embedded_relations(corpus, frontend)["candidates"]
+    candidates = generate_embedded_relations(corpus, frontend)["candidates"]
+    assert len(candidates) == 3
+    assert all(c["relation"]["read_embedding_evidence"]["kind"] == "same_test_sql_write_fragment_syntax" for c in candidates)
 
 
 @pytest.mark.parametrize("construction", [
@@ -170,10 +176,91 @@ def test_values():
         assert candidate["provenance"]["source_facts"][0]["text"] == "count > 6"
 
 
-def test_fragment_without_source_embedding_never_gets_sql_from_api_name():
-    _, frontend, corpus = fixture('''def test_values():
+def test_fragment_with_source_write_retains_unknown_embedding_without_api_name_evidence():
+    code = '''def test_values():
     execute_sql("count > 6")
     consume(["UPDATE rows SET title = 3"])
     assert True
+'''
+    _, frontend, corpus = fixture(code)
+    candidates = generate_embedded_relations(corpus, frontend)["candidates"]
+    assert len(candidates) == 3
+    for candidate in candidates:
+        assert candidate["relation"]["table_identity"] == "unknown_fragment_to_write"
+        assert "fragment_language_embedding" in candidate["relation"]["unknowns"]
+        assert "fragment_table_identity" in candidate["relation"]["unknowns"]
+        assert len(candidate["edits"]) == 1
+        assert "SELECT" not in candidate["edits"][0]["after"]
+    _, frontend, corpus = fixture(code.replace("execute_sql", "arbitrary_name"))
+    assert len(generate_embedded_relations(corpus, frontend)["candidates"]) == 3
+
+
+def test_bare_predicate_without_same_test_sql_write_stays_opaque():
+    _, frontend, corpus = fixture('''def test_values():
+    arbitrary("count > 6")
+    assert True
+def test_other():
+    consume(["UPDATE rows SET title = 3"])
+    assert True
 ''')
-    assert not generate_embedded_relations(corpus, frontend)["candidates"]
+    result = generate_embedded_relations(corpus, frontend)
+    assert not result["candidates"]
+    assert result["counts"]["skipped"]["no_same_test_read_or_fragment"] == 1
+
+
+def test_neutral_predicate_carrier_transfers_source_field_and_detects_missing_rollback():
+    code = '''import sqlite3
+class Store:
+    def __init__(self):
+        self.db = sqlite3.connect(':memory:')
+        self.db.execute('CREATE TABLE rows(amount INTEGER, label INTEGER)')
+        self.db.execute('INSERT INTO rows VALUES(1,0)')
+        self.db.commit()
+    def register(self, predicate):
+        self.predicate = predicate
+    def apply(self, sql):
+        self.db.execute(sql)
+        valid = all(row[0] for row in self.db.execute('SELECT ' + self.predicate + ' FROM rows'))
+        if valid:
+            self.db.commit()
+        else:
+            self.db.rollback()
+    def read(self):
+        return self.db.execute('SELECT amount FROM rows').fetchone()[0]
+def test_recipient():
+    store = Store()
+    store.register('COUNT(*) = 1')
+    store.apply('UPDATE rows SET label = 3')
+    assert store.read() == 1
+def test_field_source():
+    store = Store()
+    store.register('amount < 6')
+    assert store.read() == 1
+'''
+    _, frontend, corpus = fixture(code)
+    result = generate_embedded_relations(corpus, frontend)
+    assert result['counts']['neutral_read_inputs'] == 1
+    candidate = next(c for c in result['candidates'] if c['relation']['assigned_value'] == '7')
+    assert len(candidate['edits']) == 2
+    assert {ast.literal_eval(e['after']) for e in candidate['edits']} == {'amount < 6', 'UPDATE rows SET label = 3, amount = 7'}
+    assert candidate['relation']['table_identity'] == 'unknown_fragment_to_write'
+    assert candidate['relation']['read_transfer_alignment']
+    output = emit(corpus, [candidate])
+    assert not output['unsupported']
+    namespace = {}
+    exec(output['files']['test_sample.py'], namespace)
+    namespace[output['obligations'][0]['test_name']]()
+    namespace['Store'].apply = lambda self, sql: (self.db.execute(sql), self.db.commit())
+    with pytest.raises(AssertionError):
+        namespace[output['obligations'][0]['test_name']]()
+
+
+def test_neutral_aggregate_does_not_invent_a_writable_field():
+    _, frontend, corpus = fixture('''def test_values():
+    check('TOTAL(amount) = 6 AND COUNT(*) = 1')
+    apply('UPDATE rows SET label = 3')
+    assert True
+''')
+    result = generate_embedded_relations(corpus, frontend)
+    assert result['counts']['neutral_read_inputs'] == 1
+    assert not result['candidates']

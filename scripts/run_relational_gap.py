@@ -40,7 +40,8 @@ def algorithm_files():
         'inputs', 'frontend', 'history', 'source_dependencies', 'transforms',
         'cells', 'closure', 'identity', 'script_wrappers', 'embedded_relations',
         'structured_ports', 'state_cells', 'atomic_observations', 'scalar_cells',
-        'symbolic_strings', 'exception_contexts')]
+        'symbolic_strings', 'exception_contexts', 'regex_cells', 'call_contexts',
+        'sequence_cells', 'seed_ranking')]
     return sorted([*generation, Path(__file__).resolve(),
                    *ROOT.glob('anchor_retrieval/*.py'), ROOT/'generic_composition/corpus.py',
                    ROOT/'generic_composition/emitter.py', ROOT/'generic_composition/engine.py',
@@ -64,6 +65,10 @@ def prepare(args):
     from relational_gap.scalar_cells import generate_scalar_cells, ScalarBudget
     from relational_gap.symbolic_strings import generate_symbolic_strings, SymbolicStringBudget
     from relational_gap.exception_contexts import generate_exception_contexts, ExceptionBudget
+    from relational_gap.regex_cells import generate_regex_cells, RegexBudget
+    from relational_gap.call_contexts import generate_call_contexts, ContextBudget
+    from relational_gap.sequence_cells import generate_sequence_cells, SequenceBudget
+    from relational_gap.seed_ranking import rank_seeds
     case = next(c for c in json.loads(args.registry.read_text()) if c['id'] == args.case)
     output = args.output
     output.mkdir(parents=True, exist_ok=False)
@@ -90,6 +95,8 @@ def prepare(args):
                                 max_production_depth=3, max_production_units=256,
                                 **selection.get('module_resolution', {}))
     ranks = {unit.id: rank+1 for rank, unit in enumerate(selected)}
+    seed_ranking = rank_seeds(frontend, changed, ranks)
+    ranks = seed_ranking['ranks']
     corpus = to_emitter_corpus(frontend)
     for test in corpus['tests'].values():
         test['retrieval_rank'] = ranks.get(test['id'])
@@ -107,10 +114,14 @@ def prepare(args):
     scalars = generate_scalar_cells(corpus, frontend, budget=ScalarBudget(max_candidates=args.max_candidates // 4))
     strings = generate_symbolic_strings(corpus, budget=SymbolicStringBudget(max_candidates=args.max_candidates // 4))
     exceptions = generate_exception_contexts(corpus, frontend, budget=ExceptionBudget(max_candidates=args.max_candidates // 4))
+    regex = generate_regex_cells(corpus, frontend, budget=RegexBudget(max_candidates=args.max_candidates // 4))
+    contexts = generate_call_contexts(corpus, frontend, budget=ContextBudget(max_candidates=args.max_candidates // 4))
+    sequences = generate_sequence_cells(corpus, frontend, budget=SequenceBudget(max_candidates=args.max_candidates // 4))
     generated['candidates'] = annotate_novelty(corpus, frontend, generated['candidates'])
     generated['candidates'] = merge_candidates(generated['candidates'],
                                               cells['candidates']+sql['candidates']+states['candidates']+
-                                              scalars['candidates']+strings['candidates']+exceptions['candidates'],
+                                              scalars['candidates']+strings['candidates']+exceptions['candidates']+
+                                              regex['candidates']+contexts['candidates']+sequences['candidates'],
                                               limit=args.max_candidates)
     raw_candidates = generated['candidates']
     for candidate in raw_candidates:
@@ -135,6 +146,9 @@ def prepare(args):
     generated['counts']['scalar_witnesses'] = len(scalars['candidates'])
     generated['counts']['symbolic_string_witnesses'] = len(strings['candidates'])
     generated['counts']['exception_witnesses'] = len(exceptions['candidates'])
+    generated['counts']['regex_witnesses'] = len(regex['candidates'])
+    generated['counts']['call_context_witnesses'] = len(contexts['candidates'])
+    generated['counts']['sequence_witnesses'] = len(sequences['candidates'])
     generated['counts']['atomic'] = atomic['counts']
     # Hash before and after; concurrent development cannot silently change a frozen batch.
     final_hashes = {name: digest(ROOT/name) for name in source_hashes}
@@ -148,7 +162,8 @@ def prepare(args):
         target.write_bytes(path.read_bytes())
     write(output/'case.json', case)
     write(output/'selection.json', dict(selection, selected_test_ids=[u.id for u in selected],
-                                        available_tests=len(tests), test_limit=args.max_tests))
+                                        available_tests=len(tests), test_limit=args.max_tests,
+                                        observation_dependency_ranking=seed_ranking))
     write(output/'frontend.json', frontend)
     write(output/'corpus.json', corpus)
     write(output/'candidates.json', generated)
@@ -158,6 +173,9 @@ def prepare(args):
                                             'scalar': {k:v for k,v in scalars.items() if k != 'candidates'},
                                             'symbolic_string': {k:v for k,v in strings.items() if k != 'candidates'},
                                             'exception': {k:v for k,v in exceptions.items() if k != 'candidates'},
+                                            'regex': {k:v for k,v in regex.items() if k != 'candidates'},
+                                            'call_context': {k:v for k,v in contexts.items() if k != 'candidates'},
+                                            'sequence': {k:v for k,v in sequences.items() if k != 'candidates'},
                                             'atomic': {k:v for k,v in atomic.items() if k != 'candidates'}})
     (output/'issue.md').write_bytes(Path(case['issue']).read_bytes())
     files = ['case.json','selection.json','frontend.json','corpus.json','candidates.json',

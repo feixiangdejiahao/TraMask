@@ -81,7 +81,7 @@ class Assignment:
 class SQLProgram:
     text: str
     kind: str
-    table: Identifier
+    table: Identifier | None
     alias: Identifier | None
     predicates: tuple[Predicate, ...] = ()
     assignments: tuple[Assignment, ...] = ()
@@ -213,7 +213,70 @@ def _numeric(tokens):
 
 
 def _belongs(field, table, alias):
-    return len(field.tokens) == 1 or field.key[:-1] in {table.key, table.leaf.key, alias.key if alias else ()}
+    return len(field.tokens) == 1 or table is not None and field.key[:-1] in {table.key, table.leaf.key, alias.key if alias else ()}
+
+
+def _table_key(program):
+    return program.table.key if program.table is not None else None
+
+
+def _alignment_keys(donor):
+    keys = {('actual', *structural_slot_key(p)) for p in donor['aligned_ports']}
+    for port in donor['aligned_ports']:
+        path = structural_slot_key(port)[-1]
+        keys.update(('formal', b['function_id'], b['parameter_index'], path) for b in port.get('formal_slots', []))
+    return keys
+
+
+def _neutral_predicate(tokens):
+    """Recognize comparison syntax without assigning function semantics.
+
+    Function operands remain opaque; their spelling never supplies a writable
+    field. This only preserves a source input as a possible predicate carrier.
+    """
+    if not tokens:
+        return False
+    try:
+        top = list(_top_level(tokens))
+    except ValueError:
+        return False
+    if not top and tokens[0].text == '(' and tokens[-1].text == ')':
+        return _neutral_predicate(tokens[1:-1])
+    if _keyword(tokens[0], 'NOT'):
+        return _neutral_predicate(tokens[1:])
+    splits = [i for i, t in top if _keyword(t, 'AND') or _keyword(t, 'OR')]
+    if splits:
+        previous = 0
+        for end in [*splits, len(tokens)]:
+            if not _neutral_predicate(tokens[previous:end]):
+                return False
+            previous = end + 1
+        return True
+    comparisons = [i for i, t in top if t.text in _COMPARATORS]
+    if len(comparisons) != 1:
+        return False
+    def scalar(parts, depth=0):
+        if not parts or depth > 8:
+            return False
+        if _identifier(parts) is not None or _numeric(parts) is not None or len(parts) == 1 and parts[0].kind in {'string', 'parameter'}:
+            return True
+        if len(parts) >= 3 and parts[1].text == '(' and parts[-1].text == ')' and _identifier(parts[:1]):
+            inside = parts[2:-1]
+            if len(inside) == 1 and inside[0].text == '*':
+                return True
+            try:
+                commas = [i for i, t in _top_level(inside) if t.text == ',']
+            except ValueError:
+                return False
+            previous = 0
+            for end in [*commas, len(inside)]:
+                if not scalar(inside[previous:end], depth + 1):
+                    return False
+                previous = end + 1
+            return True
+        return False
+    i = comparisons[0]
+    return scalar(tokens[:i]) and scalar(tokens[i + 1:])
 
 
 def _predicates(tokens, text, table, alias):
@@ -425,16 +488,16 @@ def _read_pairs(recipient_id, reads, budget):
     for read, query in recipients:
         if read.get('oracle_dependency') or read.get('role') == 'expected':
             continue  # Keep shared input/expected dependencies immutable.
-        aligned = {structural_slot_key(port) for port in read['aligned_ports']}
+        aligned = _alignment_keys(read)
         seen, count = {query.text}, 0
         for origin, source_query in all_reads:
             if origin['test_id'] == recipient_id or source_query.text in seen or not source_query.predicates:
                 continue
-            if query.table.key != source_query.table.key:
+            if _table_key(query) != _table_key(source_query):
                 continue
             if read.get('embedded_form', 'statement') != origin.get('embedded_form', 'statement'):
                 continue
-            if not aligned.intersection(structural_slot_key(port) for port in origin['aligned_ports']):
+            if not aligned.intersection(_alignment_keys(origin)):
                 continue
             if count >= budget.max_read_sources:
                 break
@@ -561,19 +624,39 @@ def _fragment_contexts(donor, templates, frontend, max_depth=4):
 def _add_predicate_fragments(raw, members, sources, frontend, budget, skipped):
     templates = _sql_templates(sources, frontend)
     full_reads = [(d, p) for d, p in members if p.kind == 'select']
+    writes = defaultdict(list)
+    for donor, program in members:
+        if program.kind == 'update':
+            writes[donor['test_id']].append(donor)
+    deferred = []
     for donor, text in raw:
-        keys = {structural_slot_key(p) for p in donor['aligned_ports']}
+        keys = _alignment_keys(donor)
         contexts = []
         for origin, query in full_reads:
-            if keys.intersection(structural_slot_key(p) for p in origin['aligned_ports']):
-                contexts.append((query.table, query.alias, {'kind': 'same_structural_slot_source_select', 'span': origin['span']}))
+            alignment = keys.intersection(_alignment_keys(origin))
+            if alignment:
+                contexts.append((query.table, query.alias, {'kind': 'same_structural_slot_source_select', 'span': origin['span'],
+                                                           'source_table_hint': list(query.table.key), 'table_identity': 'unknown',
+                                                           'alignment': list(sorted(alignment, key=repr)),
+                                                           'alignment_status': 'source_actual_slot' if any(k[0] == 'actual' for k in alignment)
+                                                                                else 'formal_candidate_overlap_unresolved'}))
         for template in _fragment_contexts(donor, templates, frontend):
             program = parse_sql_program(template['prefix'] + text + template['suffix'], max_tokens=budget.max_tokens)
             if program is not None and program.kind == 'select':
                 contexts.append((program.table, program.alias, dict(template, kind='resolved_source_string_template')))
+        if not contexts and writes[donor['test_id']]:
+            # The fragment is already a source input; an existing SQL write in
+            # that test makes its field syntax a bounded hypothesis. Neither a
+            # SELECT wrapper nor a table identity is constructed from this.
+            contexts.append((None, None, {'kind': 'same_test_sql_write_fragment_syntax',
+                                          'span': donor['span'], 'write_span': writes[donor['test_id']][0]['span'],
+                                          'embedding_status': 'unknown', 'table_identity': 'unknown'}))
+        if not contexts:
+            deferred.append((donor, text))
         seen = set()
         for table, alias, evidence in contexts[:budget.max_read_sources]:
-            if table.key in seen:
+            table_key = table.key if table is not None else None
+            if table_key in seen:
                 continue
             tokens = _tokens(text, budget.max_tokens)
             if not tokens:
@@ -581,15 +664,42 @@ def _add_predicate_fragments(raw, members, sources, frontend, budget, skipped):
             try:
                 predicates = _predicates(tokens, text, table, alias)
             except ValueError:
-                continue
-            if not predicates:
-                continue
-            seen.add(table.key)
+                if not _neutral_predicate(tokens):
+                    continue
+                predicates = []
+            seen.add(table_key)
+            inferred_table = table if evidence['kind'] == 'resolved_source_string_template' else None
             members.append((dict(donor, embedded_form='predicate_fragment', embedding_evidence=evidence),
-                            SQLProgram(text, 'select', table, alias, tuple(predicates))))
+                            SQLProgram(text, 'select', inferred_table, alias, tuple(predicates))))
             if len(members) >= budget.max_donors:
                 skipped['donor_budget'] += 1
                 return
+    # A same-slot source predicate can supply coordinates to a neutral source
+    # carrier. Both strings already exist; no parser command or wrapper is made.
+    carriers = [(d, p) for d, p in members if d.get('embedded_form') == 'predicate_fragment']
+    for donor, text in deferred:
+        tokens = _tokens(text, budget.max_tokens)
+        if not tokens:
+            continue
+        keys = _alignment_keys(donor)
+        for recipient, query in carriers:
+            if not keys.intersection(_alignment_keys(recipient)):
+                continue
+            try:
+                predicates = _predicates(tokens, text, query.table, query.alias)
+            except ValueError:
+                continue
+            if not predicates:
+                continue
+            evidence = {'kind': 'aligned_source_predicate_slot', 'span': recipient['span'],
+                        'embedding_status': 'unknown', 'table_identity': 'unknown',
+                        'recipient_embedding': recipient.get('embedding_evidence')}
+            members.append((dict(donor, embedded_form='predicate_fragment', embedding_evidence=evidence),
+                            SQLProgram(text, 'select', query.table, query.alias, tuple(predicates))))
+            break
+        if len(members) >= budget.max_donors:
+            skipped['donor_budget'] += 1
+            return
 
 
 def generate_embedded_relations(corpus: dict, frontend: dict | None = None, *,
@@ -636,6 +746,9 @@ def generate_embedded_relations(corpus: dict, frontend: dict | None = None, *,
         ports = carrier_ports(sources[donor['span']['path']], donor, frontend)
         if not ports:
             continue
+        ports = [dict(port, formal_slots=[b for b in calls.get(_position(port['call_span']), {}).get('argument_bindings', [])
+                                         if b['slot'] == port['argument_slot'] and b.get('binding_status') == 'direct_actual_formal'])
+                 for port in ports]
         program = parse_sql_program(value, max_tokens=budget.max_tokens)
         if program is None:
             if not donor.get('oracle_dependency') and not expected_only(donor):
@@ -658,9 +771,12 @@ def generate_embedded_relations(corpus: dict, frontend: dict | None = None, *,
     pool = {}
     for target, update in writes:
         if target['test_id'] not in seeds:
+            skipped['write_owner_outside_seed_budget'] += 1
             continue
+        if not reads[target['test_id']]:
+            skipped['no_same_test_read_or_fragment'] += 1
         for read, recipient_query, source_read, query in _read_pairs(target['test_id'], reads, budget):
-            if query.table.key != update.table.key:
+            if query.table is not None and query.table.key != update.table.key:
                 skipped['different_or_unresolved_table'] += 1
                 continue
             read_edit = None
@@ -738,6 +854,8 @@ def generate_embedded_relations(corpus: dict, frontend: dict | None = None, *,
                              _source_fact(target, update, 0, len(update.text), 'source_write')]
                     embedding = source_read.get('embedding_evidence')
                     embedding_spans = [embedding['span'], *embedding.get('binding_path', [])] if embedding else []
+                    if embedding and embedding.get('write_span'):
+                        embedding_spans.append(embedding['write_span'])
                     if read_edit:
                         facts.append(_source_fact(read, recipient_query, 0, len(recipient_query.text), 'recipient_read'))
                     if origin_pair:
@@ -755,6 +873,10 @@ def generate_embedded_relations(corpus: dict, frontend: dict | None = None, *,
                                               'assigned_predicate_truth': _truth(number, predicate)},
                                      'source_observation_ids': [item['id'] for item in observations],
                                      'read_source_basis': 'aligned_source_query_transfer' if read_edit else 'recipient_source_query',
+                                     'read_transfer_alignment': list(sorted(_alignment_keys(read).intersection(_alignment_keys(source_read)), key=repr)) if read_edit else [],
+                                     'read_transfer_alignment_status': ('source_actual_slot' if any(k[0] == 'actual' for k in
+                                                                       _alignment_keys(read).intersection(_alignment_keys(source_read)))
+                                                                       else 'formal_candidate_overlap_unresolved') if read_edit else 'same_source_input',
                                      'read_embedded_form': source_read.get('embedded_form', 'statement'),
                                      'read_embedding_evidence': source_read.get('embedding_evidence'),
                                      'read_input_slot': list(slot_key(read['aligned_ports'][0])),
@@ -763,7 +885,8 @@ def generate_embedded_relations(corpus: dict, frontend: dict | None = None, *,
                                      'read_dependency_observation_ids': dependency_ids,
                                      'observation_alignment': 'source_call_dependency' if dependency_ids else 'same_test_lexical_before_observation',
                                      'table': list(update.table.key),
-                                     'table_identity': 'source_embedding_context' if embedding else 'same_explicit_source_identifier',
+                                     'table_identity': ('unknown_fragment_to_write' if query.table is None else
+                                                        'source_embedding_context' if embedding else 'same_explicit_source_identifier'),
                                      'source_write_relation': 'same_predicate_field' if assignment else 'other_fields',
                                      'predicate': {'operator': predicate.operator, 'threshold': predicate.literal},
                                      'assigned_value': spelling, 'value_basis': basis, 'boundary_offset': offset,
@@ -772,7 +895,8 @@ def generate_embedded_relations(corpus: dict, frontend: dict | None = None, *,
                                      'where_preserved': update.where_text,
                                      'status': 'statically_constructed_runtime_unconfirmed',
                                      'unknowns': ['database_receiver_identity', 'selected_row_overlap', 'initial_predicate_truth',
-                                                  'full_where_truth', 'column_type_and_constraints', 'runtime_phase_and_effects']},
+                                                  'full_where_truth', 'column_type_and_constraints', 'runtime_phase_and_effects']
+                                                 + (['fragment_language_embedding', 'fragment_table_identity'] if query.table is None else [])},
                         'oracle': {'mode': 'retain_all', 'source_test_id': target['test_id'],
                                    'assertion_ids': [item['id'] for item in capsules[target['test_id']]],
                                    'applicability': 'requires_independent_admission', 'basis': None,
@@ -805,6 +929,7 @@ def generate_embedded_relations(corpus: dict, frontend: dict | None = None, *,
             if len(candidates) >= budget.max_candidates:
                 break
     return {'candidates': candidates, 'counts': {'sql_inputs': len(members), 'read_inputs': sum(map(len, reads.values())),
+                                               'neutral_read_inputs': sum(not p.predicates for rows in reads.values() for _, p in rows),
                                                'write_inputs': len(writes), 'pool': len(pool), 'candidates': len(candidates),
                                                'skipped': dict(sorted(skipped.items()))},
             'budget': asdict(budget), 'status': 'static_hypotheses_not_checked_gaps',

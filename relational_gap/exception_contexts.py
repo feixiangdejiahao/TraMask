@@ -177,6 +177,25 @@ class _Kernel:
         return result
 
 
+def _unshadowed_builtin(kernel, name, path, test_id):
+    if name not in vars(builtins):
+        return False
+    record = kernel.corpus['tests'][test_id]
+    if name in record.get('scope_bindings', ()) or name in record.get('parameters', ()):
+        return False
+    scope = kernel.node(record.get('definition_span', record['span']), (ast.FunctionDef, ast.AsyncFunctionDef))
+    if scope is None:
+        return False
+    while scope is not None:
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            if hasattr(scope, 'args') and any(arg.arg == name for arg in ast.walk(scope.args) if isinstance(arg, ast.arg)):
+                return False
+            if any(_binds_name(node, name) for node in _owned_nodes(scope)):
+                return False
+        scope = kernel.parents.get(id(scope))
+    return True
+
+
 def _simple_invocation(kernel, test_id, statement):
     call = statement.value if isinstance(statement, ast.Expr) else None
     if isinstance(statement, ast.Assert):
@@ -194,9 +213,18 @@ def _simple_invocation(kernel, test_id, statement):
         if statement.msg is not None:
             path = kernel.corpus['tests'][test_id]['span']['path']
             kernel.closed(test_id, kernel.span(path, statement.msg))
+    path = kernel.corpus['tests'][test_id]['span']['path']
+    invocation, consumers = call, []
+    while isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in {'list', 'tuple', 'next'}:
+        if (not _unshadowed_builtin(kernel, call.func.id, path, test_id) or call.keywords
+                or len(call.args) not in ({1, 2} if call.func.id == 'next' else {1}) or len(consumers) >= 4):
+            raise Unsupported('builtin_consumer_binding_or_arity_unknown')
+        if len(call.args) == 2:
+            kernel.closed(test_id, kernel.span(path, call.args[1]))
+        consumers.append({'name': call.func.id, 'span': kernel.span(path, call)})
+        call = call.args[0]
     if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute) or not isinstance(call.func.value, ast.Name):
         raise Unsupported('invocation_not_direct_receiver_call_or_simple_assert')
-    path = kernel.corpus['tests'][test_id]['span']['path']
     record = kernel.call_at(test_id, kernel.span(path, call))
     if record is None:
         raise Unsupported('invocation_frontend_call_missing')
@@ -204,7 +232,8 @@ def _simple_invocation(kernel, test_id, statement):
     if origin is None:
         raise Unsupported('receiver_constructor_or_alias_not_recovered')
     return {'call': record, 'node': call, 'statement': statement, 'receiver': call.func.value.id,
-            'origin': origin, 'test_id': test_id}
+            'origin': origin, 'test_id': test_id, 'invocation_span': kernel.span(path, invocation),
+            'builtin_consumers': consumers}
 
 
 def _same_callee(kernel, left, right):
@@ -244,6 +273,79 @@ def _argument_pairs(left, right):
                     source.get('keyword') is not None or source.get('positional_index', source['slot']) == target.get('positional_index', target['slot'])):
                 yield source, target, {'status': 'same_callee_syntactic_argument_coordinate',
                                       'source_slot': source['slot'], 'target_slot': target['slot']}
+
+
+def _owned_nodes(root):
+    """Walk one Python lexical scope, including but not entering nested scopes."""
+    pending = list(reversed(root.body))
+    while pending:
+        node = pending.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            pending.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
+def _binds_name(node, name):
+    return (isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, (ast.Store, ast.Del))
+            or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name
+            or isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names
+            or isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name == name
+            or isinstance(node, ast.MatchMapping) and node.rest == name
+            or isinstance(node, (ast.Import, ast.ImportFrom)) and any(
+                (alias.asname or alias.name.split('.')[0]) == name or alias.name == '*' for alias in node.names))
+
+
+def _literal_family(node):
+    value = ast.literal_eval(node)
+    if type(value) not in (str, bytes, int, float, complex, bool, type(None)):
+        raise Unsupported('generator_yield_literal_family_not_supported')
+    return type(value).__name__
+
+
+def _input_coordinates(kernel, recipient, route, target_arg, limit):
+    position = target_arg['span']
+    actual = kernel.node(position)
+    if route != 'receiver_constructor' or not isinstance(actual, ast.Call):
+        return [{'span': position, 'kind': 'argument'}]
+    if not isinstance(actual.func, ast.Name) or actual.args or actual.keywords:
+        raise Unsupported('generator_actual_not_direct_zero_argument_local_call')
+    test_id, path, name = recipient['test_id'], position['path'], actual.func.id
+    record = kernel.corpus['tests'][test_id]
+    test = kernel.node(record.get('definition_span', record['span']), (ast.FunctionDef, ast.AsyncFunctionDef))
+    definitions = [n for n in test.body if isinstance(n, ast.FunctionDef) and n.name == name] if test else []
+    if len(definitions) != 1:
+        raise Unsupported('generator_definition_not_unique_direct_test_local')
+    generator = definitions[0]
+    if (generator.decorator_list or generator.args.posonlyargs or generator.args.args or generator.args.kwonlyargs
+            or generator.args.vararg or generator.args.kwarg or getattr(generator, 'type_params', ())
+            or kernel.span(path, generator)['end_byte'] > position['start_byte']):
+        raise Unsupported('generator_definition_not_prior_plain_zero_argument_function')
+    if name in {arg.arg for arg in ast.walk(test.args) if isinstance(arg, ast.arg)}:
+        raise Unsupported('generator_local_binding_ambiguous')
+    for node in _owned_nodes(test):
+        if node is generator:
+            continue
+        if _binds_name(node, name):
+            raise Unsupported('generator_local_binding_ambiguous')
+    yields = []
+    for node in _owned_nodes(generator):
+        if isinstance(node, ast.YieldFrom):
+            raise Unsupported('generator_delegated_yield_not_supported')
+        if isinstance(node, ast.Yield):
+            if node.value is None:
+                raise Unsupported('generator_yield_not_closed_literal')
+            try:
+                family = _literal_family(node.value)
+            except (ValueError, TypeError, SyntaxError):
+                raise Unsupported('generator_yield_not_closed_literal') from None
+            yields.append((node, family))
+    if not yields:
+        raise Unsupported('local_function_not_literal_generator')
+    return [{'span': kernel.span(path, node.value), 'kind': 'local_generator_yield', 'yield_index': index,
+             'literal_family': family, 'generator_definition_span': kernel.span(path, generator),
+             'generator_call_span': position, 'yield_span': kernel.span(path, node),
+             'binding_status': 'unique_prior_direct_test_local_function'}
+            for index, (node, family) in enumerate(yields[:limit])]
 
 
 def _donors(kernel, ordered, skipped):
@@ -336,21 +438,8 @@ def _close_context(kernel, donor, recipient, identifier):
     context = Close().visit(context)
     # A builtin name is shared across files only if neither file/test shadows
     # it. Other global/import closure uses the established emitter adapter.
-    def unshadowed_builtin(name, path, test_id):
-        if name not in vars(builtins) or name in kernel.sources[path].imports:
-            return False
-        record = kernel.corpus['tests'][test_id]
-        if name in record.get('scope_bindings', ()) or name in record.get('parameters', ()):
-            return False
-        for node in kernel.modules[path].body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
-                return False
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and any(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
-                                                                  and n.id == name for n in ast.walk(node)):
-                return False
-        return True
-    globals_ = {name for name in globals_ if not (unshadowed_builtin(name, source_path, donor['test_id'])
-                                                 and unshadowed_builtin(name, recipient_path, recipient['test_id']))}
+    globals_ = {name for name in globals_ if not (_unshadowed_builtin(kernel, name, source_path, donor['test_id'])
+                                                 and _unshadowed_builtin(kernel, name, recipient_path, recipient['test_id']))}
     origin = {'test_id': donor['test_id'], 'span': kernel.span(source_path, donor['context']),
               'free_identifiers': sorted(globals_)}
     target = {'test_id': recipient['test_id'], 'span': kernel.span(recipient_path, recipient['statement'])}
@@ -427,8 +516,15 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
             for route, left, right in [('invocation', donor['call'], recipient['call']),
                                       ('receiver_constructor', donor['origin']['constructor'], recipient['origin']['constructor'])]:
                 for source_arg, target_arg, binding in _argument_pairs(left, right):
-                    yield recipient, q, donor, route, source_arg, target_arg, binding, call_status, constructor_status
-                    input_count += 1
+                    try:
+                        coordinates = _input_coordinates(kernel, recipient, route, target_arg,
+                                                         budget.max_inputs_per_pair - input_count)
+                    except Unsupported as exc:
+                        skipped[str(exc)] += 1
+                        continue
+                    for coordinate in coordinates:
+                        yield recipient, q, donor, route, source_arg, target_arg, binding, call_status, constructor_status, coordinate
+                        input_count += 1
                     if input_count >= budget.max_inputs_per_pair:
                         break
                 if input_count >= budget.max_inputs_per_pair:
@@ -436,29 +532,32 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
 
     streams = [_round_robin(stream(recipient, q) for recipient, q in plans[test_id])
                for test_id in ordered if test_id in plans]
-    for recipient, q, donor, route, source_arg, target_arg, binding, call_status, constructor_status in _round_robin(streams):
+    for recipient, q, donor, route, source_arg, target_arg, binding, call_status, constructor_status, coordinate in _round_robin(streams):
         if attempts >= budget.max_attempts:
             skipped['attempt_budget'] += 1
             return result(True)
         attempts += 1
         identifier = stable_id('exception_input_context', recipient['call']['id'], q['id'],
-                               donor['call']['id'], route, source_arg['slot'], target_arg['slot'])
+                               donor['call']['id'], route, source_arg['slot'], target_arg['slot'], _pos(coordinate['span']))
         try:
             source_value = kernel.closed(donor['test_id'], source_arg['span'])
-            kernel.closed(recipient['test_id'], target_arg['span'])
+            target_value = kernel.closed(recipient['test_id'], coordinate['span'])
+            if coordinate['kind'] == 'local_generator_yield' and _literal_family(
+                    ast.parse(source_value['text'], mode='eval').body) != coordinate['literal_family']:
+                raise Unsupported('generator_source_literal_family_mismatch')
             if ast.dump(ast.parse(source_value['text'], mode='eval'), include_attributes=False) == ast.dump(
-                    ast.parse(kernel.text(target_arg['span']), mode='eval'), include_attributes=False):
+                    ast.parse(target_value['text'], mode='eval'), include_attributes=False):
                 continue
             context, imports, closure = _close_context(kernel, donor, recipient, identifier)
-            invocation = kernel.text(recipient['call']['span'])
+            invocation = kernel.text(recipient['invocation_span'])
             edits = []
             if route == 'invocation':
-                offset = recipient['call']['span']['start_byte']
+                offset = recipient['invocation_span']['start_byte']
                 lo, hi = target_arg['span']['start_byte'] - offset, target_arg['span']['end_byte'] - offset
                 raw = invocation.encode()
                 invocation = (raw[:lo] + source_value['text'].encode() + raw[hi:]).decode()
             else:
-                edits.append({'span': target_arg['span'], 'before': kernel.text(target_arg['span']), 'after': source_value['text']})
+                edits.append({'span': coordinate['span'], 'before': kernel.text(coordinate['span']), 'after': source_value['text']})
             context.body = [ast.Expr(value=ast.parse(invocation, mode='eval').body)]
             ast.fix_missing_locations(context)
             rendered = ast.unparse(context)
@@ -494,6 +593,8 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
                          'status': 'statically_constructed_runtime_unconfirmed', 'input_route': route,
                          'invocation_binding_status': call_status, 'constructor_binding_status': constructor_status,
                          'argument_binding': binding, 'receiver_identity': 'same_recipient_constructor_value_and_aliases',
+                         'input_carrier': coordinate['kind'],
+                         'builtin_consumers': recipient['builtin_consumers'],
                          'phase': 'original_q_after_source_exception_context',
                          'runtime_obligation': 'exception_occurs_and_same_receiver_reaches_existing_q',
                          'applicability': 'unknown_requires_independent_admission'},
@@ -502,9 +603,11 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
             'provenance': {'source_spans': [kernel.span(donor['call']['span']['path'], donor['context']), source_value['span']],
                            'source_exception_context_kind': donor['context_kind'],
                            'source_exception_context_span': kernel.span(donor['call']['span']['path'], donor['context']),
-                           'source_invocation_span': donor['call']['span'], 'recipient_invocation_span': recipient['call']['span'],
+                           'source_invocation_span': donor['invocation_span'], 'recipient_invocation_span': recipient['invocation_span'],
+                           'source_receiver_call_span': donor['call']['span'], 'recipient_receiver_call_span': recipient['call']['span'],
                            'recipient_constructor_span': recipient['origin']['constructor']['span'],
                            'source_argument_span': source_arg['span'], 'target_argument_span': target_arg['span'],
+                           'target_input_coordinate': coordinate,
                            'source_literal_span': source_value['span'], 'source_literal_binding_path': source_value['binding_path'],
                            'receiver_mapping': {donor['receiver']: recipient['receiver']},
                            'source_observation_span': q['assertion_span'], 'exception_closure': closure,

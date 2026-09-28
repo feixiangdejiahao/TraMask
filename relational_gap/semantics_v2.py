@@ -195,11 +195,11 @@ def _decode(payload, budget):
             raise ValueError("response_byte_budget")
         payload = json.loads(payload, object_pairs_hook=pairs,
                              parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite_json")))
-    if type(payload) is not dict or set(payload) != {"accepted"} or type(payload["accepted"]) is not list:
-        raise ValueError("response_requires_only_accepted_array")
+    if type(payload) is not dict or "accepted" not in payload or type(payload["accepted"]) is not list:
+        raise ValueError("response_requires_accepted_array")
     if len(boundary._json(payload).encode()) > budget.response_bytes:
         raise ValueError("response_byte_budget")
-    return payload["accepted"]
+    return payload["accepted"], sorted(set(payload) - {"accepted"})
 
 
 def validate_response(request: dict, payload: str | dict, *, corpus: dict | None = None) -> dict:
@@ -216,7 +216,9 @@ def validate_response(request: dict, payload: str | dict, *, corpus: dict | None
             raise ValueError("frozen_alias_mapping_changed")
         if corpus is not None and boundary._id({path: source["code"] for path, source in corpus["sources"].items()}) != request["corpus_sources_fingerprint"]:
             raise ValueError("source_snapshot_changed")
-        rows = _decode(payload, budget)
+        rows, ignored = _decode(payload, budget)
+        if ignored:
+            result["ignored_top_level_fields"] = ignored
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError) as exc:
         result["protocol_error"] = str(exc)
         result["rejected"] = [{"candidate_id": cid, "reason": str(exc)} for cid in records]

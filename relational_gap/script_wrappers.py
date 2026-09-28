@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import io
+import re
 import tokenize
 from typing import Iterable
 
@@ -212,6 +213,107 @@ def _indented(source, node, target_indent='    '):
     return b''.join(out).decode(), mappings, position
 
 
+def _generator_helpers(source, tree):
+    """Identify module generators that source calls as ordinary helpers.
+
+    Decorated functions are excluded: without executing decorators, a fixture
+    or registration adapter cannot be distinguished from a normal callable.
+    """
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    identifiers = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    identifiers.update(node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+    local_cache = {}
+    def local_names(scope):
+        if scope not in local_cache:
+            bindings = _ModuleBindings()
+            for statement in scope.body:
+                bindings.visit(statement)
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                parameters = [*scope.args.posonlyargs, *scope.args.args, *scope.args.kwonlyargs]
+                if scope.args.vararg:
+                    parameters.append(scope.args.vararg)
+                if scope.args.kwarg:
+                    parameters.append(scope.args.kwarg)
+                bindings.names.update(arg.arg for arg in parameters)
+            global_names, todo = set(), list(scope.body)
+            while todo:
+                item = todo.pop()
+                if isinstance(item, ast.Global):
+                    global_names.update(item.names)
+                elif not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    todo.extend(ast.iter_child_nodes(item))
+            local_cache[scope] = bindings.names - global_names
+        return local_cache[scope]
+    def global_reference(node, name):
+        parent, function_seen = parents.get(node), False
+        while parent is not None and parent is not tree:
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                if isinstance(parent, ast.Lambda):
+                    args = [*parent.args.posonlyargs, *parent.args.args, *parent.args.kwonlyargs]
+                    if parent.args.vararg:
+                        args.append(parent.args.vararg)
+                    if parent.args.kwarg:
+                        args.append(parent.args.kwarg)
+                    if name in {arg.arg for arg in args}:
+                        return False
+                elif name in local_names(parent):
+                    return False
+                function_seen = True
+            elif isinstance(parent, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                targets = {part.id for generator in parent.generators for part in ast.walk(generator.target) if isinstance(part, ast.Name)}
+                if name in targets:
+                    return False
+            elif isinstance(parent, ast.ClassDef) and not function_seen and name in local_names(parent):
+                return False
+            parent = parents.get(parent)
+        return True
+    def own_yield(node):
+        todo = list(node.body)
+        while todo:
+            item = todo.pop()
+            if isinstance(item, (ast.Yield, ast.YieldFrom)):
+                return True
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                todo.extend(ast.iter_child_nodes(item))
+        return False
+    found = {}
+    for node in tree.body:
+        if (not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or not node.name.startswith('test_')
+                or node.decorator_list or not own_yield(node)):
+            continue
+        # Another module binding makes the identity of a later call ambiguous.
+        ambiguous = False
+        for statement in tree.body:
+            if statement is node:
+                continue
+            bindings = _ModuleBindings()
+            bindings.visit(statement)
+            if node.name in bindings.names:
+                ambiguous = True
+                break
+        if ambiguous:
+            continue
+        position = _span(source, node)
+        calls = [call for call in ast.walk(tree) if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                 and call.func.id == node.name and global_reference(call.func, node.name)
+                 and not (position['start_byte'] <= _span(source, call)['start_byte'] < position['end_byte'])]
+        if not calls:
+            continue
+        internal = '_relational_generator_' + _digest(source.path + '\0' + str(position['start_byte']) + '\0' + node.name)
+        if internal in identifiers:
+            continue
+        raw = source.data[position['start_byte']:position['end_byte']]
+        match = re.match(rb'(?:async[ \t]+)?def[ \t]+', raw)
+        if match is None or raw[match.end():match.end() + len(node.name.encode())] != node.name.encode():
+            continue
+        start = position['start_byte'] + match.end()
+        name_span = dict(position, start_byte=start, end_byte=start + len(node.name.encode()), end_line=node.lineno)
+        found[node] = {'original_name': node.name, 'internal_name': internal, 'name_span': name_span,
+                       'source_call_spans': [_span(source, call) for call in calls],
+                       'binding_strategy': 'non_test_definition_with_original_alias_and_callable_name_retained'}
+    return found
+
+
 def wrap_python_script(source: Source) -> dict:
     """Return a wrapped Source and JSON provenance, or an explicit unsupported row."""
     base_record = {'source_path': source.path, 'source_sha256': hashlib.sha256(source.data).hexdigest(),
@@ -235,6 +337,7 @@ def wrap_python_script(source: Source) -> dict:
 
 def _wrap_parsed(source, tree, base_record):
     retained, moved, main_guards = [], [], []
+    protected = _generator_helpers(source, tree)
     future_annotations = any(isinstance(node, ast.ImportFrom) and node.module == '__future__'
                              and any(alias.name == 'annotations' for alias in node.names) for node in tree.body)
     for index, node in enumerate(tree.body):
@@ -246,7 +349,7 @@ def _wrap_parsed(source, tree, base_record):
             moved.extend(node.body)
         else:
             moved.append(node)
-    if not moved:
+    if not moved and not protected:
         return {'status': 'unchanged', 'source': source,
                 'record': dict(base_record, status='unchanged', reason='no_executable_script_statements')}
     assignments = _ModuleBindings()
@@ -263,7 +366,7 @@ def _wrap_parsed(source, tree, base_record):
     if any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
            and node.func.id in {'eval', 'exec', 'locals', 'globals'} for node in ast.walk(tree)):
         raise UnsupportedScript('dynamic_namespace_requires_script_scope')
-    first_moved = min(node.lineno for node in moved)
+    first_moved = min((node.lineno for node in moved), default=len(source.code.splitlines()) + 1)
     for node in retained:
         if node.lineno < first_moved:
             continue
@@ -296,13 +399,34 @@ def _wrap_parsed(source, tree, base_record):
         append(header)
     for node in retained:
         text, position = _node_text(source, node)
-        start = append(text)
-        mappings.append({'source_span': position, 'generated_span': {'path': source.path,
-                         'start_byte': start, 'end_byte': cursor}, 'kind': 'retained_module_statement'})
+        helper = protected.get(node)
+        if helper:
+            a = helper['name_span']['start_byte'] - position['start_byte']
+            b = helper['name_span']['end_byte'] - position['start_byte']
+            pieces = [(text.encode()[:a].decode(), dict(position, end_byte=position['start_byte'] + a), 'retained_module_statement'),
+                      (helper['internal_name'], helper['name_span'], 'renamed_generator_definition'),
+                      (text.encode()[b:].decode(), dict(position, start_byte=position['start_byte'] + b), 'retained_module_statement')]
+            for piece, original, kind in pieces:
+                start = append(piece)
+                mappings.append({'source_span': original, 'generated_span': {'path': source.path,
+                                 'start_byte': start, 'end_byte': cursor}, 'kind': kind})
+            public = helper['original_name']
+            alias = ('\n' + public + ' = ' + helper['internal_name'] + '\n'
+                     + public + '.__name__ = ' + repr(public) + '\n'
+                     + public + '.__qualname__ = ' + repr(public) + '\n'
+                     + public + '.__test__ = False\n')
+            start = append(alias)
+            mappings.append({'source_span': helper['name_span'], 'generated_span': {'path': source.path,
+                             'start_byte': start, 'end_byte': cursor}, 'kind': 'generated_helper_collection_protection'})
+        else:
+            start = append(text)
+            mappings.append({'source_span': position, 'generated_span': {'path': source.path,
+                             'start_byte': start, 'end_byte': cursor}, 'kind': 'retained_module_statement'})
         append('\n\n')
-    append('def ' + name + '():\n')
-    if names:
-        append('    global ' + ', '.join(names) + '\n')
+    if moved:
+        append('def ' + name + '():\n')
+        if names:
+            append('    global ' + ', '.join(names) + '\n')
     wrapper_body_start = cursor
     for node in moved:
         text, copied, position = _indented(source, node)
@@ -320,33 +444,35 @@ def _wrap_parsed(source, tree, base_record):
     wrapped = Source(source.path, code, source.language, origin=source.origin, step=source.step,
                      written_path=source.written_path)
     assertions = sum(isinstance(node, ast.Assert) for statement in moved for node in ast.walk(statement))
-    record = dict(base_record, status='wrapped', wrapper_name=name,
+    status = 'wrapped' if moved else 'helpers_protected'
+    record = dict(base_record, status=status, wrapper_name=name if moved else None,
                   wrapped_sha256=hashlib.sha256(wrapped.data).hexdigest(), global_bindings=names,
                   retained_statement_spans=[_node_text(source, node)[1] for node in retained],
                   moved_statement_spans=[_node_text(source, node)[1] for node in moved],
                   main_guard_spans=[_span(source, node) for node in main_guards],
                   body_span={'path': source.path, 'start_byte': wrapper_body_start, 'end_byte': cursor},
                   mappings=mappings, assertion_count=assertions,
+                  generator_helper_protections=list(protected.values()),
                   observation_status='contains_source_assertions' if assertions else 'unchecked_output_or_no_assertion',
                   limitations=['shared module lifetime across generated test clones',
                                'external process state and arbitrary library effects not isolated',
                                'wrapper is a source transformation, not evidence of prior execution'])
-    return {'status': 'wrapped', 'source': wrapped, 'record': record}
+    return {'status': status, 'source': wrapped, 'record': record}
 
 
 def prepare_script_sources(sources: Iterable[Source], *, origins=('trajectory',)) -> dict:
     """Wrap eligible historical modules before relation extraction.
 
-    Existing registered tests remain unchanged. Python and TypeScript wrappers
-    expose their framework/scoping assumptions; other languages remain explicit
-    unsupported records.
+    Python definitions do not suppress module-action recovery. Existing TS test
+    registrations retain their current framework boundary. Preparation applies
+    only to the explicitly supplied recovered-source origins.
     """
     result, records = [], []
     for source in sources:
         if source.origin not in origins:
             result.append(source)
             continue
-        if any(unit.test and unit.node != source.root for unit in units(source)[0]):
+        if source.language != 'python' and any(unit.test and unit.node != source.root for unit in units(source)[0]):
             result.append(source)
             records.append({'source_path': source.path, 'status': 'unchanged', 'reason': 'registered_test_definitions_present'})
             continue

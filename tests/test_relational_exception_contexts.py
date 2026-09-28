@@ -438,3 +438,195 @@ def test_direct_assert_exception_wrapper_survives_atomic_observation_selection()
     assert atomic['atomic_observation']['source_exception_guard_ids']
     namespace, test_name, _ = namespace_for(corpus, atomic)
     namespace[test_name]()
+
+
+ITERATOR_SUBJECT = '''import pytest
+events = []
+class Reader:
+    def __init__(self, payload):
+        self.source = iter((payload,)) if isinstance(payload, bytes) else iter(payload)
+        self.closed = False
+    def iterate(self):
+        try:
+            for chunk in self.source:
+                events.append(('chunk', chunk))
+                if chunk == b'bad': raise ValueError('invalid chunk')
+                yield chunk
+        finally:
+            if hasattr(self.source, 'close'): self.source.close()
+            self.closed = True
+
+'''
+
+
+@pytest.mark.parametrize('consumer', ['list', 'tuple', 'next'])
+def test_builtin_consumption_keeps_outer_evaluation_and_exception_timing(consumer):
+    corpus, frontend = corpus_for(ITERATOR_SUBJECT + f'''def test_bad():
+    source = Reader(b'bad')
+    with pytest.raises(ValueError, match='invalid chunk'):
+        {consumer}(source.iterate())
+
+def test_state():
+    receiver = Reader(b'good')
+    {consumer}(receiver.iterate())
+    assert receiver.closed is True
+''')
+    candidate, = candidates_for(corpus, frontend, 'test_state')
+    assert candidate['relation']['builtin_consumers'][0]['name'] == consumer
+    assert candidate['edits'][-1]['after'].count(f'{consumer}(receiver.iterate())') == 1
+    namespace, test_name, _ = namespace_for(corpus, candidate)
+    namespace[test_name]()
+
+
+@pytest.mark.parametrize('shadow', [
+    'def list(value): return value\n',
+    'list = tuple\n',
+    'from somewhere import list\n',
+    'if enabled:\n    list = tuple\n',
+])
+def test_module_shadowed_consumer_is_not_assumed_builtin(shadow):
+    corpus, frontend = corpus_for(ITERATOR_SUBJECT + shadow + '''def test_bad():
+    source = Reader(b'bad')
+    with pytest.raises(ValueError):
+        list(source.iterate())
+
+def test_state():
+    receiver = Reader(b'good')
+    list(receiver.iterate())
+    assert receiver.closed is True
+''')
+    assert not candidates_for(corpus, frontend, 'test_state')
+
+
+@pytest.mark.parametrize('shadow', ['list = tuple', 'from somewhere import list'])
+def test_test_local_shadowed_consumer_is_not_assumed_builtin(shadow):
+    corpus, frontend = corpus_for(ITERATOR_SUBJECT + ITERATOR_DONOR + f'''def test_state():
+    {shadow}
+    receiver = Reader(b'good')
+    list(receiver.iterate())
+    assert receiver.closed is True
+''')
+    assert not candidates_for(corpus, frontend, 'test_state')
+
+
+def test_nested_builtin_consumers_and_next_default_keep_complete_invocation():
+    corpus, frontend = corpus_for(ITERATOR_SUBJECT + ITERATOR_DONOR + '''def test_state():
+    receiver = Reader(b'good')
+    tuple(list(receiver.iterate()))
+    assert receiver.closed is True
+
+def test_default():
+    receiver = Reader(b'good')
+    next(receiver.iterate(), None)
+    assert receiver.closed is True
+''')
+    for name, expression in [('test_state', 'tuple(list(receiver.iterate()))'),
+                             ('test_default', 'next(receiver.iterate(), None)')]:
+        candidate, = candidates_for(corpus, frontend, name)
+        assert expression in candidate['edits'][-1]['after']
+        namespace, test_name, _ = namespace_for(corpus, candidate)
+        namespace[test_name]()
+
+
+LOCAL_GENERATOR = '''def test_state():
+    def body():
+        events.append('entered')
+        try:
+            yield b'first'
+            events.append('between')
+            yield b'second'
+        finally:
+            events.append('producer_closed')
+    receiver = Reader(body())
+    assert events == []
+    assert list(receiver.iterate()) == [b'first', b'second']
+    assert receiver.closed is True
+    assert events[-1] == 'producer_closed'
+'''
+
+
+ITERATOR_DONOR = '''def test_bad():
+    source = Reader(b'bad')
+    with pytest.raises(ValueError, match='invalid chunk'):
+        list(source.iterate())
+
+'''
+
+
+def test_nested_generator_composes_each_yield_without_replacing_lazy_actual_or_other_chunks():
+    corpus, frontend = corpus_for(ITERATOR_SUBJECT + ITERATOR_DONOR + LOCAL_GENERATOR)
+    candidates = candidates_for(corpus, frontend, 'test_state')
+    assert len(candidates) == 2, generate_exception_contexts(corpus, frontend)['skipped']
+    assert {row['edits'][0]['before'] for row in candidates} == {"b'first'", "b'second'"}
+    for candidate in candidates:
+        coordinate = candidate['provenance']['target_input_coordinate']
+        assert coordinate['binding_status'] == 'unique_prior_direct_test_local_function'
+        assert coordinate['literal_family'] == 'bytes'
+        assert candidate['relation']['input_carrier'] == 'local_generator_yield'
+        assert candidate['provenance']['target_argument_span'] != coordinate['span']
+        namespace, test_name, output = namespace_for(corpus, candidate)
+        namespace[test_name]()
+        assert namespace['events'][0] == 'entered'
+        assert namespace['events'][-1] == 'producer_closed'
+        generated = next(text for text in output['files'].values() if test_name in text)
+        assert 'Reader(body())' in generated
+        assert generated.count('yield ') >= 4  # original control and both cloned yields
+        if coordinate['yield_index'] == 1:
+            assert namespace['events'] == ['entered', ('chunk', b'first'), 'between',
+                                            ('chunk', b'bad'), 'producer_closed']
+    json.dumps(candidates)
+
+
+def test_generator_exception_witness_detects_missing_cleanup_while_normal_control_passes():
+    broken = ITERATOR_SUBJECT.replace('''        finally:
+            if hasattr(self.source, 'close'): self.source.close()
+            self.closed = True''', '''        except ValueError:
+            raise
+        else:
+            if hasattr(self.source, 'close'): self.source.close()
+            self.closed = True''')
+    corpus, frontend = corpus_for(broken + ITERATOR_DONOR + LOCAL_GENERATOR)
+    candidate = candidates_for(corpus, frontend, 'test_state')[1]
+    namespace, test_name, output = namespace_for(corpus, candidate)
+    for control in output['controls']:
+        namespace['events'].clear()
+        namespace[control['test_name']]()
+    namespace['events'].clear()
+    with pytest.raises(AssertionError):
+        namespace[test_name]()
+
+
+@pytest.mark.parametrize('replacement,reason', [
+    ("yield b'first'", None),
+    ("yield 'first'", 'generator_source_literal_family_mismatch'),
+    ('yield get_chunk()', 'generator_yield_not_closed_literal'),
+    ("yield from [b'first']", 'generator_delegated_yield_not_supported'),
+])
+def test_generator_coordinate_requires_pure_type_compatible_yield(replacement, reason):
+    body = LOCAL_GENERATOR.replace("yield b'first'", replacement).replace("yield b'second'", replacement)
+    corpus, frontend = corpus_for(ITERATOR_SUBJECT + ITERATOR_DONOR + body)
+    result = generate_exception_contexts(corpus, frontend)
+    if reason is None:
+        assert result['candidates']
+    else:
+        assert not result['candidates']
+        assert result['skipped'][reason]
+
+
+@pytest.mark.parametrize('change', ['parameters', 'reassignment', 'decorator', 'global_definition'])
+def test_generator_coordinate_requires_unambiguous_plain_test_local_binding(change):
+    code = ITERATOR_SUBJECT + ITERATOR_DONOR + LOCAL_GENERATOR
+    if change == 'parameters':
+        code = code.replace('def body():', 'def body(x=1):')
+    elif change == 'reassignment':
+        code = code.replace('    receiver = Reader(body())', '    body = replacement\n    receiver = Reader(body())')
+    elif change == 'decorator':
+        code = code.replace('    def body():', '    @decorate\n    def body():')
+    else:
+        code = code.replace('def test_state():\n    def body():', 'def body():').replace(
+            "    receiver = Reader(body())", "\ndef test_state():\n    receiver = Reader(body())")
+        code = code.replace("        events.append('entered')", "    events.append('entered')")
+        start, end = code.index('        try:', code.index('def body():')), code.index('\ndef test_state():')
+        code = code[:start] + '\n'.join(line[4:] for line in code[start:end].split('\n')) + code[end:]
+    corpus, frontend = corpus_for(code)
+    assert not candidates_for(corpus, frontend, 'test_state')

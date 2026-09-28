@@ -181,10 +181,14 @@ def select_sources(case: dict, budget: SourceBudget = SourceBudget()) -> tuple[l
         elif language == 'python':
             target = str(original_name.with_name('test_rh_' + digest[:12] + '_' + original_name.name))
         else:
-            target = str(original_name.with_name('rh_' + digest[:12] + '_' + stem + '.test.ts'))
+            recognized = re.search(r'(?:\.(?:unit\.)?(?:test|spec)|\.test-d)\.tsx?$', original_name.name)
+            basename = original_name.name if recognized else stem + '.test.ts'
+            target = str(original_name.with_name('rh_' + digest[:12] + '_' + basename))
         if target in selected_paths:
             continue
-        relocated = Source(target, source.code, source.language, 'trajectory', source.step, source.written_path)
+        # Import lookup is repository-relative. The original shell spelling
+        # (possibly /app/... or /repo/...) remains in provenance below.
+        relocated = Source(target, source.code, source.language, 'trajectory', source.step, original_target)
         renamed = []
         if language == 'go':
             relocated, renamed = namespace_go_validation(relocated, digest[:12])

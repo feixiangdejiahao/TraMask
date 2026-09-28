@@ -81,6 +81,15 @@ def test_malformed_top_level_json_still_rejects_protocol():
     assert "protocol_error" in validate_response(request, '{"accepted":[],"accepted":[]}')
 
 
+def test_unused_top_level_metadata_does_not_discard_valid_admission_rows():
+    corpus, prepared_result = prepared()
+    payload = {'accepted': [row()], 'type': 'object', 'evidence': ['extra explanatory metadata']}
+    result = validate_response(prepared_result['requests'][0], payload, corpus=corpus)
+    assert len(result['accepted']) == 1
+    assert result['ignored_top_level_fields'] == ['evidence', 'type']
+    assert result['accepted'][0]['semantic_admission']['evidence'] == ['E0']
+
+
 def test_alias_tampering_and_injected_input_edits_are_rejected():
     _, result = prepared(2)
     request = copy.deepcopy(result["requests"][0])

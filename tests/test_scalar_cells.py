@@ -210,3 +210,30 @@ def test_budgets_are_bounded():
         ScalarBudget(max_paths=0)
     with pytest.raises(ValueError):
         ScalarBudget(boundary_offsets=(-2, 2))
+
+
+@pytest.mark.parametrize('decl,parameter,setup,condition', [
+    ('type Record struct {}', '*Record', 'value := &Record{}', 'value != nil'),
+    ('type Record [16]byte', 'Record', 'value := Record{}', 'value == Record{}'),
+    ('type Record map[string]int', 'Record', 'value := Record{}', 'value != nil'),
+])
+def test_pointer_array_and_map_equality_are_not_integer_boundaries(decl, parameter, setup, condition):
+    _, _, result = build(f'''package sample
+import "testing"
+{decl}
+func accepts(value {parameter}) bool {{ return {condition} }}
+func TestValue(t *testing.T) {{ {setup}; if !accepts(value) {{ t.Fatal("bad") }} }}
+''', 'go', 'sample_test.go')
+    assert not result['candidates']
+    assert result['counts']['skipped']['non_integer_formals']
+
+
+def test_untyped_object_identity_is_not_a_numeric_domain_premise():
+    _, _, result = build('''def accepts(value): return value != None
+class Record: pass
+def test_value():
+    value = Record()
+    assert accepts(value)
+''')
+    assert not result['candidates']
+    assert result['counts']['skipped']['numeric_actual_domain_unknown']

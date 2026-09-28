@@ -124,6 +124,8 @@ class _Kernel:
             return {"kind": "integer", "underlying": name, "unsigned": name.startswith("uint") or name == "byte", "bits": bits or None, "aliases": []}
         if name in {"str", "string", "bool", "boolean", "float", "float32", "float64", "[]byte"}:
             return {"kind": "non_integer", "underlying": name, "aliases": []}
+        if name.startswith(('*', '[', 'map[', 'chan ', '<-chan ', 'func(', 'interface', 'struct')):
+            return {"kind": "non_integer", "underlying": name, "aliases": []}
         return {"kind": "unknown", "underlying": name, "aliases": []}
 
     def cast_type(self, source, function_node):
@@ -373,6 +375,25 @@ def generate_scalar_cells(corpus: dict, frontend: dict, *, budget: ScalarBudget 
                     if not kernel.safe_actual(source, kernel.node(arg["span"]), test_function):
                         kernel.skipped["effectful_or_noninteger_actual"] += 1
                         continue
+                    immediate = kernel.functions.get(fid, {})
+                    immediate_types = [kernel.numeric_type(p.get('type', ''), immediate['span']['path'])
+                                       for binding in bindings if binding['slot'] == slot
+                                       for p in immediate.get('parameters', [])
+                                       if p['index'] == binding['parameter_index']]
+                    if immediate_types and all(info['kind'] == 'non_integer' for info in immediate_types):
+                        kernel.skipped['non_integer_actual_domain'] += 1
+                        continue
+                    numeric_info = next((info for info in immediate_types if info['kind'] == 'integer'), None)
+                    # A missing counter value is different from a missing
+                    # numeric-domain premise. Equality also accepts pointers,
+                    # hashes and arbitrary objects; it does not license x+1.
+                    actual_ir = kernel.ir(source, kernel.node(arg['span']), test_function)
+                    integer_syntax = any(n.get('kind') == 'binary' and n.get('operator') in {'&', '|', '^', '&^', '<<', '>>'}
+                                         for n in _visit(actual_ir))
+                    if (numeric_info is None and actuals[slot] is None and not integer_syntax
+                            and not any(n.get('kind') == 'literal' for n in _visit(actual_ir))):
+                        kernel.skipped['numeric_actual_domain_unknown'] += 1
+                        continue
                     if any(v.get("oracle_dependency") and v.get("test_id") == test_id
                            and v["span"] == arg["span"] for v in frontend.get("values", [])):
                         kernel.skipped["expected_dependency"] += 1
@@ -412,7 +433,7 @@ def generate_scalar_cells(corpus: dict, frontend: dict, *, budget: ScalarBudget 
                         value = cell.get("value")
                         if after == arg["text"] or (value is not None and value == actuals[slot]):
                             continue
-                        type_info = next((info for info in types if info["kind"] == "integer"), {"kind": "unknown", "aliases": []})
+                        type_info = numeric_info or {"kind": "source_integer_expression", "aliases": []}
                         if value is not None and (abs(value).bit_length() > budget.max_integer_bits or type_info.get("unsigned") and value < 0
                                                   or type_info.get("bits") and not (0 <= value < 2 ** type_info["bits"] if type_info.get("unsigned")
                                                                                    else -2 ** (type_info["bits"] - 1) <= value < 2 ** (type_info["bits"] - 1))):
