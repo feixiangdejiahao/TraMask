@@ -60,3 +60,14 @@ def test_production_cycles_terminate_with_shortest_path():
     prior = {t['id']: n for n, t in enumerate(facts['tests'], 1)}
     ranked = rank_seeds(facts, {'pkg/core.py': [2]}, prior)
     assert next(r for r in ranked['records'] if r['test_id'].endswith(':test_indirect'))['distance'] == 1
+
+
+def test_test_file_helper_is_a_transit_vertex_to_changed_production_code():
+    facts = extract_frontend([
+        Source('pkg/core.py', 'def core(x):\n    return x + 1\n', 'python'),
+        Source('tests/test_helper.py', 'from pkg.core import core\ndef helper(x):\n    return core(x)\ndef test_value():\n    assert helper(1) == 2\n', 'python')])
+    helper = next(f for f in facts['functions'] if f['name'] == 'helper')
+    assert not helper['production'] and not helper['test']
+    ranked = rank_seeds(facts, {'pkg/core.py': [2]}, {t['id']: 1 for t in facts['tests']})
+    assert ranked['records'][0]['relation'] == 'observed_changed_call'
+    assert ranked['records'][0]['distance'] == 1

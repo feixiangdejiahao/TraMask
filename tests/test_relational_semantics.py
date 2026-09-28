@@ -70,6 +70,23 @@ def test_explicit_retention_without_update_is_recorded_as_model_judgment():
     assert accepted["semantic_admission"]["retain_other_assertions"] is True
 
 
+def test_source_local_expected_constant_supplies_pre_without_new_edit_site():
+    corpus, _, _, request = setup_case('def inc(x):\n    return x + 1\ndef test_seed():\n    want = 3\n    assert inc(2) == want\n')
+    offered = request['offered'][0]
+    assert offered['pre'] == [3]
+    assert offered['holes'][0]['before'] == 'want'
+    assert offered['holes'][0]['kind'] == 'source_local_constant'
+    result = validate_response(request, decision(request, 'pre[0] + 2'), corpus=corpus)
+    assert not result['rejected']
+    accepted = result['accepted'][0]
+    assert accepted['edits'][-1]['before'] == 'want'
+    output = emit(corpus, [accepted])
+    namespace = {}
+    exec(output['files']['test_value.py'], namespace)
+    namespace[output['obligations'][0]['test_name']]()
+    assert 'want = 3' in output['files']['test_value.py']
+
+
 @pytest.mark.parametrize("expression", [
     "inc(arg[0])", "__import__('os').system('false')", "actual", "pre.__class__",
     "[x for x in pre]", "True if True else inc(2)",

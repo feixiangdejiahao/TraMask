@@ -103,3 +103,32 @@ def test_go_namespace_renames_all_names_of_multiple_declarations():
     result, names = namespace_go_validation(source, 'abc')
     assert names == ['a', 'b']
     assert 'var a_rh_abc, b_rh_abc = 1, 2' in result.code
+
+
+def test_context_managed_source_editor_is_not_a_validation():
+    data = trajectory("python - <<'PY'\npath = 'subject.py'\nwith open(path) as f:\n    old = f.read()\nassert 'old' in old\nnew = old.replace('old', 'new')\nwith open(path, 'w') as f:\n    f.write(new)\nprint('edited')\nPY")
+    versions, report = recover_history(data, 'python')
+    assert not versions
+    assert report['skipped']['source_edit_script_not_runtime_validation'] == 1
+
+
+def test_context_managed_edit_recovers_only_previously_known_bytes():
+    data = trajectory(
+        "cat > test_example.py <<'EOF'\ndef test_example(): assert 1\nEOF",
+        "python - <<'PY'\npath = 'test_example.py'\nwith open(path) as f:\n    old = f.read()\nnew = old.replace('assert 1', 'assert 2')\nwith open(path, 'w') as f:\n    f.write(new)\nPY")
+    versions, report = recover_history(data, 'python')
+    assert len(versions) == 2
+    assert versions[-1].code == 'def test_example(): assert 2\n'
+    assert report['versions'][-1]['recovery'] == 'restricted_python_literal_file_edit'
+
+
+def test_unknown_rebinding_does_not_reuse_stale_literal_file_contents():
+    data = trajectory("python - <<'PY'\ns = 'def test_x(): assert 1'\ns = unknown()\nopen('test_x.py', 'w').write(s)\nPY")
+    versions, _ = recover_history(data, 'python')
+    assert not versions
+
+
+def test_unexecuted_helper_write_is_not_itself_a_source_editor():
+    data = trajectory("python - <<'PY'\np = 'generated.py'\ndef write_later():\n    open(p, 'w').write('x')\nassert 2 + 2 == 4\nPY")
+    versions, _ = recover_history(data, 'python')
+    assert len(versions) == 1

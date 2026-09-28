@@ -8,9 +8,14 @@ from collections import defaultdict, deque
 
 
 def rank_seeds(frontend, changed_lines, prior_ranks):
-    functions = {f['id']: f for f in frontend.get('functions', ()) if f.get('production')}
+    # Test-local source helpers can be transit vertices even though they are
+    # not subject production functions. Only changed production spans seed the
+    # reverse search.
+    functions = {f['id']: f for f in frontend.get('functions', ()) if not f.get('test')}
     changed = set()
     for identifier, function in functions.items():
+        if not function.get('production'):
+            continue
         span = function['span']
         if any(span['line'] <= line <= span['end_line']
                for line in changed_lines.get(span['path'], ())):
@@ -43,7 +48,7 @@ def rank_seeds(frontend, changed_lines, prior_ranks):
         identifier = test['id']
         hits = []
         for call in by_test[identifier]:
-            if call.get('role') != 'operation':
+            if call.get('role') != 'operation' and not call.get('operation_eligible'):
                 continue
             for target in call.get('targets', ()):
                 function_id = target['function_id']

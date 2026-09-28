@@ -264,3 +264,23 @@ def test_neutral_aggregate_does_not_invent_a_writable_field():
     result = generate_embedded_relations(corpus, frontend)
     assert result['counts']['neutral_read_inputs'] == 1
     assert not result['candidates']
+
+
+def test_unrelated_source_strings_do_not_consume_predicate_budget():
+    from relational_gap.embedded_relations import EmbeddedRelationBudget
+    noise = '\n'.join(f'    register("opaque value {i}")' for i in range(40))
+    _, frontend, corpus = fixture(f'''def register(value):
+    return value
+def test_values():
+{noise}
+    register('COUNT(*) = 1')
+    apply('UPDATE rows SET label = 3')
+    assert True
+def test_field():
+    register('amount < 6')
+    assert True
+''')
+    result = generate_embedded_relations(corpus, frontend, budget=EmbeddedRelationBudget(max_donors=4))
+    assert result['counts']['skipped']['non_predicate_source_string'] == 40
+    assert result['candidates']
+    assert any(len(c['edits']) == 2 for c in result['candidates'])

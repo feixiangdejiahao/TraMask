@@ -197,7 +197,12 @@ def _unshadowed_builtin(kernel, name, path, test_id):
 
 
 def _simple_invocation(kernel, test_id, statement):
-    call = statement.value if isinstance(statement, ast.Expr) else None
+    assigned_name = None
+    call = statement.value if isinstance(statement, (ast.Expr, ast.Assign)) else None
+    if isinstance(statement, ast.Assign):
+        if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name):
+            raise Unsupported('invocation_assignment_not_single_name')
+        assigned_name = statement.targets[0].id
     if isinstance(statement, ast.Assert):
         value = statement.test
         if isinstance(value, ast.Call):
@@ -233,7 +238,7 @@ def _simple_invocation(kernel, test_id, statement):
         raise Unsupported('receiver_constructor_or_alias_not_recovered')
     return {'call': record, 'node': call, 'statement': statement, 'receiver': call.func.value.id,
             'origin': origin, 'test_id': test_id, 'invocation_span': kernel.span(path, invocation),
-            'builtin_consumers': consumers}
+            'builtin_consumers': consumers, 'assigned_name': assigned_name}
 
 
 def _same_callee(kernel, left, right):
@@ -302,11 +307,8 @@ def _literal_family(node):
     return type(value).__name__
 
 
-def _input_coordinates(kernel, recipient, route, target_arg, limit):
-    position = target_arg['span']
-    actual = kernel.node(position)
-    if route != 'receiver_constructor' or not isinstance(actual, ast.Call):
-        return [{'span': position, 'kind': 'argument'}]
+def _generator_coordinates(kernel, recipient, actual, limit):
+    position = kernel.span(recipient['call']['span']['path'], actual)
     if not isinstance(actual.func, ast.Name) or actual.args or actual.keywords:
         raise Unsupported('generator_actual_not_direct_zero_argument_local_call')
     test_id, path, name = recipient['test_id'], position['path'], actual.func.id
@@ -327,7 +329,7 @@ def _input_coordinates(kernel, recipient, route, target_arg, limit):
             continue
         if _binds_name(node, name):
             raise Unsupported('generator_local_binding_ambiguous')
-    yields = []
+    yields, captured = [], []
     for node in _owned_nodes(generator):
         if isinstance(node, ast.YieldFrom):
             raise Unsupported('generator_delegated_yield_not_supported')
@@ -337,15 +339,131 @@ def _input_coordinates(kernel, recipient, route, target_arg, limit):
             try:
                 family = _literal_family(node.value)
             except (ValueError, TypeError, SyntaxError):
-                raise Unsupported('generator_yield_not_closed_literal') from None
+                # A captured immutable literal may be yielded whole or in
+                # source-defined slices. Its producer/control code stays intact.
+                value = node.value
+                root = value.value if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Slice) else value
+                if not isinstance(root, ast.Name):
+                    raise Unsupported('generator_yield_not_closed_literal') from None
+                allowed = (ast.Name, ast.Load, ast.Constant, ast.Subscript, ast.Slice, ast.BinOp, ast.UnaryOp,
+                           ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Mod, ast.USub, ast.UAdd)
+                if any(not isinstance(part, allowed) for part in ast.walk(value)):
+                    raise Unsupported('generator_yield_expression_not_pure_slice')
+                if any(_binds_name(part, root.id) for part in _owned_nodes(generator)):
+                    raise Unsupported('generator_capture_rebound_in_producer')
+                binding = kernel.binding(test_id, root.id, position['start_byte'])
+                if binding is None:
+                    raise Unsupported('generator_capture_binding_not_recovered')
+                activation = kernel.span(path, recipient['statement'])['start_byte']
+                if any(row['name'] == root.id and position['start_byte'] < row['definition_end'] <= activation
+                       for row in kernel.bindings[test_id]):
+                    raise Unsupported('generator_capture_changes_before_consumption')
+                closed = kernel.closed(test_id, binding['value']['span'])
+                family = _literal_family(ast.parse(closed['text'], mode='eval').body)
+                if isinstance(value, ast.Subscript) and family not in {'str', 'bytes'}:
+                    raise Unsupported('generator_slice_literal_family_not_supported')
+                captured.append({'span': closed['span'], 'kind': 'local_generator_capture',
+                                 'yield_span': kernel.span(path, node), 'literal_family': family,
+                                 'capture_binding_path': [binding['span'], *closed['binding_path']]})
+                continue
             yields.append((node, family))
-    if not yields:
+    if not yields and not captured:
         raise Unsupported('local_function_not_literal_generator')
-    return [{'span': kernel.span(path, node.value), 'kind': 'local_generator_yield', 'yield_index': index,
-             'literal_family': family, 'generator_definition_span': kernel.span(path, generator),
-             'generator_call_span': position, 'yield_span': kernel.span(path, node),
-             'binding_status': 'unique_prior_direct_test_local_function'}
-            for index, (node, family) in enumerate(yields[:limit])]
+    coordinates = [{'span': kernel.span(path, node.value), 'kind': 'local_generator_yield', 'yield_index': index,
+                    'literal_family': family, 'yield_span': kernel.span(path, node)}
+                   for index, (node, family) in enumerate(yields)] + captured
+    unique = {}
+    for coordinate in coordinates:
+        unique.setdefault(_pos(coordinate['span']), dict(coordinate, generator_definition_span=kernel.span(path, generator),
+                          generator_call_span=position, binding_status='unique_prior_direct_test_local_function'))
+    return list(unique.values())[:limit]
+
+
+def _input_coordinates(kernel, recipient, route, target_arg, limit):
+    position = target_arg['span']
+    actual = kernel.node(position)
+    if route != 'receiver_constructor' or not isinstance(actual, ast.Call):
+        return [{'span': position, 'kind': 'argument'}]
+    found, pending, errors, visited = [], [(actual, [])], [], 0
+    # Call argument nesting is a provenance path, not a transparent conversion.
+    # Every factory expression remains exactly where the source evaluates it.
+    while pending and len(found) < limit and visited < 64:
+        call, path = pending.pop(0)
+        visited += 1
+        if len(path) > 4:
+            continue
+        try:
+            found.extend(dict(coordinate, factory_path=path,
+                              carrier_status='source_nested_actual_preserved_semantics_unknown')
+                         for coordinate in _generator_coordinates(kernel, recipient, call, limit - len(found)))
+            continue
+        except Unsupported as exc:
+            errors.append(str(exc))
+        arguments = [*enumerate(call.args), *((keyword.arg, keyword.value) for keyword in call.keywords)]
+        for slot, nested in arguments:
+            if isinstance(nested, ast.Call):
+                pending.append((nested, [*path, {'call_span': kernel.span(position['path'], call),
+                                                'argument': slot, 'actual_span': kernel.span(position['path'], nested)}]))
+    if not found:
+        raise Unsupported(errors[-1] if errors else 'constructor_generator_carrier_not_recovered')
+    return found
+
+
+def _normal_result_checks(kernel, recipient):
+    """Guard only pure normal-result checks, never drop result-dependent work."""
+    name = recipient.get('assigned_name')
+    if name is None:
+        return []
+    statement, path = recipient['statement'], recipient['call']['span']['path']
+    owner = kernel.parents[id(statement)]
+    if statement not in owner.body:
+        raise Unsupported('assignment_invocation_not_in_direct_suite')
+    following, current = [], statement
+    while isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.With, ast.AsyncWith)):
+        if current not in owner.body:
+            raise Unsupported('normal_result_parent_suite_unknown')
+        following.extend(owner.body[owner.body.index(current) + 1:])
+        if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            break
+        current, owner = owner, kernel.parents.get(id(owner))
+    checks = []
+    for later in following:
+        reads = [node for node in ast.walk(later) if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)]
+        if not reads:
+            if any(_binds_name(node, name) for node in ast.walk(later)):
+                if (isinstance(later, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name
+                                                         for target in later.targets)
+                        or isinstance(later, ast.AnnAssign) and isinstance(later.target, ast.Name)
+                        and later.target.id == name and later.value is not None):
+                    break
+                raise Unsupported('normal_result_rebinding_control_unknown')
+            continue
+        if not isinstance(later, ast.Assert):
+            raise Unsupported('normal_result_has_dependent_nonassertion_work')
+        if not recipient['builtin_consumers'] or recipient['builtin_consumers'][0]['name'] not in {'list', 'tuple'}:
+            raise Unsupported('normal_result_container_type_not_source_proved')
+        parents = {child: parent for parent in ast.walk(later) for child in ast.iter_child_nodes(parent)}
+        for read in reads:
+            parent = parents.get(read)
+            if not (read is later.test or isinstance(parent, ast.BoolOp)
+                    or isinstance(parent, ast.UnaryOp) and isinstance(parent.op, ast.Not)
+                    or isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name) and parent.func.id == 'len'):
+                raise Unsupported('normal_result_element_or_comparison_effect_unknown')
+        allowed = (ast.Assert, ast.Name, ast.Load, ast.Constant, ast.Compare, ast.BoolOp, ast.UnaryOp,
+                   ast.BinOp, ast.List, ast.Tuple, ast.Subscript, ast.Slice, ast.Call,
+                   ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Is, ast.IsNot, ast.In, ast.NotIn,
+                   ast.And, ast.Or, ast.Not, ast.Add, ast.Sub, ast.Mult, ast.Mod, ast.FloorDiv, ast.USub, ast.UAdd)
+        for node in ast.walk(later):
+            if not isinstance(node, allowed):
+                raise Unsupported('normal_result_check_effect_or_scope_unknown')
+            if isinstance(node, ast.Call) and (not isinstance(node.func, ast.Name) or node.func.id != 'len'
+                    or len(node.args) != 1 or node.keywords
+                    or not _unshadowed_builtin(kernel, 'len', path, recipient['test_id'])):
+                raise Unsupported('normal_result_check_call_not_pure_builtin')
+            if isinstance(node, ast.Name) and node.id not in {name, 'len'}:
+                kernel.closed(recipient['test_id'], kernel.span(path, node))
+        checks.append(later)
+    return checks
 
 
 def _donors(kernel, ordered, skipped):
@@ -478,7 +596,7 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
             statement = kernel.parents.get(id(node))
             if isinstance(statement, ast.Compare):
                 statement = kernel.parents.get(id(statement))
-            if not isinstance(statement, (ast.Expr, ast.Assert)):
+            if not isinstance(statement, (ast.Expr, ast.Assert, ast.Assign)):
                 continue
             owner = kernel.parents.get(id(statement))
             if not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.With)):
@@ -515,7 +633,19 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
             input_count = 0
             for route, left, right in [('invocation', donor['call'], recipient['call']),
                                       ('receiver_constructor', donor['origin']['constructor'], recipient['origin']['constructor'])]:
-                for source_arg, target_arg, binding in _argument_pairs(left, right):
+                pairs = list(_argument_pairs(left, right))
+                if route == 'receiver_constructor':
+                    paired = {(source['slot'], target['slot']) for source, target, _ in pairs}
+                    for target in right.get('arguments', ()):
+                        if target.get('spread') or not isinstance(kernel.node(target['span']), ast.Call):
+                            continue
+                        for source in left.get('arguments', ()):
+                            if source.get('spread') or (source['slot'], target['slot']) in paired:
+                                continue
+                            pairs.append((source, target, {'status': 'source_constructor_distinct_leaf_coordinate_unresolved',
+                                                          'source_slot': source['slot'], 'target_slot': target['slot'],
+                                                          'source_keyword': source.get('keyword'), 'target_keyword': target.get('keyword')}))
+                for source_arg, target_arg, binding in pairs:
                     try:
                         coordinates = _input_coordinates(kernel, recipient, route, target_arg,
                                                          budget.max_inputs_per_pair - input_count)
@@ -542,7 +672,7 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
         try:
             source_value = kernel.closed(donor['test_id'], source_arg['span'])
             target_value = kernel.closed(recipient['test_id'], coordinate['span'])
-            if coordinate['kind'] == 'local_generator_yield' and _literal_family(
+            if coordinate['kind'] in {'local_generator_yield', 'local_generator_capture'} and _literal_family(
                     ast.parse(source_value['text'], mode='eval').body) != coordinate['literal_family']:
                 raise Unsupported('generator_source_literal_family_mismatch')
             if ast.dump(ast.parse(source_value['text'], mode='eval'), include_attributes=False) == ast.dump(
@@ -550,6 +680,7 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
                 continue
             context, imports, closure = _close_context(kernel, donor, recipient, identifier)
             invocation = kernel.text(recipient['invocation_span'])
+            normal_checks = _normal_result_checks(kernel, recipient)
             edits = []
             if route == 'invocation':
                 offset = recipient['invocation_span']['start_byte']
@@ -558,9 +689,32 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
                 invocation = (raw[:lo] + source_value['text'].encode() + raw[hi:]).decode()
             else:
                 edits.append({'span': coordinate['span'], 'before': kernel.text(coordinate['span']), 'after': source_value['text']})
-            context.body = [ast.Expr(value=ast.parse(invocation, mode='eval').body)]
+            invocation_node = ast.parse(invocation, mode='eval').body
+            flag = None
+            if recipient.get('assigned_name'):
+                original_assignment = copy.deepcopy(recipient['statement'])
+                original_assignment.value = invocation_node
+                occupied = set()
+                for module in kernel.modules.values():
+                    for node in ast.walk(module):
+                        if isinstance(node, ast.Name):
+                            occupied.add(node.id)
+                        elif isinstance(node, ast.arg):
+                            occupied.add(node.arg)
+                        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            occupied.add(node.name)
+                        elif isinstance(node, ast.alias):
+                            occupied.add(node.asname or node.name.split('.')[0])
+                flag = 'gc_result_available_' + identifier[:10]
+                while flag in occupied:
+                    flag += '_'
+                context.body = [original_assignment, ast.Assign(targets=[ast.Name(id=flag, ctx=ast.Store())], value=ast.Constant(True))]
+            else:
+                context.body = [ast.Expr(value=invocation_node)]
             ast.fix_missing_locations(context)
             rendered = ast.unparse(context)
+            if flag is not None:
+                rendered = flag + ' = False\n' + rendered
             position = kernel.span(recipient['call']['span']['path'], recipient['statement'])
             source = kernel.sources[position['path']]
             line_start = source.data.rfind(b'\n', 0, position['start_byte']) + 1
@@ -570,6 +724,18 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
             rendered = rendered.replace('\n', '\n' + indent)
             edits.append({'span': position, 'before': kernel.text(position), 'after': rendered,
                           'role': 'source_exception_context'})
+            normal_guard_ids = []
+            for check in normal_checks:
+                check_span = kernel.span(position['path'], check)
+                line_start = source.data.rfind(b'\n', 0, check_span['start_byte']) + 1
+                check_indent = source.data[line_start:check_span['start_byte']].decode()
+                if check_indent.strip():
+                    raise Unsupported('inline_normal_result_check_requires_suite_rewrite')
+                guarded = 'if ' + flag + ':\n' + check_indent + '    ' + kernel.text(check_span).replace('\n', '\n    ')
+                edits.append({'span': check_span, 'before': kernel.text(check_span), 'after': guarded,
+                              'role': 'source_normal_result_guard'})
+                normal_guard_ids.extend(other['id'] for other in kernel.observations[recipient['test_id']]
+                                        if _pos(other['assertion_span']) == _pos(check_span))
             raw = source.data
             for edit in sorted(edits, key=lambda e: e['span']['start_byte'], reverse=True):
                 p = edit['span']
@@ -594,6 +760,8 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
                          'invocation_binding_status': call_status, 'constructor_binding_status': constructor_status,
                          'argument_binding': binding, 'receiver_identity': 'same_recipient_constructor_value_and_aliases',
                          'input_carrier': coordinate['kind'],
+                         'leaf_alignment_status': ('unresolved_different_constructor_arguments' if binding['status'].endswith('_unresolved')
+                                                   else 'aligned_source_argument'),
                          'builtin_consumers': recipient['builtin_consumers'],
                          'phase': 'original_q_after_source_exception_context',
                          'runtime_obligation': 'exception_occurs_and_same_receiver_reaches_existing_q',
@@ -611,6 +779,10 @@ def generate_exception_contexts(corpus, frontend, budget: ExceptionBudget | None
                            'source_literal_span': source_value['span'], 'source_literal_binding_path': source_value['binding_path'],
                            'receiver_mapping': {donor['receiver']: recipient['receiver']},
                            'source_observation_span': q['assertion_span'], 'exception_closure': closure,
+                           'normal_result_guard_ids': normal_guard_ids,
+                           'normal_result_guard': {'binding': recipient.get('assigned_name'), 'completion_flag': flag,
+                                                   'checks': [kernel.span(position['path'], check) for check in normal_checks],
+                                                   'rule': 'retain_pure_source_checks_only_when_invocation_completed'},
                            'replaced_normal_observation_ids': [other['id'] for other in kernel.observations[recipient['test_id']]
                                if _pos(other['assertion_span']) == _pos(position)],
                            'unproved': ['exception_preconditions', 'external_aliases', 'literal_mutation', 'cleanup_effects', 'oracle_transport']},

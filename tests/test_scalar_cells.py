@@ -164,7 +164,7 @@ type Stamp uint64
 func accepts(value Stamp) bool { return value < external.Load() }
 func TestValue(t *testing.T) { if !accepts(0) { t.Fatal("bad") } }
 ''', "go", "sample_test.go")
-    assert replacements(result) == {"(0) + 1"}
+    assert replacements(result) == {"1"}
 
 
 def test_exact_boundary_candidates_are_fair_and_deterministic():

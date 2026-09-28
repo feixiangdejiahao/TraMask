@@ -428,6 +428,9 @@ def generate_scalar_cells(corpus: dict, frontend: dict, *, budget: ScalarBudget 
                         for delta in (-1, 1):
                             after = "(" + arg["text"] + ") " + ("+ " if delta > 0 else "- ") + "1"
                             value = actuals[slot] + delta if actuals[slot] is not None else None
+                            if value is not None and not any(n.type in {'identifier', 'type_identifier'}
+                                                             for n in walk(kernel.node(arg['span']))):
+                                after = str(value)
                             hypotheses.append((after, "unknown_boundary_neighbor", {"offset": delta, "value": value}))
                     for after, kind, cell in hypotheses[:budget.max_cells_per_argument]:
                         value = cell.get("value")

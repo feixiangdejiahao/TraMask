@@ -293,6 +293,69 @@ def _root_name(source, node):
     return None
 
 
+def is_operation_argument(call, slot):
+    """An assertion-producing helper can also have source-proved input slots."""
+    return call.get('role') == 'operation' or (call.get('operation_eligible') is True
+                                               and slot in call.get('operation_argument_slots', ()))
+
+
+def _helper_operation_facts(index, targets):
+    cache = getattr(index, '_relational_helper_operations', None)
+    if cache is None:
+        cache = index._relational_helper_operations = {}
+    output = []
+    for target in targets:
+        if not target.get('resolved'):
+            continue
+        uid = target['function_id']
+        if uid not in cache:
+            unit = index.units[uid]
+            source, flow = unit.source, index.flow(uid)
+            source_calls = {(flow.nodes[call.node]['start_byte'], flow.nodes[call.node]['end_byte']): call
+                            for call in flow.calls}
+            parameters = {p['name']: p['index'] for p in _parameters(unit) if p['name'] is not None}
+            nodes = list(_owned_walk(unit.body))
+            facts = []
+
+            def parameter_dependencies(position):
+                roots = [n['id'] for n in flow.nodes if n['start_byte'] == position.start_byte
+                         and n['end_byte'] == position.end_byte]
+                return {flow.nodes[n]['parameter'] for n in flow.slice(roots)
+                        if flow.nodes[n]['kind'] == 'parameter' and flow.nodes[n].get('parameter') in parameters}
+
+            for node in nodes:
+                if node.type in ASSIGNMENTS | {'assignment_expression', 'augmented_assignment_expression'}:
+                    left = child(node, 'left', 'name')
+                    if left is None:
+                        continue
+                    targets_ = left.named_children if left.type in {'expression_list', 'pattern_list'} else [left]
+                    for written in targets_:
+                        root = _root_name(source, written)
+                        if written.type not in ATTRS | {'subscript', 'subscript_expression', 'index_expression'} or root not in parameters:
+                            continue
+                        names = parameter_dependencies(written) | {root}
+                        facts.append({'kind': 'source_parameter_access_write', 'span': span(source, written),
+                                      'parameter_indices': sorted(parameters[name] for name in names)})
+                elif node.type in CALLS and node.parent is not None and node.parent.type == 'expression_statement':
+                    if _diagnostic_call(unit, node) or any(a.line <= node.start_point.row + 1 <= a.end_line
+                                                         for a in flow.assertions):
+                        continue
+                    resolved = _resolved_targets(index, unit, node, source_calls.get((node.start_byte, node.end_byte)))
+                    # A standalone source-resolved operation is separate from
+                    # an assertion helper. Its runtime effects remain unknown.
+                    if not any(reason in TRUSTED_RESOLUTIONS and callee not in index.oracle_helpers
+                               for callee, reason in resolved):
+                        continue
+                    names = parameter_dependencies(node)
+                    if names:
+                        facts.append({'kind': 'source_standalone_operation', 'span': span(source, node),
+                                      'parameter_indices': sorted(parameters[name] for name in names),
+                                      'effect_status': 'unknown_source_operation_only'})
+            cache[uid] = facts
+        output.extend(dict(fact, function_id=uid) for fact in cache[uid])
+    return output
+
+
 def _contexts(source, node, boundary):
     result = []
     current = node.parent
@@ -969,10 +1032,6 @@ def extract_frontend(
               "production_calls": [], "unknowns": [],
               "coverage_status": "static_only_execution_and_assertion_validity_unknown"}
     functions = {u.id: _function_record(u) for u in index.units.values()}
-    production_reasons = collections.defaultdict(list)
-    for uid in sorted(index.changed):
-        production_reasons[uid].append({"kind": "changed_function", "test_id": None, "depth": 0})
-    reached = set()
     for unit in tests:
         source = unit.source
         nodes = list(_test_walk(unit.body))
@@ -1082,6 +1141,18 @@ def extract_frontend(
                                      for r, statement, _, _, _ in observations)
                                else next((r["kind"] for r, statement, _, _, _ in observations if statement == node), "operation")),
                       "observation_ids": []}
+            if record['role'] == 'assertion' and any(r['predicate'] == 'assertion_helper' and statement == node
+                                                     for r, statement, _, _, _ in observations):
+                evidence = _helper_operation_facts(index, targets)
+                active_formals = {(fact['function_id'], parameter) for fact in evidence
+                                  for parameter in fact['parameter_indices']}
+                slots = sorted({binding['slot'] for binding in record['argument_bindings']
+                                if (binding['function_id'], binding['parameter_index']) in active_formals
+                                and binding['binding_status'] == 'direct_actual_formal'})
+                if slots:
+                    record.update(operation_eligible=True, operation_argument_slots=slots,
+                                  operation_evidence=evidence,
+                                  operation_status='source_action_input_roles_runtime_effect_unknown')
             for argument in arguments:
                 argument["structure"] = _structure(source, node_map.get((argument["span"]["start_byte"], argument["span"]["end_byte"])))
                 argument["binding"] = _binding_for(unit, node_map.get((argument["span"]["start_byte"], argument["span"]["end_byte"])), bindings)
@@ -1141,41 +1212,13 @@ def extract_frontend(
                 record["role"] = "diagnostic"
                 record["diagnostic"] = True
             result["values"].append(record)
-        # Start from every setup/action call, not solely the candidate's current
-        # value slice: deleted effects would otherwise exclude precisely the gap.
-        queue = collections.deque([(unit.id, 0, ())])
-        seen = set()
-        while queue:
-            uid, depth, path = queue.popleft()
-            if uid in seen:
-                continue
-            seen.add(uid)
-            if depth >= max_production_depth:
-                continue
-            current_flow = flow if uid == unit.id else index.flow(uid)
-            current_unit = index.units[uid]
-            call_sites = {(current_flow.nodes[c.node]["start_byte"], current_flow.nodes[c.node]["end_byte"]): c.targets
-                          for c in current_flow.calls}
-            graph_calls = {(current_flow.nodes[c.node]["start_byte"], current_flow.nodes[c.node]["end_byte"]): c
-                           for c in current_flow.calls}
-            for call_node in (n for n in (nodes if uid == unit.id else _owned_walk(current_unit.body)) if n.type in CALLS):
-                key = (call_node.start_byte, call_node.end_byte)
-                call_sites[key] = _resolved_targets(index, current_unit, call_node, graph_calls.get(key))
-            for (call_start, call_end), targets in sorted(call_sites.items()):
-                for target, reason in targets:
-                    target_unit = index.units[target]
-                    if target_unit.test or target in seen:
-                        continue
-                    edge = {"caller_id": uid, "callee_id": target, "reason": reason,
-                            "call_span": {"path": index.units[uid].source.path,
-                                          "start_byte": call_start, "end_byte": call_end}}
-                    if target not in reached and len(reached) >= max_production_units:
-                        continue
-                    reached.add(target)
-                    production_reasons[target].append({"kind": "test_call_reachability", "test_id": unit.id,
-                                                        "depth": depth + 1, "path": list(path + (edge,)),
-                                                        "resolved": all(e["reason"] in TRUSTED_RESOLUTIONS for e in path + (edge,))})
-                    queue.append((target, depth + 1, path + (edge,)))
+    # Every seed's direct entries compete before deeper expansion. Source
+    # hypotheses remain eligible without exhausting the budget ahead of other
+    # seeds' resolved helpers.
+    from .balanced_reachability import frontend_reachability
+    reachability = frontend_reachability(index, tests, max_depth=max_production_depth,
+                                         max_units=max_production_units)
+    production_reasons = reachability['reasons']
     relevant = sorted(production_reasons, key=lambda uid: (index.units[uid].source.path, index.units[uid].node.start_byte))
     used_function_ids = {u.id for u in tests} | set(relevant)
     used_function_ids.update(t["function_id"] for c in result["calls"] for t in c["targets"])
@@ -1221,7 +1264,8 @@ def extract_frontend(
                        "observations": len(result["observations"]), "calls": len(result["calls"]),
                        "values": len(result["values"]), "comparisons": len(result["comparisons"]),
                        "test_budget_exhausted": available_tests > len(tests),
-                       "production_units": len(relevant), "production_budget_reached": len(reached) >= max_production_units,
+                       "production_units": len(relevant), "production_budget_reached": reachability['stats']['unit_budget_reached'],
+                       "reachability": reachability['stats'],
                        "production_depth": max_production_depth, "parse_errors": index.parse_errors}
     return result
 
@@ -1265,10 +1309,10 @@ def to_emitter_corpus(frontend: dict) -> dict:
     for value in frontend["values"]:
         if value.get("diagnostic"):
             continue
-        direct_ports = [port(p) for p in value["argument_slots"] if calls[p["call_id"]]["role"] == "operation"]
+        direct_ports = [port(p) for p in value["argument_slots"] if is_operation_argument(calls[p['call_id']], p['slot'])]
         record = dict(value)
         record.update({"call_context": min(direct_ports, key=lambda p: p["call_span"]["end_byte"] - p["call_span"]["start_byte"]) if direct_ports else None,
-                       "input_slots": [port(p) for p in value["input_slots"] if calls[p["call_id"]]["role"] == "operation"],
+                       "input_slots": [port(p) for p in value["input_slots"] if is_operation_argument(calls[p['call_id']], p['slot'])],
                        "retrieval_rank": None, "observation_dependency": bool(value["observed_in"]),
                        "dependency_role": "expected_only" if value["oracle_dependency"] else "observed_only" if value["observed_in"] else "neither",
                        "role": "expected" if value["oracle_dependency"] else "test_expression", "context_parent": None})

@@ -41,7 +41,8 @@ def algorithm_files():
         'cells', 'closure', 'identity', 'script_wrappers', 'embedded_relations',
         'structured_ports', 'state_cells', 'atomic_observations', 'scalar_cells',
         'symbolic_strings', 'exception_contexts', 'regex_cells', 'call_contexts',
-        'sequence_cells', 'seed_ranking')]
+        'sequence_cells', 'seed_ranking', 'balanced_reachability', 'resource_roots',
+        'producer_contexts', 'witness_composition')]
     return sorted([*generation, Path(__file__).resolve(),
                    *ROOT.glob('anchor_retrieval/*.py'), ROOT/'generic_composition/corpus.py',
                    ROOT/'generic_composition/emitter.py', ROOT/'generic_composition/engine.py',
@@ -69,6 +70,8 @@ def prepare(args):
     from relational_gap.call_contexts import generate_call_contexts, ContextBudget
     from relational_gap.sequence_cells import generate_sequence_cells, SequenceBudget
     from relational_gap.seed_ranking import rank_seeds
+    from relational_gap.producer_contexts import generate_producer_contexts, ProducerBudget
+    from relational_gap.witness_composition import compose_witnesses, CompositionBudget
     case = next(c for c in json.loads(args.registry.read_text()) if c['id'] == args.case)
     output = args.output
     output.mkdir(parents=True, exist_ok=False)
@@ -117,11 +120,15 @@ def prepare(args):
     regex = generate_regex_cells(corpus, frontend, budget=RegexBudget(max_candidates=args.max_candidates // 4))
     contexts = generate_call_contexts(corpus, frontend, budget=ContextBudget(max_candidates=args.max_candidates // 4))
     sequences = generate_sequence_cells(corpus, frontend, budget=SequenceBudget(max_candidates=args.max_candidates // 4))
+    producers = generate_producer_contexts(corpus, frontend, budget=ProducerBudget(max_candidates=args.max_candidates // 4))
+    compositions = compose_witnesses(corpus, frontend, producers['candidates'] + scalars['candidates'],
+                                     budget=CompositionBudget(max_candidates=args.max_candidates // 4))
     generated['candidates'] = annotate_novelty(corpus, frontend, generated['candidates'])
     generated['candidates'] = merge_candidates(generated['candidates'],
                                               cells['candidates']+sql['candidates']+states['candidates']+
                                               scalars['candidates']+strings['candidates']+exceptions['candidates']+
-                                              regex['candidates']+contexts['candidates']+sequences['candidates'],
+                                              regex['candidates']+contexts['candidates']+sequences['candidates']+
+                                              producers['candidates']+compositions['candidates'],
                                               limit=args.max_candidates)
     raw_candidates = generated['candidates']
     for candidate in raw_candidates:
@@ -149,6 +156,8 @@ def prepare(args):
     generated['counts']['regex_witnesses'] = len(regex['candidates'])
     generated['counts']['call_context_witnesses'] = len(contexts['candidates'])
     generated['counts']['sequence_witnesses'] = len(sequences['candidates'])
+    generated['counts']['producer_witnesses'] = len(producers['candidates'])
+    generated['counts']['composed_witnesses'] = len(compositions['candidates'])
     generated['counts']['atomic'] = atomic['counts']
     # Hash before and after; concurrent development cannot silently change a frozen batch.
     final_hashes = {name: digest(ROOT/name) for name in source_hashes}
@@ -176,6 +185,8 @@ def prepare(args):
                                             'regex': {k:v for k,v in regex.items() if k != 'candidates'},
                                             'call_context': {k:v for k,v in contexts.items() if k != 'candidates'},
                                             'sequence': {k:v for k,v in sequences.items() if k != 'candidates'},
+                                            'producer': {k:v for k,v in producers.items() if k != 'candidates'},
+                                            'composition': {k:v for k,v in compositions.items() if k != 'candidates'},
                                             'atomic': {k:v for k,v in atomic.items() if k != 'candidates'}})
     (output/'issue.md').write_bytes(Path(case['issue']).read_bytes())
     files = ['case.json','selection.json','frontend.json','corpus.json','candidates.json',

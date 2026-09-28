@@ -54,14 +54,24 @@ def _source_editor_paths(code):
             if isinstance(left, str) and isinstance(right, str):
                 return left.rstrip('/')+'/'+right
         return None
-    for statement in tree.body:
-        if isinstance(statement, ast.Assign) and len(statement.targets)==1 and isinstance(statement.targets[0], ast.Name):
-            env[statement.targets[0].id] = path(statement.value)
-        for node in ast.walk(statement):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {'write', 'write_text', 'write_bytes'}:
-                target = path(node.func.value)
-                if target and re.search(r'\.(py|go|tsx?)$', target):
-                    written.add(target)
+    def statements(body):
+        for statement in body:
+            if isinstance(statement, ast.Assign) and len(statement.targets)==1 and isinstance(statement.targets[0], ast.Name):
+                env[statement.targets[0].id] = path(statement.value)
+            if isinstance(statement, ast.With):
+                for item in statement.items:
+                    if isinstance(item.optional_vars, ast.Name):
+                        env[item.optional_vars.id] = path(item.context_expr)
+                statements(statement.body)
+                continue
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue  # A declared helper is not a module-level edit.
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {'write', 'write_text', 'write_bytes'}:
+                    target = path(node.func.value)
+                    if target and re.search(r'\.(py|go|tsx?)$', target):
+                        written.add(target)
+    statements(tree.body)
     return sorted(written)
 
 
@@ -119,15 +129,33 @@ def recover_history(trajectory, language, *, max_bytes=500000, max_versions=256)
             tree = ast.parse(source.code)
         except SyntaxError:
             return
-        for statement in tree.body:
-            try:
-                if isinstance(statement, ast.Assign) and len(statement.targets)==1 and isinstance(statement.targets[0], ast.Name):
-                    env[statement.targets[0].id] = evaluate(statement.value)
-                elif isinstance(statement, ast.Expr):
-                    evaluate(statement.value)
-            except (Unknown, ValueError, TypeError, KeyError):
-                # Unsupported commands remain in raw trajectory; no evaluation.
-                continue
+        def statements(body):
+            for statement in body:
+                assigned = statement.targets[0].id if (isinstance(statement, ast.Assign)
+                    and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name)) else None
+                try:
+                    if assigned is not None:
+                        value = evaluate(statement.value)
+                        env[assigned] = value
+                    elif isinstance(statement, ast.Expr):
+                        evaluate(statement.value)
+                    elif isinstance(statement, ast.With):
+                        handles = []
+                        for item in statement.items:
+                            if not isinstance(item.optional_vars, ast.Name):
+                                raise Unknown('unsupported_file_handle_binding')
+                            handle = evaluate(item.context_expr)
+                            if not isinstance(handle, dict) or 'file' not in handle:
+                                raise Unknown('unsupported_file_context')
+                            handles.append((item.optional_vars.id, handle))
+                        env.update(handles)
+                        statements(statement.body)
+                except (Unknown, ValueError, TypeError, KeyError):
+                    if assigned is not None:
+                        env.pop(assigned, None)
+                    # Unsupported commands remain in raw trajectory; no evaluation.
+                    continue
+        statements(tree.body)
 
     for source in raw:
         identity = re.search(r'step-(.+)-(\d+)-(\d+|c\d+)\.', source.path)

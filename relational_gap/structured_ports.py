@@ -11,6 +11,7 @@ from anchor_retrieval.syntax import Source, child, literal
 from generic_composition.engine import slot_key
 
 from .transforms import _node_for, _position, _root_ports, _same_span
+from .frontend import is_operation_argument
 
 
 def structural_slot_key(port: dict) -> tuple:
@@ -125,9 +126,11 @@ def carrier_ports(source: Source, donor: dict, frontend: dict | None = None, *, 
     if frontend:
         bindings = {b["id"]: b for b in frontend.get("bindings", [])}
         for call in frontend.get("calls", []):
-            if call.get("test_id") != donor.get("test_id") or call.get("role") != "operation":
+            if call.get("test_id") != donor.get("test_id"):
                 continue
             for arg in call.get("arguments", []):
+                if not is_operation_argument(call, arg['slot']):
+                    continue
                 binding = arg.get("binding") or {}
                 origin = bindings.get(binding.get("origin_binding_id"))
                 same_actual = _same_span(arg["span"], root_span)

@@ -19,6 +19,8 @@ from generic_composition.corpus import source_text
 from generic_composition.edits import encode_literal
 from generic_composition.engine import expected_only, stable_id
 from .structured_ports import carrier_ports, structural_slot_key
+from .resource_roots import ResourceRoots
+from .frontend import is_operation_argument
 
 
 @dataclass(frozen=True)
@@ -101,7 +103,8 @@ def _triples(corpus, frontend, budget, skipped):
                for path, metadata in corpus['sources'].items()
                if metadata.get('complete_file', True) and not metadata.get('parse_error')}
     call_map = {_position(call): call for call in frontend.get('calls', ())}
-    direct, successive = defaultdict(list), defaultdict(list)
+    roots = ResourceRoots(frontend, sources)
+    direct, successive, resource = defaultdict(list), defaultdict(list), defaultdict(list)
     seen = set()
     for donor in corpus.get('donors', ()):
         if (donor['test_id'] not in corpus['tests'] or donor['span']['path'] not in sources
@@ -121,7 +124,7 @@ def _triples(corpus, frontend, budget, skipped):
         for port in carrier_ports(sources[donor['span']['path']], donor, frontend):
             call_position = _position(port['call_span'])
             call = call_map.get(call_position)
-            if call is None or call.get('role') != 'operation':
+            if call is None or not is_operation_argument(call, port['argument_slot']):
                 continue
             key = donor['test_id'], _position(donor), structural_slot_key(port), call_position
             if key in seen:
@@ -130,7 +133,20 @@ def _triples(corpus, frontend, budget, skipped):
             item = {'donor': donor, 'port': port, 'call': call}
             path = json.dumps(port.get('structural_path', []), sort_keys=True, ensure_ascii=True)
             direct[donor['test_id'], call_position, path].append(item)
-            successive[donor['test_id'], structural_slot_key(port), _receiver_key(call)].append(item)
+            associations = roots.associations(call)
+            receiver_key = _receiver_key(call)
+            argument_roots = sorted({fact['root_id'] for fact in associations
+                                     if fact['relation'] == 'argument_reference'})
+            if not call.get('receiver') and argument_roots:
+                receiver_key = ('source_argument_roots', tuple(argument_roots))
+            elif not call.get('receiver'):
+                created_roots = sorted({fact['root_id'] for fact in associations
+                                        if fact['relation'] == 'creator_result'})
+                if created_roots:
+                    receiver_key = ('source_created_roots', tuple(created_roots))
+            successive[donor['test_id'], structural_slot_key(port), receiver_key].append(item)
+            for fact in associations:
+                resource[donor['test_id'], fact['root_id'], path].append(dict(item, root_fact=fact))
     parents, triple_seen = defaultdict(list), set()
 
     def add(test_id, items, kind, alignment):
@@ -160,6 +176,40 @@ def _triples(corpus, frontend, budget, skipped):
                 add(test_id, selected, 'successive_source_versions_at_structural_port',
                     {'structural_slot': list(key), 'receiver_alignment': list(receiver),
                      'structural_path': selected[0]['port'].get('structural_path', [])})
+    for (test_id, root_id, path), members in sorted(resource.items(), key=lambda item: repr(item[0])):
+        creators, actions = {}, defaultdict(dict)
+        for item in members:
+            if item['root_fact']['relation'] == 'creator_result':
+                creators.setdefault(_position(item['donor']), item)
+            else:
+                actions[_position(item['call'])].setdefault(_position(item['donor']), item)
+        ordered_actions = [list(actions[key].values()) for key in sorted(actions)]
+        count = 0
+        for creator in creators.values():
+            for first, second in zip(ordered_actions, ordered_actions[1:]):
+                for left in first:
+                    for right in second:
+                        if count >= budget.max_triples:
+                            break
+                        selected = [creator, left, right]
+                        if len({_position(item['call']) for item in selected}) != 3:
+                            continue
+                        add(test_id, selected, 'creator_and_actions_at_source_resource_root',
+                            {'root_binding_id': root_id,
+                             'root_binding_span': creator['root_fact']['root_binding_span'],
+                             'creator_call_span': creator['call']['span'],
+                             'structural_path': json.loads(path),
+                             'source_links': [item['root_fact'] for item in selected],
+                             'binding_status': 'source_local_creator_result_and_reference',
+                             'payload_alignment': 'cross_callee_and_argument_position_hypothesis',
+                             'resource_and_version_semantics': 'unknown_requires_independent_admission'})
+                        count += 1
+                    if count >= budget.max_triples:
+                        break
+                if count >= budget.max_triples:
+                    break
+            if count >= budget.max_triples:
+                break
     tests = corpus['tests']
     ordered = sorted(parents, key=lambda key: (tests[key].get('retrieval_rank') or 10**9, _position(tests[key])))
     for index, triple in enumerate(_round_robin(parents[key] for key in ordered)):

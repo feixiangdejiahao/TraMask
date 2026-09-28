@@ -20,6 +20,7 @@ from experimental.semantic_transport.oracle import (
     OracleError, Unknown, decode_value, emit_literal, encode_value,
     evaluate_expression, parse_source_literal,
 )
+from .source_expected_values import resolve_expected_constant
 
 
 def source_text(frontend: dict, source_span: dict) -> str:
@@ -160,18 +161,24 @@ def _holes(corpus, frontend, candidate, source_cache, budget):
         if known:
             specs.append((original_span, original, value, "literal", None))
         else:
+            recovered = resolve_expected_constant(
+                corpus, candidate['base_test_id'], original_span, edits=candidate.get('edits', ()),
+                cache=source_cache.setdefault(('source_expected_constant_cache',), {}))
             path = original_span["path"]
             source = source_cache.setdefault(path, Source(path, corpus["sources"][path]["code"], language))
-            try:
-                template = extract_template(source, original_span, min_holes=1, max_holes=budget.expected_holes)
-                for item in template["holes"]:
-                    position = dict(original_span, start_byte=original_span["start_byte"] + item["start_byte"],
-                                    end_byte=original_span["start_byte"] + item["end_byte"])
-                    specs.append((position, source_text(corpus, position), item["value"], "source_template_leaf", item.get("type_hint")))
-            except OracleError:
-                # An unknown source identifier can be replaced by a closed
-                # contract-derived literal, but contributes no pre[] value.
-                specs.append((original_span, original, None, "unknown_source_expected", None))
+            if recovered['known']:
+                specs.append((original_span, original, recovered['value'], 'source_local_constant', None))
+            else:
+                try:
+                    template = extract_template(source, original_span, min_holes=1, max_holes=budget.expected_holes)
+                    for item in template["holes"]:
+                        position = dict(original_span, start_byte=original_span["start_byte"] + item["start_byte"],
+                                        end_byte=original_span["start_byte"] + item["end_byte"])
+                        specs.append((position, source_text(corpus, position), item["value"], "source_template_leaf", item.get("type_hint")))
+                except OracleError:
+                    # An unknown source identifier can be replaced by a closed
+                    # contract-derived literal, but contributes no pre[] value.
+                    specs.append((original_span, original, None, "unknown_source_expected", None))
         for position, text, value, kind, type_hint in specs:
             if len(holes) >= budget.expected_holes:
                 unknowns.append({"observation_id": observation["id"], "reason": "expected_hole_budget"})

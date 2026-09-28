@@ -215,12 +215,21 @@ def atomize_candidates(corpus: dict, frontend: dict, candidates: list[dict], bud
                 if any(not _inside(e["span"], test["span"]) or source_text(corpus, e["span"]) != e["before"]
                        for e in candidate.get("edits", [])):
                     raise ValueError("candidate_input_not_source_owned")
-                neutralized, consumed, other_ids, replacement_guards = [], [], [], []
+                neutralized, consumed, other_ids, replacement_guards, normal_result_guards = [], [], [], [], []
                 for observation in owned:
                     if observation["id"] == q["id"]:
                         continue
                     old_position = observation.get("assertion_span") or observation["span"]
                     replacements = candidate.get("provenance", {}).get("replaced_normal_observation_ids", [])
+                    normal_guards = candidate.get('provenance', {}).get('normal_result_guard_ids', [])
+                    if observation['id'] in normal_guards and any(
+                            e.get('role') == 'source_normal_result_guard' and e['span'] == old_position
+                            for e in candidate.get('edits', [])):
+                        # The original result does not exist on the expected
+                        # exception path. Its source check remains conditional
+                        # on completion rather than evaluating an unbound name.
+                        normal_result_guards.append(observation['id'])
+                        continue
                     if observation["id"] in replacements and any(
                             e.get("role") == "source_exception_context" and e["span"] == old_position
                             for e in candidate.get("edits", [])):
@@ -251,6 +260,7 @@ def atomize_candidates(corpus: dict, frontend: dict, candidates: list[dict], bud
                 atomic["atomic_observation"] = {"id": q["id"], "assertion_span": q.get("assertion_span") or q["span"],
                                                  "selection": selection, "neutralized_observation_ids": other_ids,
                                                  "source_exception_guard_ids": replacement_guards,
+                                                 "source_normal_result_guard_ids": normal_result_guards,
                                                  "input_edits": copy.deepcopy(candidate.get("edits", [])),
                                                  "status": "single_static_check_operational_reachability_unknown",
                                                  "remaining_risks": ["later_actions_may_raise_or_timeout", "framework_failure_control_intentionally_removed"]}

@@ -630,3 +630,175 @@ def test_generator_coordinate_requires_unambiguous_plain_test_local_binding(chan
         code = code[:start] + '\n'.join(line[4:] for line in code[start:end].split('\n')) + code[end:]
     corpus, frontend = corpus_for(code)
     assert not candidates_for(corpus, frontend, 'test_state')
+
+
+ASSIGNED_SUBJECT = '''import pytest
+events = []
+class Envelope:
+    def __init__(self, items):
+        self.items = items
+        events.append('factory')
+    def __iter__(self): return iter(self.items)
+class Resource:
+    def __init__(self, content=None, stream=None):
+        self.source = iter((content,)) if stream is None else iter(stream)
+        self.closed = False
+    def iterate(self):
+        try:
+            for chunk in self.source:
+                events.append(('chunk', chunk))
+                if chunk.startswith(b'bad'): raise ValueError('invalid')
+                yield chunk
+        finally:
+            if hasattr(self.source, 'close'): self.source.close()
+            self.closed = True
+
+def test_bad():
+    source = Resource(content=b'bad!xxxx')
+    with pytest.raises(ValueError, match='invalid'):
+        list(source.iterate())
+
+'''
+
+
+CAPTURED_RECIPIENT = '''def test_state():
+    payload = b'abcdwxyz'
+    def produce():
+        events.append('entered')
+        try:
+            for offset in range(0, len(payload), 4):
+                yield payload[offset:offset+4]
+        finally:
+            events.append('producer_closed')
+    receiver = Resource(stream=Envelope(produce()))
+    assert events == ['factory']
+    parts = list(receiver.iterate())
+    assert len(parts) == 2
+    assert receiver.closed is True
+    assert events[-1] == 'producer_closed'
+'''
+
+
+def test_assignment_keeps_normal_result_check_behind_completion_flag_and_retains_resource_q():
+    corpus, frontend = corpus_for(ITERATOR_SUBJECT + ITERATOR_DONOR + '''def test_state():
+    receiver = Reader(b'good')
+    parts = list(receiver.iterate())
+    assert len(parts) == 1
+    assert receiver.closed is True
+''')
+    candidate, = candidates_for(corpus, frontend, 'test_state')
+    assert candidate['provenance']['normal_result_guard']['binding'] == 'parts'
+    flag = candidate['provenance']['normal_result_guard']['completion_flag']
+    guard = next(e for e in candidate['edits'] if e.get('role') == 'source_exception_context')
+    assert flag + ' = False' in guard['after'] and flag + ' = True' in guard['after']
+    assert 'parts = list(receiver.iterate())' in guard['after']
+    check = next(e for e in candidate['edits'] if e.get('role') == 'source_normal_result_guard')
+    assert check['before'] == 'assert len(parts) == 1'
+    assert check['after'].startswith('if ' + flag + ':')
+    namespace, test_name, output = namespace_for(corpus, candidate)
+    for control in output['controls']:
+        namespace[control['test_name']]()
+    namespace[test_name]()
+
+
+@pytest.mark.parametrize('broken', [False, True])
+def test_nested_factory_capture_slice_preserves_source_normal_control_and_detects_exception_cleanup(broken):
+    from relational_gap.atomic_observations import atomize_candidates
+    subject = ASSIGNED_SUBJECT
+    if broken:
+        subject = subject.replace('''        finally:
+            if hasattr(self.source, 'close'): self.source.close()
+            self.closed = True''', '''        except ValueError:
+            raise
+        else:
+            if hasattr(self.source, 'close'): self.source.close()
+            self.closed = True''')
+    corpus, frontend = corpus_for(subject + CAPTURED_RECIPIENT)
+    candidate, = candidates_for(corpus, frontend, 'test_state')
+    assert candidate['relation']['input_carrier'] == 'local_generator_capture'
+    assert candidate['relation']['leaf_alignment_status'] == 'unresolved_different_constructor_arguments'
+    assert candidate['relation']['argument_binding']['source_keyword'] == 'content'
+    assert candidate['relation']['argument_binding']['target_keyword'] == 'stream'
+    assert candidate['edits'][0]['before'] == "b'abcdwxyz'"
+    assert candidate['edits'][0]['after'] == "b'bad!xxxx'"
+    coordinate = candidate['provenance']['target_input_coordinate']
+    assert len(coordinate['factory_path']) == 1
+    assert coordinate['capture_binding_path']
+    assert 'payload[offset:offset+4]' not in [edit['before'] for edit in candidate['edits']]
+    atomic = atomize_candidates(corpus, frontend, [candidate])
+    assert not atomic['unknowns'], atomic['unknowns']
+    atomic_candidate, = atomic['candidates']
+    assert atomic_candidate['atomic_observation']['source_normal_result_guard_ids']
+    namespace, test_name, output = namespace_for(corpus, atomic_candidate)
+    for control in output['controls']:
+        namespace['events'].clear()
+        namespace[control['test_name']]()
+        if control['base_test_id'] == candidate['base_test_id']:
+            assert namespace['events'].count('factory') == 1
+            assert namespace['events'][-1] == 'producer_closed'
+    namespace['events'].clear()
+    if broken:
+        with pytest.raises(AssertionError):
+            namespace[test_name]()
+    else:
+        namespace[test_name]()
+        assert namespace['events'] == ['factory', 'entered', ('chunk', b'bad!'), 'producer_closed']
+    rendered = output['files']['test_exceptions.py']
+    assert 'Resource(stream=Envelope(produce()))' in rendered
+    assert 'for offset in range(0, len(payload), 4):' in rendered
+    assert 'yield payload[offset:offset+4]' in rendered
+    json.dumps(atomic_candidate)
+
+
+@pytest.mark.parametrize('dependent', [
+    'use(parts)', 'copy = parts', 'assert callback(parts)', 'assert parts[0] == 1',
+])
+def test_assignment_rejects_result_dependent_actions_aliases_and_unknown_element_effects(dependent):
+    code = ITERATOR_SUBJECT + ITERATOR_DONOR + f'''def test_state():
+    receiver = Reader(b'good')
+    parts = list(receiver.iterate())
+    {dependent}
+    assert receiver.closed is True
+'''
+    corpus, frontend = corpus_for(code)
+    assert not candidates_for(corpus, frontend, 'test_state')
+
+
+def test_generator_capture_reassignment_before_consumption_is_not_fixed_to_creation_value():
+    code = ASSIGNED_SUBJECT + CAPTURED_RECIPIENT.replace("    parts = list(receiver.iterate())", "    payload = b'laterxxx'\n    parts = list(receiver.iterate())")
+    corpus, frontend = corpus_for(code)
+    result = generate_exception_contexts(corpus, frontend)
+    assert not result['candidates']
+    assert result['skipped']['generator_capture_changes_before_consumption']
+
+
+def test_generator_capture_mutated_by_producer_is_not_assumed_closed():
+    code = ASSIGNED_SUBJECT + CAPTURED_RECIPIENT.replace("        events.append('entered')", "        nonlocal payload\n        payload = b'laterxxx'\n        events.append('entered')")
+    corpus, frontend = corpus_for(code)
+    assert not candidates_for(corpus, frontend, 'test_state')
+
+
+def test_assignment_result_check_outside_original_with_scope_is_guarded():
+    corpus, frontend = corpus_for(ITERATOR_SUBJECT + 'from contextlib import nullcontext\n' + ITERATOR_DONOR + '''def test_state():
+    receiver = Reader(b'good')
+    with nullcontext():
+        parts = list(receiver.iterate())
+    assert len(parts) == 1
+    assert receiver.closed is True
+''')
+    candidate, = candidates_for(corpus, frontend, 'test_state')
+    assert candidate['provenance']['normal_result_guard_ids']
+    namespace, test_name, _ = namespace_for(corpus, candidate)
+    namespace[test_name]()
+
+
+def test_conditional_result_rebinding_does_not_leave_unguarded_unbound_checks():
+    corpus, frontend = corpus_for(ITERATOR_SUBJECT + ITERATOR_DONOR + '''def test_state():
+    receiver = Reader(b'good')
+    parts = list(receiver.iterate())
+    if condition:
+        parts = []
+    assert len(parts) == 1
+    assert receiver.closed is True
+''')
+    assert not candidates_for(corpus, frontend, 'test_state')

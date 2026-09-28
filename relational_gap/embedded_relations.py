@@ -752,7 +752,15 @@ def generate_embedded_relations(corpus: dict, frontend: dict | None = None, *,
         program = parse_sql_program(value, max_tokens=budget.max_tokens)
         if program is None:
             if not donor.get('oracle_dependency') and not expected_only(donor):
-                raw_fragments.append((dict(donor, aligned_ports=ports), value))
+                # Apply the fragment budget to possible predicate syntax, not
+                # every unrelated source string that precedes it in a test.
+                # This recognizes syntax only; embedding/table evidence still
+                # has to be recovered by _add_predicate_fragments.
+                tokens = _tokens(value, budget.max_tokens)
+                if tokens and _neutral_predicate(tokens):
+                    raw_fragments.append((dict(donor, aligned_ports=ports), value))
+                else:
+                    skipped['non_predicate_source_string'] += 1
             continue
         if program.kind != 'select' and (donor.get('role') == 'expected' or expected_only(donor) or donor.get('oracle_dependency')):
             continue

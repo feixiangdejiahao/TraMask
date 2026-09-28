@@ -506,6 +506,109 @@ def test_value():
 ''')
     assert call_named(data, "format_message")["role"] == "diagnostic"
     assert call_named(data, "pytest.fail")["role"] == "diagnostic"
+
+
+def test_go_stateful_assertion_helper_exposes_only_source_operation_arguments():
+    from relational_gap.structured_ports import carrier_ports
+    code = '''package demo
+import "testing"
+type Store struct { text string }
+func write(t *testing.T, s *Store, values map[string]string, expected string) {
+    if len(values)==0 { t.Fatal("empty") }
+    next := values["body"]
+    s.text = next
+    if s.text != expected { t.Fatal("mismatch") }
+}
+func check(t *testing.T, s *Store, expected string) {
+    if s.text != expected { t.Fatal("wrong") }
+}
+func TestValue(t *testing.T) {
+    s := &Store{}
+    write(t,s,map[string]string{"body":"alpha\\nLEFT\\ngamma\\n"},"checked")
+    check(t,s,"expected only")
+    if s.text!="alpha\\nLEFT\\ngamma\\n" { t.Fatal("read mismatch") }
+}
+'''
+    source = Source('value_test.go', code, 'go')
+    data = extract_frontend([source])
+    action = call_named(data, 'write')
+    assert action['role'] == 'assertion'
+    assert action['operation_eligible'] is True
+    assert action['operation_argument_slots'] == [1, 2]
+    assert action['operation_evidence'][0]['kind'] == 'source_parameter_access_write'
+    assert not call_named(data, 'check').get('operation_eligible')
+    assert any(q['predicate'] == 'assertion_helper' and q['observed']['text'].startswith('write(')
+               for q in data['observations'])
+    corpus = to_emitter_corpus(data)
+    leaf = next(d for d in corpus['donors'] if d['text'] == '"alpha\\nLEFT\\ngamma\\n"' and not d['oracle_dependency'])
+    assert leaf['call_context']['callee'] == 'write'
+    assert leaf['call_context']['argument_slot'] == 2
+    ports = carrier_ports(source, leaf, data)
+    assert ports and ports[0]['structural_path'] == [{'kind': 'key', 'value': 'body'}]
+    assert not leaf['oracle_dependency'] and leaf['role'] != 'expected'
+    for text in ['"checked"', '"expected only"']:
+        donor = next(d for d in corpus['donors'] if d['text'] == text)
+        assert donor['call_context'] is None and not donor['input_slots']
+
+
+def test_go_helper_standalone_source_operation_has_distinct_unknown_effect_evidence():
+    data = frontend('''package demo
+import "testing"
+type Store struct { text string }
+func (s *Store) Set(value string) { s.text = value }
+func write(t *testing.T, s *Store, value string) {
+    if value == "" { t.Fatal("empty") }
+    s.Set(value)
+}
+func TestValue(t *testing.T) {
+    s := &Store{}
+    write(t,s,"payload")
+    if s.text!="payload" { t.Fatal("wrong") }
+}
+''', language='go', path='value_test.go')
+    call = call_named(data, 'write')
+    assert call['operation_eligible']
+    assert call['operation_argument_slots'] == [1, 2]
+    assert {fact['kind'] for fact in call['operation_evidence']} == {'source_standalone_operation'}
+    assert all(fact['effect_status'] == 'unknown_source_operation_only' for fact in call['operation_evidence'])
+
+
+def test_go_framework_assertions_and_diagnostics_do_not_gain_operation_arguments():
+    data = frontend('''package demo
+import "testing"
+import "github.com/stretchr/testify/assert"
+func TestValue(t *testing.T) {
+    actual := "same"
+    assert.Equal(t,"expected",actual,"assertion message")
+    t.Fatal("failure message")
+}
+''', language='go', path='value_test.go')
+    assert not call_named(data, 'assert.Equal').get('operation_eligible')
+    assert not call_named(data, 't.Fatal').get('operation_eligible')
+    corpus = to_emitter_corpus(data)
+    for donor in corpus['donors']:
+        assert donor['call_context'] is None and not donor['input_slots']
+    assert not any('failure message' in donor['text'] for donor in corpus['donors'])
+
+
+def test_python_stateful_helper_retains_assertion_role_and_excludes_expected_argument():
+    data = frontend('''class Box: pass
+def update(box, value, expected):
+    assert value
+    box.value = value
+    assert box.value == expected
+def test_value():
+    box = Box()
+    update(box, 'payload', 'checked')
+    assert box.value == 'payload'
+''')
+    action = call_named(data, 'update')
+    assert action['role'] == 'assertion'
+    assert action['operation_argument_slots'] == [0, 1]
+    corpus = to_emitter_corpus(data)
+    payload = next(d for d in corpus['donors'] if d['text'] == "'payload'" and not d['oracle_dependency'])
+    assert payload['call_context']['callee'] == 'update'
+    assert next(d for d in corpus['donors'] if d['text'] == "'checked'")['call_context'] is None
     corpus = to_emitter_corpus(data)
     assert not any("not an input" in donor["text"] or "failure message" in donor["text"] for donor in corpus["donors"])
 
