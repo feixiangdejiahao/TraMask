@@ -463,6 +463,10 @@ class Flow:
             binary = method in {'Equal', 'NotEqual', 'Same', 'NotSame', 'Contains', 'NotContains', 'Len', 'Greater', 'Less'}
             actual = args[2] if binary and len(args) >= 3 and method not in {'Contains', 'NotContains', 'Len'} else args[1]
             expected = self.source.text(args[1] if actual != args[1] else args[2]) if len(args) >= 3 else ''
+            if method in {'NoError', 'Error', 'Nil', 'NotNil', 'Empty', 'NotEmpty', 'True', 'False'}:
+                # Unary predicates encode the expectation in the method name.
+                # Additional arguments are diagnostics, not expected values.
+                expected = ''
             self._assert(node, actual, expected, method, method in {'NoError', 'Error', 'NotNil', 'Nil'})
             return True
         if self.source.language == 'typescript' and fn is not None:

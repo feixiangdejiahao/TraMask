@@ -77,6 +77,9 @@ def _roots(flow, expression):
 
 
 def _expected_roots(flow, observation, inventory, bindings):
+    slot = inventory.get("slot") or {}
+    if slot.get("kind") == "go_predicate":
+        return [], "assertion_predicate_has_no_expected_input_reads"
     expression = observation.get("expected") or {}
     roots = _roots(flow, expression)
     if roots:
@@ -85,7 +88,6 @@ def _expected_roots(flow, observation, inventory, bindings):
     # Literal syntax independently proves that expected has no input reads.
     if expression.get("literal_known"):
         return [], "closed_literal_no_input_reads"
-    slot = inventory.get("slot") or {}
     if slot.get("retained_wrapper"):
         try:
             literal(slot["expected"])
@@ -250,12 +252,12 @@ def _candidate_evidence(corpus, frontend_rows, candidate, flow, unavailable):
                 "observation_id": observation["id"], "edit_index": edit_index,
                 "port_id": _sha([base, port]), "assertion_span": extent,
                 "actual_span": observation.get("observed", {}).get("span"),
-                "expected_span": observation.get("expected", {}).get("span"),
+                "expected_span": (observation.get("expected") or {}).get("span"),
                 "actual_root_ids": actual_roots, "expected_root_ids": expected_roots,
                 "expected_dependency_basis": expected_basis,
                 "expected_value_slice_node_ids": sorted(expected_slice),
                 "observed": observation.get("observed", {}).get("text"),
-                "expected": observation.get("expected", {}).get("text"),
+                "expected": (observation.get("expected") or {}).get("text"),
                 "expected_status": "unchanged_expression_without_same_edit_dependency",
                 "path": [_path_node(flow, n) for n in path],
                 "edge_kinds": [flow.edge_kinds.get((right, left), "unknown")

@@ -38,7 +38,9 @@ New identity checks may use singleton literals (None/True/False) or an unchanged
 existing object reference; non-singleton literal identity is unsupported.
 New expected values must be closed literals/containers. An immutable expected
 expression must stay unchanged. An existing Go scalar wrapper is retained by
-the program: supply only its inner literal. Do not weaken a check to force pass
+the program: supply only its inner literal. For a Go predicate slot, expected
+instead names one of its listed allowed_predicates; all arguments stay fixed.
+Do not weaken a check to force pass
 or failure. Change all affected expectations consistently, keep the rest explicit.
 Format: {"decisions":[{"id":"A0","status":"adapt","expected":"2"},
 {"id":"A1","status":"preserve"}]}. If the whole candidate is uncertain,
@@ -92,6 +94,12 @@ def expected_slot(code, observed, language):
         prefix = 'package guard\nfunc check(){\n' if language == 'go' else ''
         suffix = '\n}' if language == 'go' else ''
         source = Source('assertion', prefix+code+suffix, language)
+        if language == 'go' and (predicate := guard._go_predicate(source)) is not None:
+            _, method, _, pair = predicate
+            offset = len(prefix.encode())
+            return dict(kind='go_predicate', expected=source.text(method), expected_mutable=True,
+                start_byte=method.start_byte-offset, end_byte=method.end_byte-offset,
+                allowed_predicates=list(pair), allowed_comparisons=[])
         if language == 'typescript':
             _, _, expected = guard._ts_parts(source)
             mutable = expected.type == 'identifier' or guard._closed_ts(source, expected)
@@ -291,6 +299,8 @@ def _build(corpus, frontend, candidate, holes, issue, max_bytes):
         editable_assertions=[dict(id=hid, code=hole['code'], observed=hole['observed'],
             expected=hole['slot']['expected'], expected_mutable=hole['slot']['expected_mutable'],
             allowed_comparisons=hole['slot']['allowed_comparisons'],
+            **({'allowed_predicates': hole['slot']['allowed_predicates']}
+               if 'allowed_predicates' in hole['slot'] else {}),
             retained_wrapper=hole['slot'].get('retained_wrapper')) for hid, hole in editable.items()],
         readonly_assertions=[dict(id=hid, code=hole['code'], observed=hole['observed'],
             reason=hole.get('reason', 'unsupported_by_existing_guard')) for hid, hole in holes.items() if hid not in editable])
@@ -368,6 +378,8 @@ def render_expected(hole, slot, decision, language):
     else:
         if 'comparison' in decision:
             raise ValueError('Comparison is frozen')
+        if slot['kind'] == 'go_predicate' and expected not in slot['allowed_predicates']:
+            raise ValueError('Unsupported assertion predicate')
         old = hole['code'].encode()
         code = (old[:slot['start_byte']] + expected.encode() + old[slot['end_byte']:]).decode()
     if not guard.valid_assertion(code, hole['code'], hole['observed'], language):

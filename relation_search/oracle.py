@@ -34,6 +34,9 @@ and import_bindings before deciding; synthesized import aliases have the meaning
 of their recorded modules/symbols. Fix all affected expectations together. If a
 Go assertion is an if-comparison, preserve its observed operand, comparison
 operator and complete failure body; change only the expected operand. If a
+Go require/assert unary check needs the opposite expectation, you may switch
+within NoError/Error, Nil/NotNil, Empty/NotEmpty or True/False, keeping its
+receiver and every argument (including diagnostics) unchanged. If a
 normal-result assertion is inappropriate after an operation that should fail,
 you may change that offered assertion to the appropriate exception/error or
 rollback check only if its actual expression is still available at that point.

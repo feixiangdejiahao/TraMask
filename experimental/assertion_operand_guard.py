@@ -2,8 +2,9 @@
 
 Supported forms are Python single comparisons, TS expect(...).toBe/toEqual/
 toStrictEqual (optionally .not), Go comparison guards, and require/assert.Equal
-or NotEqual calls. Unsupported forms return False. TS/Go assertion APIs and
-matchers are frozen. Python may change a comparison within its existing family;
+or NotEqual calls, and standard require/assert unary predicate pairs. Unsupported
+forms return False. TS matchers and Go equality APIs are frozen; a Go unary
+predicate may change only within its complementary pair. Python may change a comparison within its existing family;
 equality and identity belong to one family so a None check can become a value
 check. A new identity check cannot use a non-singleton literal as its expected
 object. These syntax rules do not establish the intended comparison semantics.
@@ -32,6 +33,8 @@ _PY_COMPARISONS = ({ast.Eq, ast.NotEq, ast.Is, ast.IsNot},
                    {ast.Lt, ast.LtE, ast.Gt, ast.GtE}, {ast.In, ast.NotIn})
 _TS_MATCHERS = {"toBe", "toEqual", "toStrictEqual"}
 _GO_COMPARISONS = {"==", "!=", "<", "<=", ">", ">="}
+_GO_PREDICATE_PAIRS = (("NoError", "Error"), ("Nil", "NotNil"),
+                       ("Empty", "NotEmpty"), ("True", "False"))
 _GO_SCALAR_TYPES = {"int", "int8", "int16", "int32", "int64", "uint", "uint8",
                     "uint16", "uint32", "uint64", "uintptr", "float32", "float64",
                     "complex64", "complex128", "byte", "rune", "string"}
@@ -224,6 +227,26 @@ def _go_parts(source):
     return statement, (arguments[2],), arguments[1]
 
 
+def _go_predicate(source):
+    """A standard unary assertion; the predicate name is the only editable part.
+
+    This is syntax admission, not library name resolution or a semantic proof.
+    Keep receiver, t, observed argument and every diagnostic argument unchanged.
+    """
+    statement = _single(source)
+    if statement.type != "expression_statement" or len(_nodes(statement)) != 1:
+        return None
+    function, arguments = _call(_nodes(statement)[0])
+    if (function.type != "selector_expression"
+            or source.text(child(function, "operand")) not in {"require", "assert"}
+            or len(arguments) < 2):
+        return None
+    field = child(function, "field")
+    name = source.text(field)
+    pair = next((pair for pair in _GO_PREDICATE_PAIRS if name in pair), None)
+    return (statement, field, arguments[1], pair) if pair else None
+
+
 def _closed_go(source, node):
     if node.type in {"int_literal", "float_literal", "imaginary_literal", "rune_literal",
                      "interpreted_string_literal", "raw_string_literal", "true", "false", "nil"}:
@@ -249,6 +272,16 @@ def _trees(code, old, observed, language):
     wrap = (lambda text: text) if language == "typescript" else (lambda text: "package guard\nfunc check(){\n" + text + "\n}")
     before, after = (Source("assertion", wrap(text), language) for text in (old, code))
     target = _expression(observed, language)
+    if language == "go":
+        old_predicate, new_predicate = _go_predicate(before), _go_predicate(after)
+        if old_predicate is not None or new_predicate is not None:
+            if old_predicate is None or new_predicate is None:
+                return False
+            old_node, old_method, old_actual, old_pair = old_predicate
+            new_node, new_method, new_actual, new_pair = new_predicate
+            return (old_pair == new_pair
+                    and _shape(before, old_actual) == _shape(after, new_actual) == target
+                    and _shape(before, old_node, old_method) == _shape(after, new_node, new_method))
     if language == "typescript":
         old_node, old_actual, old_expected = _ts_parts(before)
         new_node, new_actual, new_expected = _ts_parts(after)
