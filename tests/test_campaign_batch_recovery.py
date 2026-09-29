@@ -30,8 +30,6 @@ def prepared(tmp_path):
 def test_bounded_split_preserves_candidates_and_counts_actual_calls(tmp_path, monkeypatch, parent_status):
     source, args = prepared(tmp_path)
     calls = []
-    monkeypatch.setattr('relation_search.semantic_selection.select',
-                        lambda corpus, candidates, budget: {'selected': candidates})
 
     def complete(args):
         request = read(args.input)
@@ -74,4 +72,3 @@ def test_bounded_split_preserves_candidates_and_counts_actual_calls(tmp_path, mo
     before = len(calls)
     assert semantic_batch(source, output, args, []) == result
     assert len(calls) == before, 'A completed recovery must not make another provider call'
-

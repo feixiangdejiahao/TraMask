@@ -15,8 +15,6 @@ from test_campaign_batch_recovery import prepared
 def test_complete_records_invalid_schema_without_split_or_losing_candidates(tmp_path, monkeypatch, payload):
     source, args = prepared(tmp_path)
     calls = []
-    monkeypatch.setattr('relation_search.semantic_selection.select',
-                        lambda corpus, candidates, budget: {'selected': candidates})
 
     def dispatch(request, output, *, root):
         calls.append(request)

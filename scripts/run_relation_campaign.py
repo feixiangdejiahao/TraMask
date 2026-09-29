@@ -15,6 +15,7 @@ from relation_search.checkpoint import digest, read, write, start
 from scripts.run_relation_search import algorithm_files, prepare, feedback
 from scripts.execute_relation_search import emit_batch, run
 from experimental.oracle_batch_recovery import POLICY as RECOVERY_POLICY, plan_recovery
+from relation_search.semantic_frontier import POLICY as SEMANTIC_FRONTIER_POLICY
 
 
 def code_identity():
@@ -30,7 +31,7 @@ def preserve_configuration(path, value):
     write(path, value)
 
 
-def semantic_batch(prepared, output, args, previous_selected):
+def semantic_batch(prepared, output, args, previous_selected, previous_semantic=None):
     from relation_search.semantic_cache import apply_cache
     candidates = read(prepared/'candidates.json')['candidates']
     corpus = read(prepared/'corpus.json')
@@ -39,6 +40,8 @@ def semantic_batch(prepared, output, args, previous_selected):
                    code_sha256=code_identity(), budget=args.semantic_budget,
                    per_request=args.per_request, model_workers=args.model_workers,
                    batch_recovery=RECOVERY_POLICY,
+                   semantic_frontier_policy=SEMANTIC_FRONTIER_POLICY,
+                   previous_semantic_sha256=digest(previous_semantic/'semantic_frontier.json') if previous_semantic else None,
                    cache_sha256=digest(args.oracle_cache) if args.oracle_cache else None,
                    previously_selected=sorted(previous_selected))
     start(output, request)
@@ -49,18 +52,24 @@ def semantic_batch(prepared, output, args, previous_selected):
             if digest(output/name) != checksum:
                 raise ValueError('Frozen semantic artifact changed')
         return record
-    selected_ids, calls, offered_ids, recovery_calls = [], 0, [], 0
+    selected_ids, calls, offered_ids, recovery_calls, pending_count = [], 0, [], 0, 0
     if args.oracle_mode == 'replay':
         outcome = apply_cache(corpus, candidates, read(args.oracle_cache), (prepared/'issue.md').read_text())
         offered_ids = [row['id'] for row in candidates]
         write(output/'semantic_replay.json', outcome)
         revised = outcome['candidates']
     elif args.oracle_mode == 'fresh':
-        from relation_search.semantic_selection import select
+        from relation_search.semantic_frontier import advance
         from relation_search.oracle import prepare_requests
         from scripts.relation_search_semantics import complete
-        eligible = [row for row in candidates if row['id'] not in previous_selected]
-        selection = select(corpus, eligible, budget=args.semantic_budget)
+        prior = read(previous_semantic/'semantic_frontier.json') if previous_semantic else {}
+        identity = dict(corpus_sha256=digest(prepared/'corpus.json'), issue_sha256=digest(prepared/'issue.md'))
+        if prior and prior.get('source_identity') != identity:
+            raise ValueError('Semantic backlog belongs to different source or issue')
+        queued = advance(corpus, candidates, prior, budget=args.semantic_budget, selected_ids=previous_selected)
+        selection = queued['selection']
+        write(output/'semantic_frontier.json', dict(**queued['frontier'], source_identity=identity))
+        pending_count = selection['pending_count']
         write(output/'semantic_selection.json', selection)
         selected = selection['selected']
         selected_ids = [row['id'] for row in selected]
@@ -137,6 +146,7 @@ def semantic_batch(prepared, output, args, previous_selected):
                   revised_count=len(revised)-len(candidates), selected_ids=selected_ids,
                   offered_ids=offered_ids, distinct_offered_candidates=len(set(offered_ids)),
                   recovery_calls=recovery_calls, batch_recovery_policy=RECOVERY_POLICY,
+                  pending_semantic_count=pending_count, semantic_frontier_policy=SEMANTIC_FRONTIER_POLICY,
                   provider_calls=calls, previous_selected=sorted(set(previous_selected)|set(selected_ids)))
     write(done, record)
     write(output/'prepare.json', dict(status='prepared', case=read(prepared/'case.json')['id'],
@@ -157,6 +167,7 @@ def campaign(args):
         oracle_mode=args.oracle_mode, semantic_budget=args.semantic_budget,
         per_request=args.per_request, model_workers=args.model_workers,
         batch_recovery=RECOVERY_POLICY,
+        semantic_frontier_policy=SEMANTIC_FRONTIER_POLICY,
         oracle_cache_sha256=digest(args.oracle_cache) if args.oracle_cache else None,
         source_corpus_sha256={case: digest(args.source/case/'corpus.json') for case in cases},
         algorithm_sha256=code_identity())
@@ -172,7 +183,7 @@ def campaign(args):
     preserve_configuration(args.output/'configuration.json', configuration)
     records = []
     for case in cases:
-        previous, selected, rounds = None, [], []
+        previous, previous_semantic, selected, rounds = None, None, [], []
         stopped_reason, exhausted_prepare = 'round_budget', None
         case_root = args.output/case
         case_configuration = {**configuration, 'source': str((args.source/case).resolve()), 'case': case}
@@ -185,11 +196,15 @@ def campaign(args):
                 strategy=args.strategy, limit=args.limit, pool=args.pool, max_edits=args.max_edits,
                 include_baseline=args.include_baseline, representations_only=False,
                 campaign_configuration=args.output/'configuration.json'))
-            if not preparation['selected']:
+            pending_semantics = (args.oracle_mode == 'fresh' and previous_semantic is not None
+                                 and read(previous_semantic/'semantic_frontier.json')['pending_ids'])
+            if not preparation['selected'] and not pending_semantics:
                 stopped_reason = 'exhausted'
                 exhausted_prepare = str((folder/'prepared/prepare.json').resolve())
                 break
-            semantic = semantic_batch(folder/'prepared', folder/'semantic', args, selected)
+            semantic = semantic_batch(folder/'prepared', folder/'semantic', args, selected,
+                                      previous_semantic if args.oracle_mode == 'fresh' else None)
+            previous_semantic = folder/'semantic'
             selected = semantic['previous_selected']
             emission = emit_batch(SimpleNamespace(input=folder/'semantic', output=folder/'emitted',
                   group_size=args.group_size, timeout=args.timeout,

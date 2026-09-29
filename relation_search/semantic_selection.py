@@ -228,11 +228,15 @@ def select(corpus, candidates, budget=16):
         shape, status = _shape(corpus, candidate, source_cache)
         family = candidate.get("operator", candidate.get("kind", "unspecified"))
         seed = candidate.get("base_test_id", "")
+        retrieval_rank = candidate.get("source_retrieval_rank")
+        if retrieval_rank is None:
+            retrieval_rank = corpus.get("tests", {}).get(seed, {}).get("retrieval_rank")
+        if retrieval_rank is None:
+            retrieval_rank = 100000
         record = {"id": candidate["id"], "family": family, "base_test_id": seed,
                   "shape_id": _sha(shape), "shape": shape, "normalization_status": status,
                   "edit_count": len(candidate.get("edits", [])),
-                  "source_retrieval_rank": candidate.get("source_retrieval_rank",
-                      corpus.get("tests", {}).get(seed, {}).get("retrieval_rank", 100000)),
+                  "source_retrieval_rank": retrieval_rank,
                   "content_sha256": _sha(_material(candidate))}
         groups[family][seed][record["shape_id"]].append(record)
     def priority(row):
