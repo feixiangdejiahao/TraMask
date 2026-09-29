@@ -485,19 +485,38 @@ def render_evidence(evidence):
     for change in evidence['changes']:
         if change['role'] != 'semantic_expected':
             lines.append(change['id']+' INPUT '+json.dumps(dict(original_span=change['original_span'], modified_span=change['span']), sort_keys=True))
+    modified_paths = {}
+    def modified_location(span):
+        if not span:
+            return 'unknown'
+        modified_paths.setdefault(span['path'],'M'+str(len(modified_paths)))
+        return modified_paths[span['path']]+':'+str(span['start_byte'])+'..'+str(span['end_byte'])
+    call_aliases = {row['id']:'c'+str(i) for i,row in enumerate(evidence['calls'])}
+    q_aliases = {row['id']:'q'+str(i) for i,row in enumerate(evidence['assertions'])}
+    aliases = {'C:'+key:value for key,value in call_aliases.items()}
+    aliases.update({'Q:'+key:value for key,value in q_aliases.items()})
     for call in evidence['calls']:
-        lines.append('CALL '+call['id']+' '+call['callee']+' '+json.dumps(call['span'],sort_keys=True))
+        lines.append('CALL '+call_aliases[call['id']]+' '+call['callee']+' '+modified_location(call['span']))
         for target in call['targets']:
             lines.append('  => '+target['function_id']+' ['+target['reason']+']')
         for mapping in call['actual_formal']:
-            actual = mapping['actual'] if len(mapping['actual']) <= 160 else 'expression at '+json.dumps(mapping['actual_span'], sort_keys=True)
+            actual = mapping['actual'] if len(mapping['actual']) <= 160 else 'expression at '+modified_location(mapping['actual_span'])
             lines.append('  '+actual+' -> '+mapping['parameter'])
     for assertion in evidence['assertions']:
-        code = assertion['code'] if len(assertion['code']) <= 240 else 'assertion at '+json.dumps(assertion['span'], sort_keys=True)
-        lines.append('Q:'+assertion['id']+' OLD EXPECTATION '+code)
+        code = assertion['code'] if len(assertion['code']) <= 240 else 'assertion at '+modified_location(assertion['span'])
+        lines.append('OBSERVATION '+q_aliases[assertion['id']]+' '+modified_location(assertion['span'])+' OLD EXPECTATION '+code)
     lines.extend(_render_obligations(evidence.get('original_observation_obligations', [])))
+    grouped_edges = {}
     for edge in evidence['edges']:
-        lines.append(json.dumps(edge, sort_keys=True, ensure_ascii=False))
+        source = aliases.get(edge['source'],edge['source'])
+        target = aliases.get(edge['target'],edge['target'])
+        extra = {k:v for k,v in edge.items() if k not in {'source','target','kind'}}
+        key = (source,edge['kind'],json.dumps(extra,sort_keys=True,ensure_ascii=False))
+        grouped_edges.setdefault(key,[])
+        if target not in grouped_edges[key]:
+            grouped_edges[key].append(target)
+    for (source,kind,extra),targets in grouped_edges.items():
+        lines.append(source+' --'+kind+'--> '+', '.join(targets)+((' '+extra) if extra!='{}' else ''))
     for callback in evidence.get('function_valued_arguments', []):
         lines.append('FUNCTION ARGUMENT '+json.dumps(callback,sort_keys=True,ensure_ascii=False))
     for control in evidence['controls']:
@@ -515,5 +534,9 @@ def render_evidence(evidence):
         lines.extend(['SOURCE '+json.dumps(dict(span=context['span'], roles=context['roles'],
                                                sha256=context['source_sha256']), sort_keys=True), context['code']])
     for row in evidence['unknowns']:
-        lines.append('UNKNOWN '+json.dumps(row, sort_keys=True, ensure_ascii=False))
+        shown = dict(row)
+        if shown.get('call_id') in call_aliases:
+            shown['call_id'] = call_aliases[shown['call_id']]
+        lines.append('UNKNOWN '+json.dumps(shown, sort_keys=True, ensure_ascii=False))
+    lines[2:2] = ['MODIFIED-SOURCE '+alias+'='+path for path,alias in modified_paths.items()]
     return '\n'.join(lines)+'\n'

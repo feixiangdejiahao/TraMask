@@ -219,3 +219,17 @@ def test_original_impact_graph_render_shares_nodes_and_preserves_obligations():
     assert 'E0 -> O0 via P0' in rendered and 'E1 -> O1 via P0' in rendered
     assert 'first' in rendered and 'second' in rendered
     assert 'ORIGINAL S0=original.py' in rendered
+
+
+def test_render_groups_dense_call_observation_edges_without_dropping_targets():
+    from relation_search.oracle_evidence import render_evidence
+    span = dict(path='source.py',start_byte=0,end_byte=1)
+    call = dict(id='long-call-id',callee='run',span=span,code='run()',targets=[],actual_formal=[])
+    assertions = [dict(id='long-q-'+str(i),span=span,code='assert x == '+str(i)) for i in range(5)]
+    evidence = dict(added_import_bindings=[],changes=[],calls=[call],assertions=assertions,controls=[],
+                    declarations=[],unknowns=[],edges=[dict(source='C:long-call-id',target='Q:'+q['id'],kind='modified_static_slice_may') for q in assertions])
+    rendered = render_evidence(evidence)
+    assert 'c0 --modified_static_slice_may--> q0, q1, q2, q3, q4' in rendered
+    assert 'CALL c0 run M0:0..1' in rendered
+    assert all('OBSERVATION q'+str(i)+' M0:0..1' in rendered for i in range(5))
+    assert 'MODIFIED-SOURCE M0=source.py' in rendered
