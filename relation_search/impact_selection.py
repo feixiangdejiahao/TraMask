@@ -120,6 +120,16 @@ def _path(flow, roots, targets):
     return []
 
 
+def _path_node(flow, identifier):
+    node = flow.nodes[identifier]
+    # Flow.text is an abbreviated graph label and synthetic nodes use labels
+    # such as a local binding name.  Prompt evidence must never present that
+    # label as if it were the complete source at the node's recorded span.
+    source = flow.source.data[node["start_byte"]:node["end_byte"]].decode()
+    return dict(node, path=flow.source.path, text=source,
+                graph_label=node.get("text", ""), text_basis="complete_original_source_span")
+
+
 def _flow_index(corpus, candidates):
     # Only local test-source flow is needed.  This does not resolve calls in the
     # edited program, execute a repository or trust a candidate implementation.
@@ -247,7 +257,7 @@ def _candidate_evidence(corpus, frontend_rows, candidate, flow, unavailable):
                 "observed": observation.get("observed", {}).get("text"),
                 "expected": observation.get("expected", {}).get("text"),
                 "expected_status": "unchanged_expression_without_same_edit_dependency",
-                "path": [dict(flow.nodes[n], path=flow.source.path) for n in path],
+                "path": [_path_node(flow, n) for n in path],
                 "edge_kinds": [flow.edge_kinds.get((right, left), "unknown")
                                for left, right in zip(path, path[1:])],
             })

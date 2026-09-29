@@ -153,6 +153,23 @@ def test_state_operation_keeps_may_effect_path_and_observation_phase():
     obligation = row["evidence"]["obligations"][0]
     assert "may_effect" in obligation["edge_kinds"]
     assert obligation["expected"] == "11"
+    synthetic = next(node for node in obligation["path"] if node["kind"] == "may_effect")
+    assert synthetic["text"] == "box.push(11)"
+    assert synthetic["graph_label"] == "box"
+    assert synthetic["text_basis"] == "complete_original_source_span"
+
+
+def test_long_path_source_is_not_replaced_by_truncated_flow_label():
+    value = "x" * 1000
+    corpus, frontend = fixture("python", "def test_case():\n    result = process("+repr(value)+")\n    assert result == 1\n")
+    row = select(corpus, frontend, [candidate(corpus, repr(value), repr("changed"), "long")])["ranking"][0]
+    path = row["evidence"]["obligations"][0]["path"]
+    literal = path[0]
+    assert literal["text"] == repr(value)
+    assert len(literal["graph_label"]) < len(literal["text"])
+    for node in path:
+        data = corpus["sources"][node["path"]]["code"].encode()
+        assert node["text"] == data[node["start_byte"]:node["end_byte"]].decode()
 
 
 def test_same_port_value_variants_do_not_consume_all_coverage_slots():
