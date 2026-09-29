@@ -6,13 +6,13 @@ dispatches models nor ranks candidates. Syntax support is not oracle validity.
 from __future__ import annotations
 
 import ast
-from collections import defaultdict
+from collections import Counter, defaultdict
 import copy
 from functools import lru_cache
 import hashlib
 import json
 
-from anchor_retrieval.syntax import Source, child, walk
+from anchor_retrieval.syntax import CALLS, Source, call_parts, child, walk
 from experimental import assertion_operand_guard as guard
 from relation_search.oracle import preview, text, validate
 
@@ -32,6 +32,10 @@ preserve means the old expectation is your hypothesis, not a verified fact.
 adapt supplies only expected (a source-language expression) and, for Python,
 optionally comparison from allowed_comparisons. The program fills these slots;
 never return assertion/test code, setup, calls, messages, helpers or failure bodies.
+For Python, decide the comparison together with its expected value: changing a
+None check to a number/string value normally needs == or !=, not is or is not.
+New identity checks may use singleton literals (None/True/False) or an unchanged
+existing object reference; non-singleton literal identity is unsupported.
 New expected values must be closed literals/containers. An immutable expected
 expression must stay unchanged. An existing Go scalar wrapper is retained by
 the program: supply only its inner literal. Do not weaken a check to force pass
@@ -152,11 +156,60 @@ def eligible_candidates(corpus, frontend, candidates):
     return dict(candidates=eligible, records=records)
 
 
+def changed_call_context(corpus, candidate):
+    """Do not reuse original call resolution after editing its callee syntax.
+
+This recognizes syntax changes only, not aliases, receiver types or dynamic
+targets. New calls are reported unresolved rather than resolved by name.
+    """
+    extent = corpus['tests'][candidate['base_test_id']]['span']
+    source = Source(extent['path'], corpus['sources'][extent['path']]['code'], corpus['language'])
+    original, invalidated = Counter(), set()
+    missing = []
+    for node in walk(source.root):
+        if node.type not in CALLS or not extent['start_byte'] <= node.start_byte < node.end_byte <= extent['end_byte']:
+            continue
+        callee, _ = call_parts(node)
+        if callee is None:
+            continue
+        name = source.text(callee)
+        original[name] += 1
+        for edit in candidate['edits']:
+            span = edit['span']
+            intersects = span['start_byte'] < callee.end_byte and callee.start_byte < span['end_byte']
+            inserts = span['start_byte'] == span['end_byte'] and callee.start_byte <= span['start_byte'] <= callee.end_byte
+            if span['path'] == extent['path'] and (intersects or inserts):
+                key = (extent['path'],node.start_byte,node.end_byte)
+                invalidated.add(key)
+                missing.append(dict(reason='edited_callee_unresolved', original_callee=name,
+                    span=dict(path=extent['path'],start_byte=node.start_byte,end_byte=node.end_byte)))
+                break
+    prefix = 'package context\n' if corpus['language'] == 'go' else ''
+    modified = Source(extent['path'],prefix+preview(corpus,candidate),corpus['language'])
+    current = Counter()
+    if modified.root.has_error:
+        missing.append(dict(reason='modified_test_call_syntax_unresolved'))
+        # A malformed modified program cannot validate the old call graph.
+        invalidated.update((extent['path'],node.start_byte,node.end_byte)
+            for node in walk(source.root) if node.type in CALLS and
+            extent['start_byte'] <= node.start_byte < node.end_byte <= extent['end_byte'])
+    else:
+        for node in walk(modified.root):
+            if node.type in CALLS:
+                callee,_ = call_parts(node)
+                if callee is not None:
+                    current[modified.text(callee)] += 1
+        for name,count in sorted((current-original).items()):
+            missing.append(dict(reason='new_callee_unresolved',callee=name,new_occurrences=count))
+    return invalidated,missing
+
+
 def source_contexts(corpus, frontend, candidate, *, depth=1):
     """Whole resolved declarations and explicit helpers; unresolved edges stay visible."""
     functions = {row['id']: row for row in frontend.get('functions', [])}
     test = corpus['tests'][candidate['base_test_id']]
-    contexts, missing, seen, pending = [], [], set(), []
+    invalidated_calls, missing = changed_call_context(corpus,candidate)
+    contexts, seen, pending = [], set(), []
 
     def include(extent, role):
         if not extent or extent.get('path') not in corpus['sources']:
@@ -182,7 +235,10 @@ def source_contexts(corpus, frontend, candidate, *, depth=1):
         include(context.get('span'), 'program_context')
     for call in frontend.get('calls', []):
         if call.get('test_id') == candidate['base_test_id']:
-            pending.append((call, 0))
+            extent = call.get('span', {})
+            key = (extent.get('path'),extent.get('start_byte'),extent.get('end_byte'))
+            if key not in invalidated_calls:
+                pending.append((call, 0))
     production = defaultdict(list)
     for call in frontend.get('production_calls', []):
         production[call.get('function_id')].append(call)
@@ -204,6 +260,7 @@ def source_contexts(corpus, frontend, candidate, *, depth=1):
         elif production.get(identifier):
             missing.append(dict(reason='declaration_depth_limit', function=identifier))
     return dict(declarations=contexts, missing=missing, resolution_depth=depth,
+        call_graph_basis='original frontend; edited and new callees are unresolved, not rebound by name',
         completeness='partial; dynamic dispatch, implicit state and unresolved declarations are not proved complete')
 
 

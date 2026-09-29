@@ -6,7 +6,7 @@ import pytest
 
 from experimental.singleton_oracle_slots import (SYSTEM, adapt_frozen_singleton,
     adapt_response, assertion_inventory, contract_without_wrapper, eligible_candidates,
-    expected_slot, prepare_requests_v2, render_expected, sha)
+    expected_slot, prepare_requests_v2, render_expected, sha, source_contexts, changed_call_context)
 from test_relation_oracle import setup
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
@@ -102,6 +102,24 @@ def test_go_inner_scalar_literal_keeps_wrapper_call_failure_body_and_operator():
         rejected = adapt_response(result['request'], {'decisions': [dict(id='A0', status='adapt', **invalid)]}, corpus)
         assert rejected['status'] == 'unknown'
         assert rejected['revisions'] == []
+
+
+def test_expected_value_and_comparison_are_jointly_editable_and_executable():
+    result, _, corpus, _ = adapted('python', [('assert value is None, value', 'value')])
+    request = result['request']
+    assert '==' in request['slots']['A0']['allowed_comparisons']
+    response = adapt_response(request, {'decisions': [dict(
+        id='A0', status='adapt', expected='300', comparison='==')]}, corpus)
+    assert response['status'] == 'adapt'
+    code = response['revisions'][0]['edits'][-1]['after']
+    exec(code, {'value': int('300')})
+    with pytest.raises(AssertionError):
+        exec(code, {'value': 301})
+    # Preserving the identity operator would turn a value inference into an
+    # unsupported assertion about object interning.
+    invalid = adapt_response(request, {'decisions': [dict(
+        id='A0', status='adapt', expected='300')]}, corpus)
+    assert invalid['status'] == 'unknown' and invalid['revisions'] == []
 
 
 def test_typescript_container_can_change_without_changing_matcher_or_actual():
@@ -240,6 +258,63 @@ def test_count():
     assert any(row['code'] == helper.code.strip() for row in wire['source_context']['declarations'])
     assert any(row.get('callee') == 'external_count' for row in wire['source_context']['missing'])
     assert 'state = values' in json.dumps(wire)
+
+
+@pytest.mark.parametrize('before,after,new_callee',[
+    ('original','alternate','alternate'),
+    ('original(1)','alternate(original(1))','alternate'),
+])
+def test_changed_or_new_callee_does_not_inherit_original_resolution(before,after,new_callee):
+    source = Source('test_calls.py', '''from helpers import original, alternate
+def test_call():
+    result = original(1)
+    assert result == 1
+''','python')
+    helpers = Source('helpers.py','def original(x): return x\ndef alternate(x): return x + 1\n','python')
+    frontend = extract_frontend([source,helpers])
+    corpus = to_emitter_corpus(frontend)
+    test_id = next(iter(corpus['tests']))
+    start = source.code.index('original(1)')
+    candidate = dict(id='syntax_change',base_test_id=test_id,edits=[dict(
+        span=dict(path=source.path,start_byte=start,end_byte=start+len(before)),before=before,after=after)],
+        imports=[],source_test_ids=[])
+    context = source_contexts(corpus,frontend,candidate)
+    invalidated,_ = changed_call_context(corpus,candidate)
+    old_call = next(row for row in frontend['calls'] if row['callee']=='original')['span']
+    assert (old_call['path'],old_call['start_byte'],old_call['end_byte']) in invalidated
+    assert any(row.get('callee') == new_callee and row['reason']=='new_callee_unresolved'
+               for row in context['missing'])
+    assert any(row['reason']=='edited_callee_unresolved' for row in context['missing'])
+    assert not any(row['role']=='candidate_declaration_not_oracle' and 'def original(' in row['code']
+                   for row in context['declarations'])
+    assert not any(row['role']=='candidate_declaration_not_oracle' and 'def alternate(' in row['code']
+                   for row in context['declarations'])
+
+
+def test_changed_method_receiver_is_unresolved_without_guessing_receiver_type():
+    original,corpus,frontend = frozen('python',[('assert first.step(1) == 1','first.step(1)')])
+    candidate=original['offered']['C0']['candidate']
+    code=corpus['sources']['test_case.py']['code']
+    start=code.index('first.step')
+    candidate['edits']=[dict(span=dict(path='test_case.py',start_byte=start,end_byte=start+5),
+                             before='first',after='second')]
+    context=source_contexts(corpus,frontend,candidate)
+    assert any(row.get('callee')=='second.step' and row['reason']=='new_callee_unresolved'
+               for row in context['missing'])
+    assert any(row.get('original_callee')=='first.step' for row in context['missing'])
+
+
+def test_argument_only_edit_keeps_existing_callee_context():
+    source=Source('test_calls.py','from helper import original\ndef test_call():\n    result = original(1)\n    assert result == 1\n','python')
+    helper=Source('helper.py','def original(x): return x\n','python')
+    frontend=extract_frontend([source,helper]);corpus=to_emitter_corpus(frontend)
+    start=source.code.index('original(1)')+len('original(')
+    candidate=dict(id='arg_change',base_test_id=next(iter(corpus['tests'])),edits=[dict(
+        span=dict(path=source.path,start_byte=start,end_byte=start+1),before='1',after='2')],imports=[],source_test_ids=[])
+    context=source_contexts(corpus,frontend,candidate)
+    assert not context['missing']
+    assert any(row['code']==helper.code.strip() for row in context['declarations'])
+    assert changed_call_context(corpus,candidate)[0] == set()
 
 
 def test_paired_adapter_keeps_provider_parameters_and_freezes_source_identity():

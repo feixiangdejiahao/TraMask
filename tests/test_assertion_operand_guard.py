@@ -11,6 +11,9 @@ from experimental.assertion_operand_guard import valid_assertion
     ("assert values == (1, 2)", "values", "assert values == (3, 4)"),
     ("assert x == expected[0]", "x", "assert (x) != expected[0]"),
     ("assert read() == 1, read()", "read()", "assert read() == 2, read()"),
+    ("assert result is None", "result", "assert result == 300"),
+    ("assert result is not None", "result", "assert result != 'ready'"),
+    ("assert result == 300", "result", "assert result is None"),
 ])
 def test_python_supported_expected_revisions(old, observed, new):
     assert valid_assertion(new, old, observed, "python")
@@ -41,6 +44,17 @@ def test_structural_admission_does_not_prove_oracle_strength():
     # x != None admits many more values than x == 3 for ordinary ints/None.
     # This guard checks operation boundaries, not the intended issue contract.
     assert valid_assertion("assert x != None", "assert x == 3", "x", "python")
+
+
+@pytest.mark.parametrize('value', ["'ready'", '300', '[1]', '(1, 2)', '{}'])
+def test_new_identity_literal_is_not_a_value_oracle(value):
+    assert not valid_assertion('assert value is '+value, 'assert value is None', 'value', 'python')
+    assert not valid_assertion('assert value is not '+value, 'assert value is None', 'value', 'python')
+
+
+def test_existing_object_reference_can_keep_identity_without_copying_its_value():
+    assert valid_assertion('assert value is expected', 'assert value is expected', 'value', 'python')
+    assert not valid_assertion('assert value is [1]', 'assert value is expected', 'value', 'python')
 
 
 @pytest.mark.parametrize("old, observed, new", [

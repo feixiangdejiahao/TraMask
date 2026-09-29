@@ -3,7 +3,10 @@
 Supported forms are Python single comparisons, TS expect(...).toBe/toEqual/
 toStrictEqual (optionally .not), Go comparison guards, and require/assert.Equal
 or NotEqual calls. Unsupported forms return False. TS/Go assertion APIs and
-matchers are frozen. Python may change a comparison within its existing family.
+matchers are frozen. Python may change a comparison within its existing family;
+equality and identity belong to one family so a None check can become a value
+check. A new identity check cannot use a non-singleton literal as its expected
+object. These syntax rules do not establish the intended comparison semantics.
 
 The observed expression stays at exactly the same operand/argument position and
 has the same syntactic occurrence count. Messages, Go failure bodies, and all
@@ -25,7 +28,7 @@ import ast
 from anchor_retrieval.syntax import Source, child, walk
 
 
-_PY_COMPARISONS = ({ast.Eq, ast.NotEq}, {ast.Is, ast.IsNot},
+_PY_COMPARISONS = ({ast.Eq, ast.NotEq, ast.Is, ast.IsNot},
                    {ast.Lt, ast.LtE, ast.Gt, ast.GtE}, {ast.In, ast.NotIn})
 _TS_MATCHERS = {"toBe", "toEqual", "toStrictEqual"}
 _GO_COMPARISONS = {"==", "!=", "<", "<=", ">", ">="}
@@ -75,6 +78,14 @@ def _python(code, old, observed):
             _py_shape(node) == target for node in ast.walk(after)):
         return False
     expected, previous = new_operands[1-actual], old_operands[1-actual]
+    if (isinstance(after.test.ops[0], (ast.Is, ast.IsNot))
+            and (not isinstance(before.test.ops[0], (ast.Is, ast.IsNot))
+                 or _py_shape(expected) != _py_shape(previous))):
+        singleton = isinstance(expected, ast.Constant) and (expected.value is None or type(expected.value) is bool)
+        existing_reference = (_py_shape(expected) == _py_shape(previous)
+                              and isinstance(expected, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)))
+        if not singleton and not existing_reference:
+            return False
     if _py_shape(expected) == _py_shape(previous):
         return True
     # Replacing an existing call/getter would remove an operation as well.
