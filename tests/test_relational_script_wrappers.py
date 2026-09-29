@@ -323,7 +323,7 @@ def test_consumer():
     target = tmp_path / 'test_helpers.py'
     target.write_text(prepared['sources'][0].code)
     run = subprocess.run([sys.executable, '-m', 'pytest', '-q', str(target)], capture_output=True, text=True,
-                         timeout=15, env=dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'))
+                         cwd=tmp_path, timeout=15, env=dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'))
     assert run.returncode == 0, run.stdout + run.stderr
     assert '1 passed' in run.stdout
     assert [t['name'] for t in extract_frontend(prepared['sources'])['tests']] == ['test_consumer']

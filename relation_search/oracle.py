@@ -202,72 +202,8 @@ def prepare_requests(corpus, frontend, candidates, issue, max_requests=4, per_re
 
 
 def _valid_assertion(code, old, observed, language):
-    if not isinstance(code, str) or len(code.encode()) > max(6000, len(old.encode())*2):
-        return False
-    if re.sub(r'\s+', '', observed) not in re.sub(r'\s+', '', code):
-        return False
-    if re.search(r'\b(?:skip|xfail|eval|exec|__import__)\b', code):
-        return False
-    if language == 'python':
-        try:
-            tree = ast.parse(code)
-        except SyntaxError:
-            return False
-        if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Assert):
-            return False
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.NamedExpr, ast.Lambda, ast.Await, ast.Yield)):
-                return False
-            if isinstance(node, ast.Compare) and len(node.comparators) == 1:
-                if ast.dump(node.left) == ast.dump(node.comparators[0]):
-                    return False
-        return True
-    if language == 'go' and old.lstrip().startswith('if '):
-        # Go's usual assertion is a comparison guard followed by t.Errorf.
-        # The frontend offers the entire if statement. Permit replacement of
-        # its expected operand while freezing the observed operand, operator
-        # and failure body; rejecting all multiline text made these offered
-        # holes impossible to complete.
-        parsed = []
-        for snippet in (old, code):
-            source = Source('oracle.go', 'package oracle\nfunc check(){\n'+snippet+'\n}', 'go')
-            if source.root.has_error:
-                return False
-            function = next((node for node in source.root.named_children if node.type == 'function_declaration'), None)
-            body = child(function, 'body') if function is not None else None
-            statements = next((node for node in body.named_children if node.type == 'statement_list'), body) if body else None
-            nodes = [node for node in statements.named_children if node.type != 'comment'] if statements else []
-            if len(nodes) != 1 or nodes[0].type != 'if_statement':
-                return False
-            branch = nodes[0]
-            condition = child(branch, 'condition')
-            if (condition is None or condition.type != 'binary_expression'
-                or child(branch, 'initializer') is not None or child(branch, 'alternative') is not None):
-                return False
-            left, right = child(condition, 'left'), child(condition, 'right')
-            consequence = child(branch, 'consequence')
-            if left is None or right is None or consequence is None:
-                return False
-            operator = source.data[left.end_byte:right.start_byte].decode().strip()
-            if operator not in {'==', '!=', '<', '<=', '>', '>='}:
-                return False
-            compact = lambda value: re.sub(r'\s+', '', value)
-            parts = [compact(source.text(left)), compact(source.text(right))]
-            target = compact(observed)
-            if parts.count(target) != 1:
-                return False
-            expected = right if parts[0] == target else left
-            if any(node.type in {'func_literal', 'call_expression'} for node in walk(expected)):
-                return False
-            parsed.append((parts.index(target), operator, compact(source.text(consequence))))
-        return parsed[0] == parsed[1]
-    # The enclosing full test is checked again after all edits. Individual
-    # replacements must remain one assertion call, not a statement sequence.
-    if ';' in code.rstrip().rstrip(';') or '\n' in code.strip():
-        return False
-    if language == 'typescript':
-        return bool(re.match(r'\s*(?:expect\s*\(|assert[.(])', code))
-    return bool(re.match(r'\s*(?:require|assert|t)\.[A-Za-z]+\s*\(', code))
+    from experimental.assertion_operand_guard import valid_assertion
+    return valid_assertion(code, old, observed, language)
 
 
 def validate(request, payload, corpus):

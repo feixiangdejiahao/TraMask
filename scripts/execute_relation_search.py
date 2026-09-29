@@ -13,6 +13,7 @@ import fcntl
 import json
 import re
 import shlex
+import shutil
 import tomllib
 import time
 from pathlib import Path
@@ -71,6 +72,143 @@ def python_source_environment(repository):
             "basis": "repository_root_and_existing_package_source_directories"}
 
 
+def go_isolation_harness(emission, items, timeout):
+    """Bind exact emitted names to their package, including donor controls."""
+    if timeout <= 5:
+        raise ValueError('Go isolation requires a phase timeout greater than five seconds')
+    packages = defaultdict(list)
+    for item in items:
+        if item['path'] not in emission['files']:
+            raise ValueError('Go selected test has no emitted source file')
+        parent = Path(item['path']).parent
+        package = './' if parent == Path('.') else './' + str(parent)
+        packages[package].append(item['test_name'])
+    if not packages:
+        raise ValueError('No Go tests selected for isolation')
+    packages = {package: list(dict.fromkeys(names)) for package, names in sorted(packages.items())}
+    helper = '.relational_phase_inputs/go_test_runner.py'
+    command = ('python3 ' + shlex.quote(helper)
+               + ''.join(' --package ' + shlex.quote(package) for package in packages)
+               + ' --tests ' + shlex.quote(json.dumps(packages))
+               + ' --timeout ' + str(timeout - 5)
+               + ' --report "$COMBINATION_REPORT_DIR/go.jsonl"')
+    return {'command': command, 'report_format': 'go-json', 'report_path': 'go.jsonl',
+            'files': {helper: (ROOT/'scripts/relational_go_test_runner.py').read_text()},
+            'isolation': {'kind': 'go_test_process', 'selection': packages,
+                          'summary_path': 'go.runner.json', 'timeout': timeout - 5}}
+
+
+def _go_item_view(phase_output, phase, item, summary, digest_cache=None):
+    """Normalize one completed process without inheriting sibling failures."""
+    from combination_testing.test_reports import parse_report
+    parent = Path(item['path']).parent
+    package = './' if parent == Path('.') else './' + str(parent)
+    name = item['test_name']
+    identity = hashlib.sha256(encoded([package, name])).hexdigest()[:24]
+    directory = phase_output/'isolated'/identity
+    directory.mkdir(parents=True, exist_ok=True)
+    summary_path = phase_output/phase['isolation']['summary_path']
+    evidence = []
+    digest_cache = {} if digest_cache is None else digest_cache
+
+    def record(path):
+        if path.is_file():
+            key = str(path.resolve())
+            if key not in digest_cache:
+                with path.open('rb') as stream:
+                    digest_cache[key] = hashlib.file_digest(stream, 'sha256').hexdigest()
+            row = {'path': key, 'sha256': digest_cache[key]}
+            if row not in evidence:
+                evidence.append(row)
+            return row
+
+    def local_path(value):
+        # Sidecar records contain container paths; recover only descendants
+        # of its recorded report directory from the copied phase log tree.
+        relative = Path(value).relative_to(Path(summary['report']).parent)
+        path = (phase_output/relative).resolve()
+        if not path.is_relative_to(phase_output.resolve()):
+            raise ValueError('Go runtime evidence escapes the phase log directory')
+        return path
+
+    record(summary_path)
+    record(phase_output/'context.json')
+    matches = [row for row in (summary or {}).get('tests', [])
+               if row['package'] == package and row['test'] == name]
+    row = matches[0] if len(matches) == 1 else None
+    process = dict(row.get('process', {})) if row else {}
+    status = row['status'] if row else 'missing_isolated_execution'
+    result = {**process, 'stage': 'isolated_go_test', 'role': phase['role'],
+              'isolation_status': status, 'package': package, 'test_name': name,
+              'isolation_reason': row.get('reason') if row else 'No unique recorded execution',
+              'phase_output': str(phase_output.resolve()),
+              'source_context_file': str((phase_output/'context.json').resolve())}
+    raw = b''
+    if process.get('stdout'):
+        source = local_path(process['stdout'])
+        record(source)
+        raw = source.read_bytes()
+        (directory/'stdout.txt').write_bytes(raw)
+        for field, target in [('stderr', 'stderr.txt')]:
+            source = local_path(process[field])
+            record(source)
+            shutil.copyfile(source, directory/target)
+        source = local_path(process['stdout']).parent/'process.json'
+        record(source)
+        if not source.is_file() or load(source) != process:
+            raise ValueError('Go sidecar disagrees with its independently recorded process')
+        shutil.copyfile(source, directory/'source_process.json')
+    else:
+        (directory/'stdout.txt').write_bytes(raw)
+        (directory/'stderr.txt').write_bytes(b'')
+    package_rows = [entry for entry in (summary or {}).get('packages', []) if entry['package'] == package]
+    binaries = []
+    for entry in package_rows:
+        for field in ('discovery', 'compilation'):
+            operation = entry.get(field, {})
+            for stream in ('stdout', 'stderr'):
+                if operation.get(stream):
+                    record(local_path(operation[stream]))
+            if operation.get('stdout'):
+                record(local_path(operation['stdout']).parent/'process.json')
+        if entry.get('build_output'):
+            record(local_path(entry['build_output']))
+        command = entry.get('compilation', {}).get('command', [])
+        if '-o' in command:
+            binary = record(local_path(command[command.index('-o') + 1]))
+            if binary:
+                binaries.append(binary)
+    if status not in {'pass', 'fail', 'skip'}:
+        result['error'] = 'isolated_go_' + status
+    if status == 'timeout':
+        # Preserve raw stdout, but suppress terminal events from this partial
+        # invocation in the derived stream used to judge complete test runs.
+        events = []
+        for line in raw.decode(errors='replace').splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if event.get('Action') not in {'pass', 'fail', 'skip'}:
+                events.append(event)
+        (directory/'go.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
+    else:
+        (directory/'go.jsonl').write_bytes(raw)
+    write(directory/'result.json', result)
+    normalized = parse_report(directory, phase['report'], result, selected_names=[item['id']])
+    provenance = {'scope': 'one_exact_test_in_one_process', 'package': package, 'test_name': name,
+                  'status': status, 'group_summary': str(summary_path.resolve()),
+                  'source_context_file': str((phase_output/'context.json').resolve()),
+                  'source_snapshot': phase['files'], 'compiled_binaries': binaries,
+                  'raw_evidence': evidence,
+                  'report_policy': 'omit_terminal_events_for_timeout' if status == 'timeout' else 'exact_test2json_stdout',
+                  'derived_report_sha256': hashlib.sha256((directory/'go.jsonl').read_bytes()).hexdigest()}
+    write(directory/'provenance.json', provenance)
+    normalized['isolation'] = {'status': status, 'provenance': str((directory/'provenance.json').resolve())}
+    write(directory/'normalized.json', normalized)
+    return directory/'normalized.json', normalized['isolation']
+
+
 def emit_batch(args):
     from generic_composition.emitter import emit
     from generic_composition.runner import infer_harness
@@ -82,6 +220,7 @@ def emit_batch(args):
                    group_size=args.group_size, timeout=args.timeout,
                    algorithm_sha256={name: digest(ROOT/name) for name in (
                        'scripts/execute_relation_search.py', 'scripts/relational_phase_runner.py',
+                       'scripts/relational_go_test_runner.py',
                        'relation_search/instrument.py', 'relation_search/runtime.py',
                        'generic_composition/emitter.py', 'generic_composition/runner.py')})
     start(args.output, request)
@@ -184,12 +323,18 @@ def emit_batch(args):
             # JavaScript framework filters use full enclosing-suite titles.
             return '(' + '|'.join(re.escape(row['test_name']) for row in rows) + ')$'
         try:
-            harness = infer_harness(Path(case['repository']), case['language'], list(emitted['files']),
-                                    name_filter=selector(emitted['obligations']))
-            control_harness = infer_harness(Path(case['repository']), case['language'], list(control_emitted['files']),
-                                           name_filter=selector(emitted['controls']))
-            profile_harness = infer_harness(Path(case['repository']), case['language'], list(profile_emitted['files']),
-                                            name_filter=selector(profile_emitted['obligations'])) if profile_emitted and profile_emitted['obligations'] else None
+            if case['language'] == 'go':
+                harness = go_isolation_harness(emitted, emitted['obligations'], args.timeout)
+                control_harness = go_isolation_harness(control_emitted, control_emitted['controls'], args.timeout)
+                profile_harness = (go_isolation_harness(profile_emitted, profile_emitted['obligations'], args.timeout)
+                                   if profile_emitted and profile_emitted['obligations'] else None)
+            else:
+                harness = infer_harness(Path(case['repository']), case['language'], list(emitted['files']),
+                                       name_filter=selector(emitted['obligations']))
+                control_harness = infer_harness(Path(case['repository']), case['language'], list(control_emitted['files']),
+                                               name_filter=selector(emitted['controls']))
+                profile_harness = infer_harness(Path(case['repository']), case['language'], list(profile_emitted['files']),
+                                                name_filter=selector(profile_emitted['obligations'])) if profile_emitted and profile_emitted['obligations'] else None
         except ValueError as exc:
             write(folder/'unsupported.json', {'error': str(exc)})
             continue
@@ -218,9 +363,12 @@ def emit_batch(args):
                 staged = '.relational_phase_inputs/' + role + '/' + hashlib.sha256(name.encode()).hexdigest() + '.snapshot'
                 mounts.append({'source': str(destination.resolve()), 'target': staged, 'sha256': digest})
                 phase_files.append({'target': name, 'staged': staged, 'sha256': digest})
-            phases.append({'role': role, 'command': python_env['command'] + current_harness['command'],
-                           'timeout': args.timeout, 'files': phase_files,
-                           'report': {'format': current_harness['report_format'], 'path': current_harness['report_path']}})
+            phase = {'role': role, 'command': python_env['command'] + current_harness['command'],
+                     'timeout': args.timeout, 'files': phase_files,
+                     'report': {'format': current_harness['report_format'], 'path': current_harness['report_path']}}
+            if current_harness.get('isolation'):
+                phase['isolation'] = current_harness['isolation']
+            phases.append(phase)
         plan_path = folder/'phase_plan.json'
         write(plan_path, {'phases': phases})
         runner_path = folder/'phase_runner.py'
@@ -293,16 +441,34 @@ def run(args):
             phase_result = load(phase_output/'result.json') if (phase_output/'result.json').exists() else {'error': 'phase_not_observed', **result}
             items = (manifest['controls'] if role == 'control' else
                      manifest.get('profile_obligations', []) if role == 'source_profile' else manifest['obligations'])
+            isolation_summary = None
+            isolated = phase.get('isolation', {}).get('kind') == 'go_test_process'
+            if isolated:
+                isolation_path = phase_output/phase['isolation']['summary_path']
+                isolation_summary = load(isolation_path) if isolation_path.is_file() else None
+                if isolation_summary is None or isolation_summary.get('status') == 'error':
+                    # Group accounting retains errors. Individual completed
+                    # processes below remain usable even when a sibling hangs.
+                    phase_result = {**phase_result, 'error': ('go_isolation_summary_missing' if isolation_summary is None
+                                                            else 'go_isolation_execution_errors')}
             normalized = parse_report(phase_output, phase['report'], phase_result, selected_names=[x['id'] for x in items])
+            if isolated:
+                normalized['isolation'] = {'summary': str((phase_output/phase['isolation']['summary_path']).resolve()),
+                                           'counts': (isolation_summary or {}).get('counts', {})}
             write(phase_output/'normalized.json', normalized)
             reports[role] = normalized
+            isolation_digests = {}
             for item in items:
+                report_path, isolation = phase_output/'normalized.json', None
+                if isolated:
+                    report_path, isolation = _go_item_view(phase_output, phase, item, isolation_summary, isolation_digests)
                 rows.append({'case': manifest['case'], 'candidate_id': item.get('candidate_id'),
                          'execution_lane': manifest['execution_lane'],
                          'static_parent_id': manifest['static_parent_ids'].get(item.get('candidate_id')),
                          'base_test_id': item['base_test_id'], 'role': role,
                          'test_ids': [item['id']], 'control_ids': item.get('control_ids', []),
-                         'result': str((phase_output/'normalized.json').resolve()),
+                         'result': str(report_path.resolve()),
+                         **({'isolation': isolation} if isolation else {}),
                          'trace': str((phase_output/'relation_trace.jsonl').resolve()),
                          'execution_context': {'phase': role, 'source_snapshot': phase['files'],
                                                'control_context': manifest['control_context'],

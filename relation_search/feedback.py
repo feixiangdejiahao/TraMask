@@ -30,9 +30,18 @@ def collect(execution, previous=None):
             attempted.update(key for key, row in candidates.items() if not row.get('is_source_profile'))
             evidence_files[str(accepted)] = digest(accepted)
     controls, source_profiles = {}, {}
-    seen_traces = set()
+    seen_traces, phase_runtimes, report_roles = set(), set(), {}
     for row in runs:
         result_path = Path(row['result'])
+        key = str(result_path)
+        if key in report_roles and report_roles[key] != row['role']:
+            raise ValueError('One normalized report cannot represent different execution roles')
+        report_roles[key] = row['role']
+        context = row.get('execution_context', {}).get('context_file')
+        runtime = Path(context).parent/'result.json' if context else result_path.parent/'result.json'
+        if runtime.exists():
+            phase_runtimes.add(str(runtime))
+            evidence_files[str(runtime)] = digest(runtime)
         if str(result_path) not in reports:
             reports[str(result_path)] = read(result_path)
             evidence_files[str(result_path)] = digest(result_path)
@@ -113,15 +122,13 @@ def collect(execution, previous=None):
     totals = defaultdict(int)
     elapsed = 0.0
     for path, report in reports.items():
-        role = Path(path).parent.name
+        role = report_roles[path]
         for status, count in report['counts'].items():
             totals[role + '_' + status] += count
         totals['reported_test_outcomes'] += sum(report['counts'].values())
         totals['executed_test_outcomes'] += sum(report['counts'].get(status, 0) for status in ('pass', 'fail'))
-        runtime = Path(path).parent/'result.json'
-        if runtime.exists():
-            elapsed += read(runtime).get('elapsed_seconds', 0.0)
-            evidence_files[str(runtime)] = digest(runtime)
+    # Phase wall time includes compilation once and all isolated processes.
+    elapsed = sum(read(path).get('elapsed_seconds', 0.0) for path in phase_runtimes)
     known_batches.append(identity)
     rounds = [*previous.get('rounds', []), dict(execution=str(execution.resolve()), identity=identity,
                counters=dict(totals), elapsed_test_seconds=elapsed,

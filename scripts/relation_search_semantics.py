@@ -51,7 +51,7 @@ def complete(args):
     corpus = read(Path(request['source_prepared'])/'corpus.json')
     try:
         result = validate(request, (args.output/'completion.txt').read_text(), corpus)
-    except (ValueError, TypeError, KeyError) as error:
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
         result = dict(revisions=[], decisions=[], error=type(error).__name__)
     write(args.output/'validation.json', result)
     return dict(status=record['status'], revised=len(result['revisions']),

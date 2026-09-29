@@ -147,25 +147,11 @@ class Frontier:
 
 
 def select_round(candidates, budget=128, previously_executed=()):
-    """Rotate operators while preserving their deterministic proposal order.
+    """Give the least-served operator its next source-ordered proposal.
 
-    Frontends already rotate source seeds and relation shapes. Sorting again by
-    opaque test IDs or edit text would destroy that analysis-derived ordering.
+    Service counts persist through attempted physical edits across rounds.
+    Source order within each operator remains stable; metadata-only aliases
+    cannot consume another attempt.
     """
-    prior = set(previously_executed)
-    groups = defaultdict(deque)
-    seen = set()
-    for row in candidates:
-        edit_key = fingerprint([row['base_test_id'], row.get('edits', [])])
-        if edit_key in seen or row['id'] in prior:
-            continue
-        seen.add(edit_key)
-        groups[row.get('operator', row.get('kind', 'unknown'))].append(row)
-    queue = deque((family, rows) for family, rows in sorted(groups.items()))
-    chosen = []
-    while queue and len(chosen) < budget:
-        family, rows = queue.popleft()
-        chosen.append(rows.popleft())
-        if rows:
-            queue.append((family, rows))
-    return chosen
+    from experimental.candidate_scheduling import select
+    return select(candidates, budget, previously_executed)

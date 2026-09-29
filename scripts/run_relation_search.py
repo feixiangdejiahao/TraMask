@@ -16,7 +16,10 @@ from relation_search.checkpoint import read, write, digest, start, completed, se
 def algorithm_files():
     return sorted({*[p for p in ROOT.glob('relation_search/*.py') if p.name != 'oracle.py'],
                    *ROOT.glob('experimental/relation_search_*.py'),
+                   *[ROOT/'experimental'/name for name in ('assertion_operand_guard.py', 'source_edit_identity.py',
+                       'candidate_scheduling.py', 'go_arity_guard.py', 'oracle_batch_recovery.py', 'owner_prefix_slice.py')],
                    ROOT/'scripts/run_relation_search.py', ROOT/'scripts/execute_relation_search.py',
+                   ROOT/'scripts/relational_go_test_runner.py',
                    ROOT/'scripts/relational_phase_runner.py', ROOT/'generic_composition/emitter.py',
                    ROOT/'generic_composition/runner.py'})
 
@@ -77,6 +80,29 @@ def prepare(args):
                                    max_edits=args.max_edits, budget=args.pool, strategy=args.strategy)
     candidates.extend(extensions)
     counts['feedback_extensions'] = len(extensions)
+    if corpus['language'] == 'go':
+        from anchor_retrieval.syntax import Source
+        from experimental.owner_prefix_slice import propose_candidate
+        sources = [Source(path, entry['code'], 'go') for path, entry in corpus['sources'].items()
+                   if entry.get('language', corpus['language']) == 'go' and not entry.get('parse_error')]
+        prefix_records, prefix_candidates = [], []
+        for candidate in candidates:
+            if candidate.get('prefix_slice') or not any(e.get('role') == 'state_prefix' for e in candidate['edits']):
+                continue
+            proposal = propose_candidate(candidate, sources=sources)
+            prefix_records.append(dict(parent_id=candidate['id'], analysis=proposal['analysis'],
+                                       child_id=proposal['candidate']['id'] if proposal['candidate'] else None))
+            if proposal['candidate']:
+                prefix_candidates.append(proposal['candidate'])
+        candidates = list({row['id']: row for row in [*candidates, *prefix_candidates]}.values())
+        counts['bounded_owner_prefix_proposals'] = len(prefix_candidates)
+        write(args.output/'prefix_construction.json', dict(records=prefix_records,
+            claim='new_construction_hypotheses_not_semantics_preserving_slices'))
+        from experimental.go_arity_guard import filter_candidates
+        validation = filter_candidates(corpus, candidates, frontend)
+        candidates = validation.pop('candidates')
+        counts['static_arity_rejected'] = len(validation['rejected'])
+        write(args.output/'static_validation.json', validation)
     selected = select_round(candidates, args.limit, previous.get('attempted_candidate_ids', []))
     for name in ['corpus.json', 'frontend.json', 'case.json', 'selection.json', 'issue.md']:
         source = args.source/name

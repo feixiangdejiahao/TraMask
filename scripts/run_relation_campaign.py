@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from relation_search.checkpoint import digest, read, write, start
 from scripts.run_relation_search import algorithm_files, prepare, feedback
 from scripts.execute_relation_search import emit_batch, run
+from experimental.oracle_batch_recovery import POLICY as RECOVERY_POLICY, plan_recovery
 
 
 def code_identity():
@@ -37,6 +38,7 @@ def semantic_batch(prepared, output, args, previous_selected):
                    input_sha256=digest(prepared/'prepare.json'), mode=args.oracle_mode,
                    code_sha256=code_identity(), budget=args.semantic_budget,
                    per_request=args.per_request, model_workers=args.model_workers,
+                   batch_recovery=RECOVERY_POLICY,
                    cache_sha256=digest(args.oracle_cache) if args.oracle_cache else None,
                    previously_selected=sorted(previous_selected))
     start(output, request)
@@ -47,9 +49,10 @@ def semantic_batch(prepared, output, args, previous_selected):
             if digest(output/name) != checksum:
                 raise ValueError('Frozen semantic artifact changed')
         return record
-    selected_ids, calls = [], 0
+    selected_ids, calls, offered_ids, recovery_calls = [], 0, [], 0
     if args.oracle_mode == 'replay':
         outcome = apply_cache(corpus, candidates, read(args.oracle_cache), (prepared/'issue.md').read_text())
+        offered_ids = [row['id'] for row in candidates]
         write(output/'semantic_replay.json', outcome)
         revised = outcome['candidates']
     elif args.oracle_mode == 'fresh':
@@ -64,6 +67,7 @@ def semantic_batch(prepared, output, args, previous_selected):
         requests = prepare_requests(corpus, read(prepared/'frontend.json'), selected,
                                     (prepared/'issue.md').read_text(),
                                     max_requests=args.semantic_budget, per_request=args.per_request)
+        offered_ids = [item['candidate']['id'] for request in requests for item in request['offered'].values()]
         request_paths = []
         for index, value in enumerate(requests):
             value['source_prepared'] = str(prepared.resolve())
@@ -94,12 +98,30 @@ def semantic_batch(prepared, output, args, previous_selected):
 
         with ThreadPoolExecutor(max_workers=args.model_workers) as pool:
             completions = list(pool.map(finish, request_paths))
+        # A completed malformed batch can be split once without introducing a
+        # new candidate, new source evidence, or execution-result feedback.
+        recovery_paths = []
+        for path, directory in zip(request_paths, completions):
+            manifest = read(directory/'manifest.json')
+            text = (directory/'completion.txt').read_text() if (directory/'completion.txt').exists() else None
+            plan = plan_recovery(read(path), manifest, text)
+            preserve_configuration(output/'recovery'/f'{path.stem}.json', plan)
+            for index, child in enumerate(plan['requests']):
+                child_path = output/'requests'/f'{path.stem}_split_{index:02d}.json'
+                preserve_configuration(child_path, child)
+                recovery_paths.append(child_path)
+        with ThreadPoolExecutor(max_workers=args.model_workers) as pool:
+            recovery_completions = list(pool.map(finish, recovery_paths))
+        recovery_calls = sum(read(directory/'manifest.json').get('external_model_calls', 0)
+                             for directory in recovery_completions)
+        completions.extend(recovery_completions)
         revised = list(candidates)
         for directory in completions:
             manifest = read(directory/'manifest.json')
             calls += manifest.get('external_model_calls', 0)
             if (directory/'validation.json').exists():
                 revised.extend(read(directory/'validation.json')['revisions'])
+        revised = list({row['id']: row for row in revised}.values())
     else:
         revised = candidates
     for path in prepared.iterdir():
@@ -109,9 +131,12 @@ def semantic_batch(prepared, output, args, previous_selected):
             target.symlink_to(path.resolve())
     write(output/'candidates.json', dict(candidates=revised, source_count=len(candidates),
           semantic_count=len(revised)-len(candidates), mode=args.oracle_mode,
-          selection_before_cache=True))
+          program_selection_before_semantics=True,
+          semantic_selection_applies=args.oracle_mode == 'fresh'))
     record = dict(mode=args.oracle_mode, source_count=len(candidates),
                   revised_count=len(revised)-len(candidates), selected_ids=selected_ids,
+                  offered_ids=offered_ids, distinct_offered_candidates=len(set(offered_ids)),
+                  recovery_calls=recovery_calls, batch_recovery_policy=RECOVERY_POLICY,
                   provider_calls=calls, previous_selected=sorted(set(previous_selected)|set(selected_ids)))
     write(done, record)
     write(output/'prepare.json', dict(status='prepared', case=read(prepared/'case.json')['id'],
@@ -131,6 +156,7 @@ def campaign(args):
         include_baseline=args.include_baseline, representations_only=False,
         oracle_mode=args.oracle_mode, semantic_budget=args.semantic_budget,
         per_request=args.per_request, model_workers=args.model_workers,
+        batch_recovery=RECOVERY_POLICY,
         oracle_cache_sha256=digest(args.oracle_cache) if args.oracle_cache else None,
         source_corpus_sha256={case: digest(args.source/case/'corpus.json') for case in cases},
         algorithm_sha256=code_identity())

@@ -87,15 +87,23 @@ def test_partial_string_capture_is_distinct_from_complete_shape():
 
 
 def test_rotation_excludes_executed_ids_and_does_not_starve_second_operator():
-    rows = [dict(id=str(i), kind='a', base_test_id='one', edits=[{'after': str(i)}]) for i in range(30)]
-    rows.append(dict(id='other', kind='b', base_test_id='two', edits=[{'after': 'z'}]))
-    assert [r['id'] for r in select_round(rows, 2, ['0'])] == ['1', 'other']
+    def edit(after):
+        return {'span': {'path': 'test_values.py', 'start_byte': 20, 'end_byte': 21},
+                'before': '0', 'after': after}
+    rows = [dict(id=str(i), kind='a', base_test_id='one', edits=[edit(str(i))]) for i in range(30)]
+    rows.append(dict(id='other', kind='b', base_test_id='two', edits=[edit('z')]))
+    # Family a has already received one slot in the preceding round; b receives
+    # its first slot before a receives a second one.
+    assert [r['id'] for r in select_round(rows, 2, ['0'])] == ['other', '1']
 
 
 def test_rotation_preserves_frontend_relation_order_across_source_seeds():
-    rows = [dict(id='first', operator='a', base_test_id='z_seed', edits=[{'after': 'long_value'}]),
-            dict(id='second', operator='a', base_test_id='a_seed', edits=[{'after': 'x'}]),
-            dict(id='third', operator='b', base_test_id='other', edits=[{'after': 'z'}])]
+    def edit(after):
+        return {'span': {'path': 'test_values.py', 'start_byte': 20, 'end_byte': 21},
+                'before': '0', 'after': after}
+    rows = [dict(id='first', operator='a', base_test_id='z_seed', edits=[edit('long_value')]),
+            dict(id='second', operator='a', base_test_id='a_seed', edits=[edit('x')]),
+            dict(id='third', operator='b', base_test_id='other', edits=[edit('z')])]
     assert [row['id'] for row in select_round(rows, 3)] == ['first', 'third', 'second']
 
 
