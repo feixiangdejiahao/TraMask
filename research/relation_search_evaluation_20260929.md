@@ -14,7 +14,7 @@
 仍不能写成统一配置自动检出 17/17。
 
 统一 warm v1 已完成全部 17 例，独立评价封存在
-`evaluation/uniform_warm_v1/checkpoint_07.json`：**准确检出 16/17**，唯一未检出为
+`evaluation/uniform_warm_v1/checkpoint_07.json`：**已确认准确检出 16/17**，唯一未确认命中为
 N08。17 例完整语料、同一配置和实际阶段参数均通过核验。命名结果库存为
 585 通过、1320 失败、897 执行错误、70 未观察、28 其他状态；已独立确认其中
 16 条正确目标见证和 1 条错误 oracle，另 1303 条失败未裁决。这不是整体精度或
@@ -26,13 +26,16 @@ N08。17 例完整语料、同一配置和实际阶段参数均通过核验。�
 已有有效 unequal-start/equal-end 重叠见证，另外两个严格 partial-overlap 变体被
 同组其他 Go 候选缺少必需参数的编译错误阻断；没有把“选中”当作“执行并检出”。
 
-新模型请求的单独增量评价 `evaluation/uniform_fresh_v1/checkpoint_05.json` 确认
-N01、N02、N03、N06、N07，当前 **5/17**，已经完成 N01—N07。这五条目标见证保留原源断言，
-所以不能据此声称模型修订带来检出增益。fresh 固定每轮最多 16 条语义候选；
-N04 未获得有效 oracle 修订，不能用 warm 的缓存命中代替 fresh 检出。N05 目标
-原始变体进入程序列表，却始终未被 16 条语义队列选中；其 stale oracle 的当前
-失败已单独确认是误报。下一轮只选新程序候选，导致这条未修订候选失去再次被
-语义选择的机会。
+新模型请求的统一 fresh v1 已完成全部 17 例并通过配置和阶段核验，
+`evaluation/uniform_fresh_v1/checkpoint_11.json` 确认 **12/17**：N01、N02、N03、
+N06、N07、N09、N10、P2、P3、P4、P5、P7。P7 本轮模型产生正确预期并实际检出；
+其余 11 条目标见证保留源断言，不能把它们都归功于模型修订。fresh 固定每轮
+最多 16 条语义候选；P1/P6 未获得正确目标预期，N04/N05 目标 parent 未进入
+语义预算，N08 旧完整前缀仍有额外前提未确认。最终阶段清单为
+`evaluation/uniform_fresh_v1/stage_diagnosis_03.json`。N05 width100 仍期待短 ba 和
+P1 错误键名 equal 的真实失败，均已独立确认是错误 oracle。下一轮只选新程序
+候选，使未进入语义预算的旧候选失去再次被选择的机会。未审查的其他失败保留
+unknown，不能由这组已确认命中直接估计总体假阴性率。
 
 另一个 Python 低预算消融（每轮 8 条、4 轮）已完成 profile 臂的独立复核：
 `evaluation/ablation_python_v1/profile/checkpoint_01.json`，**4/8**，为 P3、N01、
@@ -40,6 +43,19 @@ N02、N03。它只选择了事先声明的 8 个 Python trial，不等同于 17-
 其余 9 个 trial 没参加该消融。rotation 臂也完成独立复核，封存于
 `evaluation/ablation_python_v1/rotation/checkpoint_01.json`，同样 **4/8**，命中集合相同。
 当前证据没有支持 profile 选择比轮转有更高检出率。
+
+后来单独冻结的异常绕过 writer 排序消融使用相同完整候选池，每例一轮、8 条程序
+候选、相同 physical-edit 调度，零模型与缓存。两臂全部 8 个 Python trial 完成：
+fair **3/8（N02、P3、P4）**，writer_then_fair **4/8（增加 N01）**。P4 的新有效
+见证直接观察 quoted path 被保留引号，不能仅因旧 canonical ID 没入选就漏算。
+N01 在本次实际调度中为 35→2；原数组的 6→2 是另一排序，不能混用。每臂都存在
+一个 P4 不合格报告，其他失败没有被全量裁决。见
+`evaluation/exception_write_ablation_v1/checkpoint_01.json`；该小样本结果不能推广为
+总体误报/漏报率或 issue resolution rate 的改善。
+整合到实际 CLI 的独立执行也完成 8 例，全部 64 个已选程序材料与 standalone
+writer 臂一致，同样 **4/8**，模型调用为零；证据为
+`evaluation/writer_priority_integrated_v1/checkpoint_01.json`。这是实现复现，
+不是新增任务泛化证据。
 
 N08 旧见证 `a9212ca40d6edaa912da` 的主体以两条 Sync 写入建立 `seqNum+2`
 这个未写入序号，随后验证 close 唤醒，主体关系合理。但完整复制的前缀还要求
@@ -49,8 +65,35 @@ N08 旧见证 `a9212ca40d6edaa912da` 的主体以两条 Sync 写入建立 `seqNu
 将历史累计字段与 `currently_supported_cumulative_witness` 分开。新证据封存在
 `evaluation/uniform_warm_v2/checkpoint_01.json`：净化前缀只保留两条 Sync 写入及
 批次序号，订阅首个未写入序号后关闭 DB；实际收到 nil 而不是要求的关闭错误，
-独立源控制通过。它的每测试进程、原生 Go 结果、源码哈希均已核验。这个首个
-v2 checkpoint 尚未关联完成的 campaign 索引，所以不能当作 v2 统一实验完成。
+独立源控制通过。它的每测试进程、原生 Go 结果、源码哈希均已核验。随后
+`evaluation/uniform_warm_v2/checkpoint_12.json` 已关联全部 17 个完成案例，固定 warm v2
+为 **17/17**，完整语料、同配置、各阶段参数和真实控制/失败均已核验。此结果
+使用历史模型缓存，查询 2934 个程序候选、命中 32 个 parent、恢复 34 个修订，
+没有新 provider 请求。另确认 P3 加入 Alt 却仍要求 `ctrl+plus` 的源 oracle 错误；
+1552 条失败候选未裁决，17/17 不代表没有误报。fresh v2 在
+`evaluation/uniform_fresh_v2/checkpoint_10.json` 中确认 **9/17（N08、P1、P3、P7、N01、N02、N03、N06、N07）**，
+12 例已完成，N09/N10/P2/P4/P5 仍未完成；P1 本轮
+新模型请求产生了正确 END 预期，三个事件阶段都实际无事件而失败，原控制通过。
+两条 N08 新测试都保留源断言，所以它们不是新模型 oracle 的增益证据。
+同轮另一个 P1 模型修订错误地要求键名 `equals`，稳定的原命名应为 `equals_sign`；
+它在同源控制通过后真实失败，已确认为误报，不能用正确 END 修订推断整体 oracle
+准确率改善。已完成的 P6 目标进入程序与语义预算且实际发送，但批次与 singleton
+均因 length 截断得到空正文；这是缺少有效模型预期，不是程序候选没有生成。
+P7 的新 singleton 请求也产生了正确数字树预期并实际检出。
+完整阶段证据见 `evaluation/uniform_fresh_v2/stage_diagnosis_06.json`；未完成案例
+只记录当前阶段，不判漏报。
+
+N04 已完成时，既有目标 parent 没进入语义预算；但另三个 composed 候选获得了
+修改 status/name 断言的模型预期。独立检查发现这些预期在 emitted 测试中被旧
+源断言覆盖，实际仍执行 `exit_code == 0` 和 `name == "X"`，所以实际 PASS 不能
+评价模型提出的断言。其中 e852… 还绑定了一个失败 donor control，另两例的
+全部关联控制通过。
+冻结旧版本证据在 `evaluation/uniform_fresh_v2/N04_semantic_emission_gap_v1.json`；
+生成记录、发射文件和实际执行必须分别核验，不能只检查 candidate JSON。
+随后 main 修复后对原完整 8 候选重新发射执行，三个新 oracle 都在实际修订断言
+处检出 status 错误；b7a921… 与 189747… 全部控制通过，构成两条有效 focused
+见证，e852… 仍缺合格 donor 控制。独立记录为
+`evaluation/semantic_emission_fix_v1/checkpoint_01.json`，不回填冻结 fresh v2 命中。
 
 静态诊断另行封存，不混入执行命中。持久语义队列的离线反事实在已有两轮程序输入的
 6 例上，目标父候选覆盖仍是 **2/6→2/6**；没有新的模型请求或检出。合并固定两轮
@@ -66,6 +109,115 @@ N04 目标排第 53，N05 排第 170；后者前面有来自 95 个 seed 的 161
 返回绑定、P4 的 fixture/方法结果、N03 的标量与集合长度、N04 的嵌套资源和查询
 结果尚不支持。这是源测试定位评价，不代表生成测试有效或真实同对象流得到证明。
 完整目标映射见 `evaluation/assertion_write_origin_census_review_v2.json`。
+把同类源码绑定与路径信息渲染为输入上下文的新原型，自动处理 4625 个观察，
+有 243 个可渲染上下文、245 个支持字段读。其中仅 48 个观察有 prior test-operation
+路径，全部来自 N01/N02。独立核验全部原 q 和引用函数逐行及源哈希一致，
+见 `evaluation/assertion_path_context_source_fidelity_review_v1.json`。这只确认
+源码信息可确定性摘取；尚未给模型使用并检验推理改善，也未证明静态路径真实执行。
+
+
+数值关系分桶使用另一个预先固定的 17 例完整程序候选池；其 baseline/delta/context
+语义选中目标父候选的 @16 都为 **9/17**，不是执行 Hit。N05 从第 170 提升到
+109，N03 从 53 降到 54，其余 15 例不变；所有例的前 16 集合保持相同。加入
+上下文关系没有超过仅数值变化方向的效果。不同输入池的这项结果不能与上述
+6 例预算诊断直接相减。见 `evaluation/numeric_relation_buckets_review_v1.json`。
+
+关闭 thinking 的 32 请求诊断也只评价模型输出，不新增 pipeline Hit。独立核验
+实际 payload 除 thinking 外相同：21 个请求由 enabled 改为 disabled，另 11 个
+原本就是 disabled，是同参数重复。10 个独立 accepted 修订中，5 个完整 oracle
+静态可成立、3 个明确错误、2 个前提未确认。对其中历史上已经独立确认正确的
+5 个目标 oracle 配对，仅 P7 原样恢复为可用修订：P1 把 END 错认成 Backspace；
+N05 未改变原错断言；P6 返回空修订；N04 的正确核心提议因删除诊断 message
+违反 guard 而未接收。这是一次条件样本，不能把 JSON 成功率当语义正确率，也
+不能据此估计总体因果效应。见 `evaluation/disabled_oracle_independent_review_v1.json`。
+对同一批 32 响应离线重验，把模型省略的原诊断 message 补回后再使用原结构 guard，
+只有 N04 新增一个可接收修订；其完整输入和断言与原正确见证一致。这个 admission
+版本的配对保留率为 **2/5**，原冻结版本仍为 **1/5**；独立修订变为 6 个正确、
+3 个错误、2 个未确认，没有新增调用、执行或 pipeline Hit。证据为
+`evaluation/disabled_oracle_diagnostic_restoration_review_v2.json`。
+
+后来另选 32 条先前已经完成但 JSON 无效的 singleton，仅关闭 thinking 重发，
+32 条都得到有效 JSON；其中 16 条返回空修订。结构上接收的两条却均不正确：
+N03 无质量字段应为 `None`，模型写成空串；P6 理由正确写出 5004，代码却写成
+104。另一个 P1 原始提议完整有效，但被结构 guard 拒绝。完整逐条评价在
+`evaluation/singleton_fallback_disabled_review_v2.json`。这次恢复了可解析输出，
+没有恢复任何正确的 accepted oracle，更没有新增执行命中。
+
+单候选 expected-slot 新 prompt 对同 32 个父样本有 14 个可请求、15 个没有可编辑
+槽、3 个完整上下文超预算；未请求样本保留在分母中。14 个返回都能解析，但唯一
+adapt 将旧错误 want 原样内联，11 个 preserve 的完整测试仍不合理，另 2 个回答
+unknown。N03 的错误空串提议变为弃答；P6 仍保留错误 103；P1 反而丢失旧版本
+正确的原始推断。此版本提高了程序对编辑位置的控制，尚未提高完整 oracle 的
+正确性。证据为 `evaluation/singleton_expected_slots_review_v3.json`。
+随后保持这 14 个完整 prompt、程序和其他模型参数不变，仅开启 thinking：
+14 个请求传输完成，10 个有效 JSON，4 个 length 截断空正文。5 个 adapt 中，
+N03 的 None、P6 的 5004、P4 的零重载数量与完整保存文本共 **4 个完整预期正确**；
+P1 仍保留错误 character is None，另 5 个 preserve 的完整测试仍不成立。因此
+正确 accepted 从同 14 请求的 0 变成 4，但有效 JSON 从 14 降为 10。所有 32 个
+父样本仍保留分母，不能把未调用样本删除。这里只有 P6 对应已知目标见证，其他
+正确预期不等于新缺陷；后续实际回放单独计量。完整审核与 wire 配对证据见
+`evaluation/singleton_expected_slots_enabled_review_v1.json`。该记录也更正旧解释：
+P4 detect_autoreload 的 True 表示可安全处理，同 AST 仍可返回 True；disabled
+当时的 unknown 仍是弃答，enabled 将数量改成 0 的完整 oracle 则成立。
+全部 5 条 accepted 随后均实际回放，并同时执行各自原 parent：原 parent 全失败，
+修订后 N03、P4 两条通过，P6 正确在 5004 对 5003 处失败，P1 仍错误地要求
+character 为 None。所有关联源控制通过。因此去除了 3 条 stale-oracle 报警，
+得到 1 条有效 focused 目标见证，并保留 1 条误报；不能写成 4 个新缺陷。
+实际发射断言与原生结果证据见 `evaluation/singleton_slot_replay_v1/checkpoint_01.json`。
+进一步仅删除同 14 个 prompt 的 source_context，其余 payload 保持相同，结果仍为
+10 个有效 JSON，但 4 个 accepted 只有 N05 的完整预期正确，N03 空串错误，
+P1 虽推断字符值 a 正确却被固定比较符发射成 `is 'a'`，另一个 N03 长脚本只修好
+日志计数，后续文件变化与子进程稳定性观察的时间前提仍未建立。对照是有上下文
+4/14、无上下文 1/14 个完整正确 accepted；每条仅各一个随机样本，不足以排除
+输出随机性，更不能证明未知任务泛化。这个例子也说明值推理、断言构造和完整
+测试适用性需要分别评价。证据为
+`evaluation/singleton_expected_slots_no_context_review_v1.json`。
+无上下文版本的全部 4 条 accepted 也统一实际回放：N05 正确预期通过；N03
+空串误报仍失败；P1 的 `is 'a'` 本次碰巧通过，但不能因此证明对象身份契约；
+长 N03 在修好计数后推进到未同步的 stability 断言并失败，且原控制已在计数
+断言失败。该回放没有有效新目标见证，见
+`evaluation/singleton_slot_no_context_replay_v1/checkpoint_01.json`。
+
+
+
+
+
+在固定全池上先排除没有 expected 槽的模型请求，并不删除其程序执行候选。
+需要修改预期的五例，语义预算 @16 覆盖仍为 3/5；N04 从 48 到 43、N05 从
+170 到 129，仍未进入预算。其余保留源断言即可检出的案例退出模型队列，不等于
+新增执行漏报。见 `evaluation/expected_slot_eligibility_review_v1.json`。
+
+低 reasoning effort 对照在固定启动窗中只启动并完成前 9/32 个请求，3 个严格 JSON，
+4 个截断空正文、2 个纯空格，0 个 accepted 修订。不能由此说模型全错：第 3 个
+请求有 7 个静态可成立的 N05 完整预期，被 helper 观察位置或诊断文本结构约束挡住；
+另两个边界预期尚缺规范依据。P7 的数字树预期正确，却同时改了观察路径而被拒绝。
+五个历史正确 oracle 的精确配对请求均未启动，因此其保留率未定义，不能写 0/5。
+证据为 `evaluation/low_effort_oracle_independent_review_v1.json`。
+
+真实写入来源的两组 smoke 与 baseline 的逐测试结果一致。N01 的 24 条标量读均
+绑定到此前最后一次同对象、同字段写入；但五条可对齐的生成观察和控制具有相同
+writer 与值，尚未出现目标预期的同 q 写入来源分歧。N02 六条复杂 headers 读全部
+标为 unknown。它们验证了观测和源 q 对齐，不证明搜索改进；见
+`evaluation/observed_write_smoke_review_v2.json` 与对应 native binding 记录。
+随后扩展到全部 32 组，独立复核了 10 个有新 writer 的 group-q、73 条对应读，
+全部有通过的同源控制，原断言和原生逐测试结果保持一致。N01 的 c8e…、N02 的
+17b… 在同一原 q 处确实由正常 close 写入变成初始化 False。另两条 N02 失败控制
+不属于这些观察，不能作为合格控制。73 条读包含重复及未裁决 oracle，不是 73 个
+缺陷；这些观测还没有用于已执行的在线反馈搜索。证据为
+`evaluation/observed_write_full_review_v2.json`。
+
+对这些已完成 trace 作确定性状态保留，得到 14 个生成代表。独立重算投影和保留
+顺序后，逐个审查完整测试：7 个 oracle 合理、6 个只是修改 status_code 输入却
+仍期待 200、1 个 invalid charset 后必须先消费流的前提待确认。N01 旧目标自身
+被同状态压掉，但首代表 c3a… 也正确暴露异常后未关闭；N02 目标直接保留。
+这是两个已见案例上的离线压缩；不是 14 个新缺陷，也没有测量在线搜索收益。
+见 `evaluation/observed_write_frontier_review_v1.json`。只有被预算实际观察到的状态
+集合有限，使用精确标量值的抽象域本身并不有限。
+再将状态 key 中的 writer 身份单独移除，保留 q、分配位置、对象字段与标量值，
+独立从 297 条原始观察重算后，两臂全部保留决定及 14 个代表完全一致。
+这批 trace 没有证明 writer 身份比标量反馈带来额外搜索保留收益；解释能力与
+新增检错收益应分开。见 `evaluation/observed_writer_key_ablation_review_v1.json`。
+
 
 初始化已核验旧 checkpoint08 的记录文件与哈希。初始
 `results/relation_search_20260929/evaluation/checkpoint_00.json` 的状态是：
@@ -166,7 +318,12 @@ warm replay 即使达到 17/17，也不能写成新模型请求的端到端 17/1
 
 所有结果用新文件名写入，不覆盖旧 checkpoint。`--previous` 保留本轮此前已确认的交付；固定配置命中仍只来自本次 campaign 的实际生成报告，不继承 focused 的运行成功。没有新 campaign 时可省略 `--campaign`，此时不能产生固定配置命中。评价自检同时覆盖继承证据、人工修补、缺少自动来源、受限 corpus、N06 历史轴、多轮阶段参数、报告篡改、模型模式和代码快照；这些是评价器单元验证，不是新的 trial 实验。
 
-运行失败不等于检出缺陷；编译错误、环境错误、未执行 assertion 和不适用 oracle 分开记录。尚未复核的失败保持未知。全仓库表示在真实候选项目内执行所选测试，并不表示全套测试。抽查裁决不能估计总体误报率；单轮开发案例也不能支持总体漏报率。Docker 总并发最多两个执行槽，由生成/执行者与评价者协调。
+运行失败不等于检出缺陷；编译错误、环境错误、未执行 assertion 和不适用 oracle 分开记录。尚未复核的失败保持未知。全仓库表示在真实候选项目内执行所选测试，并不表示全套测试。抽查裁决不能估计总体误报率；单轮开发案例也不能支持总体漏报率。资源并发后来按封存调度记录调整，各 campaign 自身 worker 参数不变；并行阶段的耗时不能当严格隔离的速度对比。
+
+17 例都是已经查看过的开发集。源码没有 case/API 特化、rename/跨实例/finally 控制
+通过，只能支持这些局部机制检查，不能证明不存在对开发案例的过拟合。程序候选
+能否生成、预算排序是否有效、模型 oracle 是否准确、最终是否改善 issue resolution，
+需要分别评价，不能由其中一个指标替代另外三个。
 
 ## N04 oracle 子流程的完整审查
 
@@ -256,3 +413,6 @@ CSI-u 帧迁到 End CSI-tilde 的候选不满足原 text-only oracle，同样拒
 原生 JSON 直接显示根值仍为 a，未变成 1；省略的后代差异不能称为逐个直接观测。
 后续 invalid nested safeParse 断言未到达。源码 resolver 用 object runner 覆盖
 pipe runner，是支持缺失变换的因果证据。局部修订与 attempt3 validation 完全相符。
+
+08:06 的跨 campaign 汇总封存在 `evaluation/timebox_0806_snapshot.json`；
+其中未完成案例不记为漏报，成本限定为已核验轮次，不把预取但尚未进入该轮次的请求混入。
