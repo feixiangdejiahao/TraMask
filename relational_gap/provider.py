@@ -30,6 +30,10 @@ def dispatch(request, output: Path, *, root: Path):
                             {'role': 'user', 'content': request['prompt']}],
                'response_format': {'type': 'json_object'}, 'stream': False,
                'thinking': {'type': thinking}}
+    if 'reasoning_effort' in request:
+        if request['reasoning_effort'] not in {'low', 'high', 'max'}:
+            raise ValueError('Unsupported reasoning effort')
+        payload['reasoning_effort'] = request['reasoning_effort']
     write(output/'request.json', payload)
     record = {'request_id': request['id'], 'model': payload['model'],
               'request_sha256': hashlib.sha256(encoded(payload)).hexdigest(),
@@ -37,6 +41,8 @@ def dispatch(request, output: Path, *, root: Path):
               'thinking': thinking,
               'reference_or_verifier_inputs': False, 'execution_outcomes': False,
               'status': 'prepared', 'timeout_seconds': 300, 'max_response_bytes': 524288}
+    if 'reasoning_effort' in payload:
+        record['reasoning_effort'] = payload['reasoning_effort']
     write(output/'manifest.json', record)
     policy = json.loads((root/'configs/execution_policy.json').read_text())
     if not policy.get('allow_model_code_upload'):

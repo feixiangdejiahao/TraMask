@@ -1,8 +1,11 @@
+import ast
 import json
+
+import pytest
 
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
-from relation_search.oracle import imported_api_contexts, issue_contract, prepare_requests, validate
+from relation_search.oracle import imported_api_contexts, issue_contract, prepare_requests, restore_assertion_diagnostic, validate
 
 
 def test_benchmark_runner_wrapper_is_not_part_of_the_contract():
@@ -28,12 +31,11 @@ def test_import_context_follows_source_alias_and_barrel_to_function_body():
     assert 'stamp: true' in rows[0]['code'] and 'other' not in rows[0]['code']
 
 
-def setup():
+def setup(assertion='assert result == 1'):
     source = Source('test_numbers.py', '''def test_count():
     values = [1]
     result = len(values)
-    assert result == 1
-''', 'python')
+    ''' + assertion + '\n', 'python')
     front = extract_frontend([source])
     corpus = to_emitter_corpus(front)
     test = next(iter(corpus['tests'].values()))
@@ -72,3 +74,36 @@ def test_missing_model_judgment_does_not_create_or_delete_candidates():
     result = validate(request, '{"revisions": []}', corpus)
     assert result['revisions'] == []
     assert request['offered']['C0']['candidate'] == candidate
+
+
+@pytest.mark.parametrize('message', ['result', 'r.output', 'describe_failure(result)'])
+def test_omitted_failure_diagnostic_is_restored_from_original_ast(message):
+    corpus, front, candidate = setup('assert result == 1, ' + message)
+    request = prepare_requests(corpus, front, [candidate], 'Count the items.')[0]
+    response = {'revisions': [{'candidate': 'C0', 'basis': 'Two items',
+        'updates': [{'assertion': 'A0', 'code': 'assert result != 1'}]}]}
+    revised = validate(request, response, corpus)['revisions'][0]
+    assertion = ast.parse(revised['edits'][-1]['after']).body[0]
+    assert isinstance(assertion.test.ops[0], ast.NotEq)
+    assert ast.dump(assertion.msg) == ast.dump(ast.parse(message, mode='eval').body)
+    assert revised['edits'][0] == candidate['edits'][0]
+
+
+@pytest.mark.parametrize('code', ['assert different == 2',
+    'assert result == 2, different', 'assert result == result',
+    'values.clear()\nassert result == 2', 'assert observe_again() == 2'])
+def test_message_restoration_does_not_admit_other_changes(code):
+    corpus, front, candidate = setup('assert result == 1, result')
+    request = prepare_requests(corpus, front, [candidate], 'Count the items.')[0]
+    outcome = validate(request, {'revisions': [{'candidate': 'C0', 'basis': 'claim',
+        'updates': [{'assertion': 'A0', 'code': code}]}]}, corpus)
+    assert outcome['revisions'] == []
+
+
+def test_diagnostic_restoration_only_handles_one_python_assertion():
+    for code, old, language in [('assert result == 2', 'assert result == 1', 'python'),
+            ('assert result == 2', 'assert result == 1, message', 'go'),
+            ('assert result == 2\nassert other', 'assert result == 1, message', 'python'),
+            ('assert (', 'assert result == 1, message', 'python'),
+            (None, 'assert result == 1, message', 'python')]:
+        assert restore_assertion_diagnostic(code, old, language) == code

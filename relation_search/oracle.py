@@ -206,6 +206,28 @@ def _valid_assertion(code, old, observed, language):
     return valid_assertion(code, old, observed, language)
 
 
+def restore_assertion_diagnostic(code, old, language):
+    """Reattach an omitted source failure message before structural checking.
+
+    The message is not an oracle operand. A model may omit it while changing
+    the predicate; reuse its original AST instead of rejecting that proposal.
+    All other edits, including changed messages, still face the ordinary guard.
+    """
+    if language != 'python' or not isinstance(code, str):
+        return code
+    try:
+        before, after = ast.parse(old), ast.parse(code)
+    except (SyntaxError, TypeError, ValueError):
+        return code
+    if (len(before.body) == len(after.body) == 1
+            and isinstance(before.body[0], ast.Assert)
+            and isinstance(after.body[0], ast.Assert)
+            and before.body[0].msg is not None and after.body[0].msg is None):
+        after.body[0].msg = copy.deepcopy(before.body[0].msg)
+        return ast.unparse(after.body[0])
+    return code
+
+
 def validate(request, payload, corpus):
     if request['candidate_source_hash'] != hashlib.sha256(json.dumps(request['offered'], sort_keys=True).encode()).hexdigest():
         raise ValueError('offered source records changed')
@@ -229,6 +251,8 @@ def validate(request, payload, corpus):
         for update in updates:
             hid, code = update.get('assertion'), update.get('code')
             hole = offered['assertions'].get(hid)
+            if hole is not None:
+                code = restore_assertion_diagnostic(code, hole['code'], corpus['language'])
             if hole is None or hid in used or not _valid_assertion(code, hole['code'], hole['observed'], corpus['language']):
                 good = False
                 break
