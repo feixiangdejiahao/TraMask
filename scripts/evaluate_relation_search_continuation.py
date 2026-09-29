@@ -300,7 +300,7 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
                 verify_file(record)
                 evidence.append(record)
             round_config_ok = (all(stage.get(key) == configuration.get(key) for key in
-                                   ('strategy', 'limit', 'pool', 'max_edits', 'include_baseline', 'representations_only'))
+                                   ('strategy', 'limit', 'pool', 'max_edits', 'include_baseline', 'representations_only', 'writer_priority'))
                                and stage.get('global_configuration_sha256') == configuration_record['sha256']
                                and _path(stage.get('source', '.')) == source_directory
                                and stage.get('previous_sha256') == previous_feedback
@@ -431,7 +431,7 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
                             and exhausted_stage.get('source_sha256', {}).get('corpus.json') == source['sha256']
                             and _same_code(exhausted_manifest.get('algorithm_sha256', {}), code)
                             and all(exhausted_stage.get(key) == configuration.get(key) for key in
-                                    ('strategy', 'limit', 'pool', 'max_edits', 'include_baseline', 'representations_only')))
+                                    ('strategy', 'limit', 'pool', 'max_edits', 'include_baseline', 'representations_only', 'writer_priority')))
             complete = exhausted_ok
         rows[case] = {'scope_verified': config_ok and source_ok and code_ok and (bool(rounds) or exhausted_ok) and all(row['scope_verified'] for row in rounds),
                       'configuration_matches': config_ok, 'source_corpus_matches': source_ok,

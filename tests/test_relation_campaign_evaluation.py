@@ -120,7 +120,8 @@ def test_registration_uses_shared_context_for_nested_go_report(tmp_path):
     assert delivery['test_files'] == [freeze_file(source)]
 
 
-def campaign_files(tmp_path, mode='replay', round_limit=None, case_budget=None):
+def campaign_files(tmp_path, mode='replay', round_limit=None, case_budget=None,
+                   writer_priority=None, writer_stage_priority=None):
     root, source = tmp_path/'campaign', tmp_path/'source'/'N06'
     corpus = write(source/'corpus.json', {'tests': ['same complete source']})
     code = {}
@@ -136,6 +137,8 @@ def campaign_files(tmp_path, mode='replay', round_limit=None, case_budget=None):
                          oracle_mode=mode, semantic_budget=1, per_request=1, model_workers=1,
                          oracle_cache_sha256='historical' if mode == 'replay' else None,
                          source_corpus_sha256={'N06': digest(corpus)}, algorithm_sha256=code)
+    if writer_priority is not None:
+        configuration['writer_priority'] = writer_priority
     global_config = write(root/'configuration.json', configuration)
     local = {**configuration, 'case': 'N06', 'source': str(source)}
     if case_budget is not None:
@@ -151,6 +154,9 @@ def campaign_files(tmp_path, mode='replay', round_limit=None, case_budget=None):
                      source=str(source), global_configuration_sha256=digest(global_config),
                      previous_sha256=previous, source_sha256={'corpus.json': digest(corpus)},
                      algorithm_sha256=code)
+        if writer_priority is not None:
+            stage['writer_priority'] = (writer_priority if writer_stage_priority is None
+                                        else writer_stage_priority)
         write(program/'stage.json', stage)
         write(program/'candidates.json', {'candidates': [candidate]})
         write(program/'corpus.json', json.loads(corpus.read_text()))
@@ -223,6 +229,16 @@ def test_actual_prepare_budget_must_match_global_configuration(tmp_path):
     assert rows['N06']['configuration_matches']
     assert all(not row['configuration_matches'] for row in rows['N06']['rounds'])
     assert not rows['N06']['scope_verified']
+
+
+@pytest.mark.parametrize('actual_priority', [True, False])
+def test_actual_writer_priority_must_match_global_configuration(tmp_path, actual_priority):
+    document, ledger, path = campaign_files(
+        tmp_path, writer_priority=True, writer_stage_priority=actual_priority)
+    rows, _ = verify_campaign(document, ledger, path)
+    assert rows['N06']['configuration_matches']
+    assert all(row['configuration_matches'] == actual_priority for row in rows['N06']['rounds'])
+    assert rows['N06']['scope_verified'] == actual_priority
 
 
 def test_frozen_reports_cannot_change_after_execution(tmp_path):
