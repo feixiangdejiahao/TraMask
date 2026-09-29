@@ -10,6 +10,29 @@ from .checkpoint import read, digest
 from .frontier import Frontier, fingerprint
 
 
+def match_declared_tests(tests, identifiers):
+    """Normalize reporter boundary whitespace without merging runtime identities.
+
+    Vitest fullName may prepend an empty root-suite title. Internal whitespace
+    remains significant, and ambiguous normalized names cannot establish that a
+    declared candidate ran. Distinct parameter/subtest suffixes remain distinct.
+    """
+    names = list(identifiers)
+    normalized = [name.strip() for name in names]
+    if len(set(normalized)) != len(normalized):
+        return [], ['ambiguous_normalized_declared_test_id']
+    selected = set(normalized)
+    matched = [test for test in tests if _selected_test_name(test['id'].strip(), selected)]
+    identities = defaultdict(list)
+    for test in matched:
+        identities[test['id'].strip().rsplit('::', 1)[-1]].append(test['id'])
+    if any(len(rows) != 1 for rows in identities.values()):
+        return [], ['ambiguous_normalized_runtime_test_id']
+    missing = [name for name in selected if not any(
+        _selected_test_name(test['id'].strip(), {name}) for test in matched)]
+    return matched, ['missing_declared_test_id'] if missing else []
+
+
 def collect(execution, previous=None):
     execution = Path(execution)
     previous = previous or {}
@@ -49,8 +72,9 @@ def collect(execution, previous=None):
             if runtime.exists():
                 evidence_files[str(runtime)] = digest(runtime)
         report = reports[str(result_path)]
-        matched = [test for test in report['tests'] if _selected_test_name(test['id'], set(row['test_ids']))]
-        okay = bool(matched) and not report['errors'] and all(test['status'] == 'pass' for test in matched)
+        matched, matching_errors = match_declared_tests(report['tests'], row['test_ids'])
+        report_errors = [*report['errors'], *matching_errors]
+        okay = bool(matched) and not report_errors and all(test['status'] == 'pass' for test in matched)
         if row['role'] == 'control':
             for identifier in row['test_ids']:
                 controls[(row['manifest'], identifier)] = okay
@@ -63,7 +87,7 @@ def collect(execution, previous=None):
             executed.add(identifier)
         outcomes[(row['manifest'], identifier)] = dict(
             executed=did_execute, statuses=[test['status'] for test in matched],
-            report_errors=report['errors'], source_profile=row['role'] == 'source_profile')
+            report_errors=report_errors, source_profile=row['role'] == 'source_profile')
         if row['role'] == 'source_profile':
             source_profiles[(row['manifest'], identifier)] = okay
         accepted = Path(row['manifest']).parent.parent/'accepted.json'
