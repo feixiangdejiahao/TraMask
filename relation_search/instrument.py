@@ -67,7 +67,17 @@ def _program_edits(candidate):
     # Only an already instrumented candidate needs the pre-probe snapshot,
     # so repeated instrumentation does not insert each logger twice.
     if candidate.get('instrumentation', {}).get('status') == 'instrumented':
-        return copy.deepcopy(candidate['program_edits'])
+        edits = copy.deepcopy(candidate['program_edits'])
+        # The oracle API can also receive a previously instrumented candidate.
+        # Include newly appended oracle edits, but never copy back a statement
+        # whose replacement already contains a logger prefix. The canonical
+        # pre-probe version of that statement is already in the snapshot.
+        for edit in candidate.get('edits', []):
+            if (edit.get('role') == 'semantic_expected'
+                    and not edit.get('instrumented_prefix')
+                    and not any(_edit_key(edit) == _edit_key(old) for old in edits)):
+                edits.append(copy.deepcopy(edit))
+        return edits
     return copy.deepcopy(candidate.get('edits', []))
 
 

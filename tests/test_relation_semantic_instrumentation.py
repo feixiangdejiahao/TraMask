@@ -14,7 +14,7 @@ from relation_search.oracle import prepare_requests, validate
 from relation_search.semantic_cache import apply_cache, program_key
 
 
-def example(buggy):
+def example(buggy, probe_at_assertion=False):
     code = ('def total(a, b):\n    return ' + ('3' if buggy else 'a + b') + '\n\n'
             'def test_total():\n    a = 1\n    b = 2\n    result = total(a, b)\n'
             '    assert result == 3, result\n')
@@ -36,16 +36,20 @@ def example(buggy):
     left['runtime_feedback'] = dict(candidate_id='left', status='runtime_observed',
                                     retained=True, measured_profiles=['recorded'])
     combined = compose_neighbors([left], [right])[0]
-    combined['runtime_probes'] = [dict(phase='before_assertion',
-        insert_before=span('assert result == 3, result'),
-        roles=[dict(name='result', expression='result')])]
+    combined['runtime_probes'] = [dict(phase='before_call',
+        insert_before=span('assert result == 3, result' if probe_at_assertion else 'result = total(a, b)'),
+        roles=[dict(name='a', expression='a'), dict(name='b', expression='b')])]
     return corpus, front, combined
 
 
 @pytest.mark.parametrize('mode', ['fresh_validation', 'cache_replay'])
 @pytest.mark.parametrize('buggy', [False, True])
-def test_oracle_survives_composition_and_repeated_instrumentation(mode, buggy, tmp_path, monkeypatch):
-    corpus, front, candidate = example(buggy)
+@pytest.mark.parametrize('phase', ['before_instrumentation', 'after_instrumentation', 'assertion_boundary'])
+def test_oracle_survives_composition_and_repeated_instrumentation(mode, buggy, phase, tmp_path, monkeypatch):
+    corpus, front, candidate = example(buggy, probe_at_assertion=phase == 'assertion_boundary')
+    if phase == 'after_instrumentation':
+        candidate = next(row for row in instrument_candidates(corpus, [candidate])['candidates']
+                         if row['id'] == candidate['id'])
     frozen = copy.deepcopy(candidate)
     contract = 'total returns the sum of its two arguments.'
     request = prepare_requests(corpus, front, [candidate], contract)[0]
@@ -59,7 +63,8 @@ def test_oracle_survives_composition_and_repeated_instrumentation(mode, buggy, t
     twice = instrument_candidates(corpus, result['candidates'])
     assert result['candidates'] == twice['candidates']
     generated = next(row for row in result['candidates'] if row['id'] == revision['id'])
-    assert generated['program_edits'] == revision['edits']
+    assert {e['role'] for e in generated['program_edits']} == {'input', 'semantic_expected'}
+    assert not any(e.get('instrumented_prefix') for e in generated['program_edits'])
     assert len([e for e in generated['program_edits'] if e.get('role') == 'semantic_expected']) == 1
     assert candidate == frozen
     for helper in result['helper_files']:
