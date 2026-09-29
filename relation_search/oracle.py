@@ -144,6 +144,26 @@ def preview(corpus, candidate):
     return data.decode()
 
 
+def assertion_alias_locations(corpus, candidate, holes):
+    """Bind model assertion IDs by source position, including repeated text."""
+    candidate = program_candidate(candidate)
+    owner = corpus['tests'][candidate['base_test_id']]['span']
+    modified = preview(corpus, candidate).encode()
+    aliases = []
+    for alias, hole in holes.items():
+        span = hole['span']
+        shift = sum(len(edit['after'].encode()) - (edit['span']['end_byte']-edit['span']['start_byte'])
+                    for edit in candidate['edits'] if edit['span']['path'] == span['path']
+                    and edit['span']['end_byte'] <= span['start_byte'])
+        current = dict(path=span['path'], start_byte=span['start_byte']+shift,
+                       end_byte=span['end_byte']+shift)
+        begin, end = current['start_byte']-owner['start_byte'], current['end_byte']-owner['start_byte']
+        if modified[begin:end].decode() != hole['code']:
+            raise ValueError('Unchanged assertion does not match its modified-source location')
+        aliases.append(dict(alias=alias, original_span=span, modified_span=current))
+    return aliases
+
+
 def prepare_requests(corpus, frontend, candidates, issue, max_requests=4, per_request=16,
                      *, evidence_mode='baseline', impact_evidence_by_id=None):
     if evidence_mode not in {'baseline', 'dependency'}:
@@ -178,7 +198,11 @@ def prepare_requests(corpus, frontend, candidates, issue, max_requests=4, per_re
             if evidence_mode == 'dependency':
                 from relation_search.oracle_evidence import build_evidence
                 source_candidate['impact_evidence'] = (impact_evidence_by_id or {}).get(candidate['id'], {})
-                evidence = build_evidence(corpus, frontend, source_candidate)
+                aliases = assertion_alias_locations(corpus, source_candidate, holemap)
+                for wire_assertion, locations in zip(value['assertions'], aliases):
+                    wire_assertion.update(original_span=locations['original_span'],
+                                          modified_span=locations['modified_span'])
+                evidence = build_evidence(corpus, frontend, source_candidate, assertion_aliases=aliases)
                 analysis[alias] = evidence
                 # Keep the complete structured evidence locally. The prompt
                 # renders each source body once rather than repeating both its

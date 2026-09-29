@@ -7,6 +7,7 @@ runtime order. Full declarations and source controls are never text-truncated.
 from __future__ import annotations
 
 from collections import defaultdict
+import copy
 from functools import lru_cache
 import hashlib
 import json
@@ -240,7 +241,7 @@ def _control_tests(frontend, calls, seed_ids, changes, base_id, max_per_call=2):
     return _dedup(controls)
 
 
-def build_evidence(corpus, frontend, candidate, *, max_bytes=48000, declaration_depth=1):
+def build_evidence(corpus, frontend, candidate, *, max_bytes=48000, declaration_depth=1, assertion_aliases=None):
     """Return source-derived prompt evidence for one complete candidate test.
 
     ``rendered`` is directly usable in an oracle prompt. ``status=over_budget``
@@ -428,10 +429,70 @@ def build_evidence(corpus, frontend, candidate, *, max_bytes=48000, declaration_
                     max_bytes=max_bytes, source_controls_per_call=2),
         analysis_stats=dict(calls=len(calls), relevant_calls=len(relevant_calls),
                             observations=len(observations), related_assertions=len(assertions)))
+    if assertion_aliases is not None:
+        _attach_assertion_aliases(result, assertion_aliases)
     result['rendered'] = render_evidence(result)
     result['rendered_bytes'] = len(result['rendered'].encode())
     result['status'] = 'over_budget' if max_bytes is not None and result['rendered_bytes'] > max_bytes else 'ready'
     return result
+
+
+def _attach_assertion_aliases(evidence, supplied):
+    """Map edit-interface IDs by exact spans, never by repeated assertion text.
+
+    Caller coordinates are checked against the same UTF-8 source edits used for
+    reanalysis. An assertion replaced internally is not an unchanged offered
+    hole. Insertions at its start shift the whole assertion; insertions at its
+    end leave that assertion's half-open extent unchanged.
+    """
+    if not isinstance(supplied, list):
+        raise ValueError('assertion_aliases must be a list')
+    original, modified, seen_aliases = {}, {}, set()
+    aliases = copy.deepcopy(supplied)
+    for row in aliases:
+        if not isinstance(row, dict) or not isinstance(row.get('alias'), str) or not row['alias']:
+            raise ValueError('assertion alias must be a nonempty string')
+        before, after = row.get('original_span'), row.get('modified_span')
+        for extent in (before, after):
+            if (not isinstance(extent, dict) or not isinstance(extent.get('path'), str)
+                    or type(extent.get('start_byte')) is not int or type(extent.get('end_byte')) is not int
+                    or not 0 <= extent['start_byte'] < extent['end_byte']):
+                raise ValueError('assertion alias requires nonempty original and modified byte spans')
+        if row['alias'] in seen_aliases or _key(before) in original or _key(after) in modified:
+            raise ValueError('assertion alias or source span is ambiguous')
+        shift = 0
+        for change in evidence['changes']:
+            extent = change['original_span']
+            if extent['path'] != before['path']:
+                continue
+            if extent['end_byte'] <= before['start_byte']:
+                shift += len(change['after'].encode()) - len(change['before'].encode())
+            elif extent['start_byte'] < before['end_byte']:
+                raise ValueError('assertion alias overlaps a changed assertion')
+        expected = (before['path'], before['start_byte']+shift, before['end_byte']+shift)
+        if _key(after) != expected:
+            raise ValueError('assertion alias modified span does not match source edit offsets')
+        original[_key(before)] = row['alias']
+        modified[_key(after)] = row['alias']
+        seen_aliases.add(row['alias'])
+    evidence['assertion_aliases'] = aliases
+    # The obligation list belongs to the input candidate/ranking; don't mutate it.
+    evidence['original_observation_obligations'] = copy.deepcopy(evidence['original_observation_obligations'])
+    for item in evidence['original_observation_obligations']:
+        extent = item.get('assertion_span')
+        item['assertion_alias'] = original.get(_key(extent)) if extent else None
+        item['assertion_alias_status'] = 'matched' if item['assertion_alias'] else 'not_offered'
+    for item in evidence['assertions']:
+        item['assertion_alias'] = modified.get(_key(item['span']))
+        item['assertion_alias_status'] = 'matched' if item['assertion_alias'] else 'not_offered'
+
+
+def _assertion_alias_label(item):
+    if item.get('assertion_alias'):
+        return ' ['+item['assertion_alias']+']'
+    if 'assertion_alias_status' in item:
+        return ' [not offered for editing]'
+    return ''
 
 
 def _render_obligations(obligations):
@@ -461,7 +522,7 @@ def _render_obligations(obligations):
         links.append('E'+str(item['edit_index'])+' -> '+observations[qid][1]+' via '+paths[key])
     body = ['Original-source unpaired impacts (may dependence; unchanged expected value is not proof it must change):']
     for item, alias in observations.values():
-        body.append(alias+' q='+item['observation_id']+' actual='+location(item.get('actual_span'))+
+        body.append(alias+_assertion_alias_label(item)+' q='+item['observation_id']+' actual='+location(item.get('actual_span'))+
                     ' expected='+location(item.get('expected_span'))+
                     ' expected_dependency='+item.get('expected_dependency_basis','unknown'))
         body.append('  actual: '+str(item.get('observed'))+'; source expected: '+str(item.get('expected')))
@@ -504,7 +565,7 @@ def render_evidence(evidence):
             lines.append('  '+actual+' -> '+mapping['parameter'])
     for assertion in evidence['assertions']:
         code = assertion['code'] if len(assertion['code']) <= 240 else 'assertion at '+modified_location(assertion['span'])
-        lines.append('OBSERVATION '+q_aliases[assertion['id']]+' '+modified_location(assertion['span'])+' OLD EXPECTATION '+code)
+        lines.append('OBSERVATION '+q_aliases[assertion['id']]+_assertion_alias_label(assertion)+' '+modified_location(assertion['span'])+' OLD EXPECTATION '+code)
     lines.extend(_render_obligations(evidence.get('original_observation_obligations', [])))
     grouped_edges = {}
     for edge in evidence['edges']:

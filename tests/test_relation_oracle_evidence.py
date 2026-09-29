@@ -246,3 +246,79 @@ def test_render_callback_and_control_references_point_to_nonfirst_call_alias():
     lines = [line for line in rendered.splitlines() if line.startswith(('FUNCTION ARGUMENT','SOURCE CONTROL'))]
     assert len(lines)==2 and all('"call_id": "c1"' in line for line in lines)
     assert 'CALL c1 second M0:0..1' in rendered
+
+
+def _repeated_assertion_phases():
+    from relation_search.impact_selection import select
+    code = '''def read(count): return count
+def checkpoint(label): return None
+def test_case():
+    count = 1
+    value = read(count)
+    assert value == 1
+    value = read(count)
+    assert value == 1
+'''
+    corpus,frontend,candidate = setup('python',code,'count = 1','count = 2')
+    path = candidate['edits'][0]['span']['path']
+    first_call = code.index('value = read(count)')
+    insertion_at = code.index('value = read(count)',first_call+1)
+    insertion = 'checkpoint("界")\n    '
+    candidate['edits'].append(dict(span=dict(path=path,start_byte=insertion_at,end_byte=insertion_at),
+                                   before='',after=insertion))
+    ranked = select(corpus,frontend,[candidate],1)
+    candidate['impact_evidence'] = ranked['ranking'][0]['evidence']
+    original = sorted((q['assertion_span'] for q in frontend['observations'] if q['kind']=='assertion'),
+                      key=lambda s:s['start_byte'])
+    aliases=[]
+    for index,extent in enumerate(original):
+        shift = len(insertion.encode()) if extent['start_byte'] >= insertion_at else 0
+        changed=dict(extent,start_byte=extent['start_byte']+shift,end_byte=extent['end_byte']+shift)
+        aliases.append(dict(alias='A'+str(index),original_span=extent,modified_span=changed))
+    return corpus,frontend,candidate,aliases
+
+
+def test_assertion_interface_aliases_distinguish_identical_text_across_inserted_phases():
+    corpus,frontend,candidate,aliases = _repeated_assertion_phases()
+    untouched = copy.deepcopy((candidate,aliases))
+    evidence = build_evidence(corpus,frontend,candidate,assertion_aliases=aliases)
+    observations = sorted(evidence['assertions'],key=lambda q:q['span']['start_byte'])
+    assert len(observations)==2 and observations[0]['code']==observations[1]['code']=='assert value == 1'
+    assert [q['assertion_alias'] for q in observations]==['A0','A1']
+    assert [q['span']['start_byte'] for q in observations]==[a['modified_span']['start_byte'] for a in aliases]
+    assert len({q['id'] for q in observations})==2
+    obligations = sorted(evidence['original_observation_obligations'],key=lambda q:q['assertion_span']['start_byte'])
+    assert [q['assertion_alias'] for q in obligations]==['A0','A1']
+    lines = evidence['rendered'].splitlines()
+    assert len([line for line in lines if line.startswith('OBSERVATION ') and '[A0]' in line])==1
+    assert len([line for line in lines if line.startswith('OBSERVATION ') and '[A1]' in line])==1
+    assert any(line.startswith('O0 [A0] ') for line in lines)
+    assert any(line.startswith('O1 [A1] ') for line in lines)
+    assert evidence['assertion_aliases']==aliases
+    assert (candidate,aliases)==untouched
+
+
+def test_assertion_alias_rejects_swapped_identical_text_and_wrong_character_offsets():
+    corpus,frontend,candidate,aliases = _repeated_assertion_phases()
+    swapped=copy.deepcopy(aliases)
+    swapped[0]['modified_span'],swapped[1]['modified_span']=swapped[1]['modified_span'],swapped[0]['modified_span']
+    with pytest.raises(ValueError,match='source edit offsets'):
+        build_evidence(corpus,frontend,candidate,assertion_aliases=swapped)
+    wrong=copy.deepcopy(aliases)
+    wrong[1]['modified_span']['start_byte']-=2
+    wrong[1]['modified_span']['end_byte']-=2
+    with pytest.raises(ValueError,match='source edit offsets'):
+        build_evidence(corpus,frontend,candidate,assertion_aliases=wrong)
+
+
+def test_unoffered_observation_is_explicit_and_no_alias_default_stays_unchanged():
+    corpus,frontend,candidate,aliases = _repeated_assertion_phases()
+    plain=build_evidence(corpus,frontend,candidate)
+    assert 'assertion_aliases' not in plain
+    assert all('assertion_alias' not in q for q in plain['assertions'])
+    partial=build_evidence(corpus,frontend,candidate,assertion_aliases=aliases[1:])
+    observations=sorted(partial['assertions'],key=lambda q:q['span']['start_byte'])
+    assert observations[0]['assertion_alias'] is None
+    assert observations[0]['assertion_alias_status']=='not_offered'
+    assert observations[1]['assertion_alias']=='A1'
+    assert '[not offered for editing]' in partial['rendered']
