@@ -216,8 +216,15 @@ def emit_batch(args):
     from relation_search.checkpoint import start, completed, seal, digest
     frozen(args.input)
     completed(args.input)
+    case = load(args.input/'case.json')
+    isolate_go_compilation = bool(getattr(args, 'isolate_go_compilation', False))
+    if args.group_size < 1:
+        raise ValueError('Emission group size must be positive')
+    effective_group_size = 1 if isolate_go_compilation and case['language'] == 'go' else args.group_size
+    compilation_isolation = ('one_candidate_source_snapshot' if isolate_go_compilation else 'shared_group_source_snapshot') if case['language'] == 'go' else 'not_applicable'
     request = dict(stage='emit', input=str(args.input.resolve()), input_sha256=digest(args.input/'prepare.json'),
                    group_size=args.group_size, timeout=args.timeout,
+                   isolate_go_compilation=isolate_go_compilation, effective_group_size=effective_group_size,
                    algorithm_sha256={name: digest(ROOT/name) for name in (
                        'scripts/execute_relation_search.py', 'scripts/relational_phase_runner.py',
                        'scripts/relational_go_test_runner.py',
@@ -227,7 +234,6 @@ def emit_batch(args):
     existing = completed(args.output)
     if existing is not None:
         return {**existing, 'resumed': True}
-    case = load(args.input/'case.json')
     corpus = load(args.input/'corpus.json')
     selection = load(args.input/'selection.json')
     package_sources = {}
@@ -253,7 +259,9 @@ def emit_batch(args):
              'llm_q_count': sum(bool(c.get('semantic_revision')) for c in candidates),
              'source': str(args.input.resolve()),
              'selection': 'frozen program-owned candidate batch',
-             'max_group_size': args.group_size}
+             'max_group_size': effective_group_size,
+             'requested_group_size': args.group_size,
+             'compilation_isolation': compilation_isolation}
     write(args.output/'execution_lanes.json', lanes)
     raw = {candidate['id']: candidate for candidate in candidates if not candidate.get('is_source_profile')}
     instrumentation = instrument_candidates(corpus, list(raw.values()))
@@ -267,9 +275,12 @@ def emit_batch(args):
     for candidate in unique.values():
         key = (candidate['execution_lane'], corpus['tests'][candidate['base_test_id']]['span']['path'])
         groups[key].append(candidate)
-    batches = [(key, members[start:start+args.group_size])
+    # Go test filters and separate test processes still compile every test in
+    # a package together. Separate source snapshots prevent one malformed
+    # candidate from making its otherwise independent siblings unexecutable.
+    batches = [(key, members[start:start+effective_group_size])
                for key, members in sorted(groups.items())
-               for start in range(0, len(members), args.group_size)]
+               for start in range(0, len(members), effective_group_size)]
     artifacts = []
     for index, ((lane, path), members) in enumerate(batches):
         emitted = emit(corpus, members)
@@ -378,6 +389,7 @@ def emit_batch(args):
             mounts.append({'source': str(source.resolve()), 'target': target,
                            'sha256': hashlib.sha256(source.read_bytes()).hexdigest()})
         manifest = {'case': case['id'], 'execution_lane': lane,
+                    'compilation_isolation': compilation_isolation,
                     'static_parent_ids': {c['id']: c['static_parent_id'] for c in members},
                     'candidate_ids': [c['id'] for c in members],
                     'command': 'python3 .relational_phase_inputs/runner.py .relational_phase_inputs/plan.json',
@@ -520,6 +532,8 @@ def main():
     parser.add_argument('--timeout', type=int, default=240)
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--group-size', type=int, default=16)
+    parser.add_argument('--isolate-go-compilation', action='store_true',
+                        help='Emit each Go candidate in its own source snapshot so sibling compile errors cannot block it')
     parser.add_argument('--registry', type=Path, default=ROOT/'data/relational_gap_v1/registry.json')
     parser.add_argument('--dependency-packages-root', type=Path,
                         default=ROOT/'data/relational_gap_v1_dependency_packages')

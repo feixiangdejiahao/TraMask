@@ -125,3 +125,77 @@ P1、P6、P7、N04、N05 的正确目标见证涉及预期修订，要审查完�
 挂载标识的实验容器，相似前缀和指向其它目录的symlink不匹配。检查发现Docker
 移除返回非零时仍写complete，已反馈主实现改为error并保留逐容器returncode。
 这类测试不执行真实Docker删除，也不会接触其它项目的容器。
+
+最终压缩呈现另经独立还原核查，136个上下文中的6620条边、847个声明、2160个
+调用和518个观察都保留；134个source control中的调用引用也能正确绑定到缩短
+后的call编号。135/136个文本在48KB内，中位8587字节、最大67275字节。
+这个census没有callback或原图impact义务，二者不计作该审计覆盖。首次实际生成
+的48个主臂请求已另行核验完整测试、183条断言和121条原图impact义务源码，
+prompt为6891—39833字节，没有上下文超预算。体积不是token数或provider容量保证。
+对应证据为 `evaluation/oracle_evidence_render_review_v2.json` 与
+`evaluation/request_evidence_review_01.json`。
+
+## 主配置首个运行检查点
+
+主运行 `uniform_fresh_impact_v3` 在冻结工作树 `7a8ff95` 上执行：2轮，每轮
+最多128个程序候选、16个语义候选，每请求1个完整候选；impact选择与dependency
+证据、writer优先、profile程序调度。17例先各完成第一轮，再开始第二轮。
+2个case并发，每case最多2个模型请求和2个Docker任务；没有历史oracle缓存。
+绝对截止由专属supervisor控制在16:35:35 UTC。
+
+`evaluation/uniform_fresh_impact_v3/checkpoint_01.json` 确认本轮当前 **2/17**：
+N01、N02。两例各完成第一轮，还未完成第二轮。完整生成函数与已审查合格材料
+AST一致；在当前候选patch上重新执行，源控制通过，命名组合测试在目标关闭
+状态断言失败。两条都保留原断言，因此这2例不证明模型修订的收益。其它案例
+仍在运行，不判为漏报。新评价适配区分eligible队列和实际offered候选；没有
+成功进入请求的选中候选仍应留待办，不把“曾被选中”当作“已获模型判断”。
+
+`checkpoint_02.json` 新增N03的完整材料与当前命名失败核查，当前3/17；同样
+保留原断言，不记作LLM oracle收益。其余案例仍在推进，不能提前判漏报。
+
+## 上下文消融与无覆盖原型
+
+新增程序 `scripts/audit_dependency_context_ablation.py` 独立检查消融的抽样和
+真实provider请求：每例首轮请求按候选ID的SHA256选前2，wire只移除
+`dependency_evidence`，其余system、完整测试、断言、输入修改和模型设置不变。
+对最初5例共10对，源码/请求/原始响应哈希均核对通过；7个独立审计测试通过。
+双方推导正确的完整预期各4/10，其中N05的两对是相同程序材料，不能视为两个
+独立语义问题。treatment这4个均能通过冻结结构检查，control有1个修改了Go
+错误诊断正文而被结构检查拒绝，故可接受的正确修订为4对3。其余多数是主动
+弃答或token耗尽；不能用结构接受率替代正确率，也未对消融另做仓库执行。
+这是临时小样本，尚不能证明上下文提高正确预期生成率。材料为
+`evaluation/context_ablation/checkpoint_01_{wire,semantic_reviews}.json`。
+
+guard-transition第一版全池census独立核对17例全部4502个候选、输入哈希及
+逐候选文件，确为0 known cell、0 crossed guard、0 errors。该原型不能覆盖
+当前候选，不接入主方法；unknown不表示没有组合缺陷。完整性证据为
+`evaluation/guard_transition_cells_census_review_v1.json`。
+
+部分常量环境v2在同一4502池仍全部为0 cell；独立复核输入、算法快照、全部
+候选ID及文件，1927个候选虽产生部分绑定，也没有得到可用于排序的关系。
+见 `evaluation/guard_transition_cells_census_review_v2.json`。
+
+对已完成首轮的N01—N06，96个已发送模型的候选与同一执行manifest中的命名
+源控制逐一关联：79个全部通过，17个至少一个控制失败/报错（N03有10个、N04
+有7个），没有无法归属。另13个N07请求当时尚无执行记录，单列未完成。
+这说明当前流程可能先在坏seed上消耗语义预算，但尚未测量“先跑seed”是否能
+提高目标覆盖。该统计不改变主评分，不做事后过滤，也没有新增执行。证据为
+`evaluation/source_controls_after_model_01.json`；配对wire及源控制审计共11测试通过。
+
+`checkpoint_03.json` 再核实N06，当前4/17。N06是既有历史组合的重新执行。
+N05首轮另有一个Go候选删除必需参数，导致同组6个oracle因整包编译失败均未
+执行；其源控制通过。运行隔离按test进程完成，并不隔离编译单元。这些未运行
+候选不能按测试通过、缺陷检出或错误oracle计分。
+
+## 局部候选分组的静态覆盖
+
+`context_candidate_groups_v1` 封存后，独立核对全部4502个输入、每个候选唯一
+context、descriptor哈希、两轮完整贪心调度和每组最多4成员；旧输入全部保留，
+两轮展示没有重复。五个需要新预期的历史程序材料，shape和impact都是第一轮
+呈现3/5、两轮呈现4/5。17例合计第一轮272组，分别含322和325候选；两轮538组
+分别含635和621候选。因此这不是与16单例相同的候选或token预算。
+
+这个分组只把同源码位置的一些输入替代项放在同一局部问题里，每组最多选择
+一个成员生成完整预期。呈现了目标不等于模型选择了目标、更不等于检出了缺陷。
+目前没有分组模型或执行收益，静态结果仍不能覆盖全部五个语义目标。证据为
+`evaluation/context_group_review_v1.json`。

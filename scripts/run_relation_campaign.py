@@ -182,6 +182,7 @@ def campaign(args):
     configuration = dict(source_root=str(args.source.resolve()), cases=cases, rounds=args.rounds,
         limit=args.limit, pool=args.pool, strategy=args.strategy, max_edits=args.max_edits,
         workers=args.workers, group_size=args.group_size, timeout=args.timeout,
+        isolate_go_compilation=getattr(args, 'isolate_go_compilation', False),
         include_baseline=args.include_baseline, representations_only=False,
         writer_priority=getattr(args, 'writer_priority', False),
         oracle_mode=args.oracle_mode, semantic_budget=args.semantic_budget,
@@ -253,6 +254,7 @@ def campaign(args):
                                   state['previous_semantic'] if args.oracle_mode == 'fresh' else None)
         emission = emit_batch(SimpleNamespace(input=folder/'semantic', output=folder/'emitted',
               group_size=args.group_size, timeout=args.timeout,
+              isolate_go_compilation=getattr(args, 'isolate_go_compilation', False),
               dependency_packages_root=args.dependency_packages_root))
         execution = run(SimpleNamespace(input=folder/'emitted', output=folder/'executed',
                                         workers=args.workers, registry=args.registry))
@@ -313,6 +315,8 @@ if __name__ == '__main__':
     parser.add_argument('--writer-priority', action='store_true',
                         help='Prioritize source-supported Python exception contexts before fair scheduling')
     parser.add_argument('--group-size', type=int, default=16)
+    parser.add_argument('--isolate-go-compilation', action='store_true',
+                        help='Build each generated Go candidate in a separate compilation unit')
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--timeout', type=int, default=180)
     parser.add_argument('--oracle-mode', choices=['none', 'replay', 'fresh'], default='none')
