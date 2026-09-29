@@ -164,6 +164,7 @@ def campaign(args):
         limit=args.limit, pool=args.pool, strategy=args.strategy, max_edits=args.max_edits,
         workers=args.workers, group_size=args.group_size, timeout=args.timeout,
         include_baseline=args.include_baseline, representations_only=False,
+        writer_priority=getattr(args, 'writer_priority', False),
         oracle_mode=args.oracle_mode, semantic_budget=args.semantic_budget,
         per_request=args.per_request, model_workers=args.model_workers,
         batch_recovery=RECOVERY_POLICY,
@@ -195,6 +196,7 @@ def campaign(args):
             preparation = prepare(SimpleNamespace(source=args.source/case, output=folder/'prepared', previous=previous,
                 strategy=args.strategy, limit=args.limit, pool=args.pool, max_edits=args.max_edits,
                 include_baseline=args.include_baseline, representations_only=False,
+                writer_priority=getattr(args, 'writer_priority', False),
                 campaign_configuration=args.output/'configuration.json'))
             pending_semantics = (args.oracle_mode == 'fresh' and previous_semantic is not None
                                  and read(previous_semantic/'semantic_frontier.json')['pending_ids'])
@@ -242,6 +244,8 @@ if __name__ == '__main__':
     parser.add_argument('--strategy', choices=['profile', 'rotation'], default='profile')
     parser.add_argument('--max-edits', type=int, default=4)
     parser.add_argument('--include-baseline', action='store_true')
+    parser.add_argument('--writer-priority', action='store_true',
+                        help='Prioritize source-supported Python exception contexts before fair scheduling')
     parser.add_argument('--group-size', type=int, default=16)
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--timeout', type=int, default=180)

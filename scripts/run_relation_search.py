@@ -17,7 +17,9 @@ def algorithm_files():
     return sorted({*[p for p in ROOT.glob('relation_search/*.py') if p.name != 'oracle.py'],
                    *ROOT.glob('experimental/relation_search_*.py'),
                    *[ROOT/'experimental'/name for name in ('assertion_operand_guard.py', 'source_edit_identity.py',
-                       'candidate_scheduling.py', 'go_arity_guard.py', 'oracle_batch_recovery.py', 'owner_prefix_slice.py')],
+                       'candidate_scheduling.py', 'go_arity_guard.py', 'oracle_batch_recovery.py', 'owner_prefix_slice.py',
+                       'exception_write_priority.py', 'assertion_write_origin.py')],
+                   ROOT/'scripts/analyze_assertion_write_origin_census.py',
                    ROOT/'scripts/run_relation_search.py', ROOT/'scripts/execute_relation_search.py',
                    ROOT/'scripts/relational_go_test_runner.py',
                    ROOT/'scripts/relational_phase_runner.py', ROOT/'generic_composition/emitter.py',
@@ -36,6 +38,7 @@ def prepare(args):
                    previous_sha256=digest(args.previous) if args.previous else None,
                    strategy=args.strategy, limit=args.limit, pool=args.pool,
                    max_edits=args.max_edits, include_baseline=args.include_baseline,
+                   writer_priority=getattr(args, 'writer_priority', False),
                    representations_only=args.representations_only, algorithm_sha256=algorithm)
     if getattr(args, 'campaign_configuration', None):
         request['global_configuration_sha256'] = digest(args.campaign_configuration)
@@ -103,6 +106,28 @@ def prepare(args):
         candidates = validation.pop('candidates')
         counts['static_arity_rejected'] = len(validation['rejected'])
         write(args.output/'static_validation.json', validation)
+    if getattr(args, 'writer_priority', False):
+        original_ids = [row['id'] for row in candidates]
+        if corpus['language'] == 'python':
+            from scripts.analyze_assertion_write_origin_census import analyze_corpus
+            from experimental.exception_write_priority import prioritize
+            census = analyze_corpus(corpus)
+            priority = prioritize(corpus, candidates, census)
+            # The stable partition precedes the existing fair scheduler. Keep
+            # each original candidate, even if metadata IDs were duplicated.
+            candidates = [candidates[row['original_rank'] - 1] for row in priority['ranking']]
+            priority.update(status='applied', analysis_summary=census['summary'],
+                            analyzed_source_sha256=census['source_sha256'])
+        else:
+            priority = dict(status='unsupported_language', input_count=len(candidates),
+                supported_candidates=0, ranking=[dict(id=row['id'], original_rank=i+1,
+                rank=i+1, evidence=[]) for i, row in enumerate(candidates)],
+                selection='original order retained', provider_calls=0, subject_executions=0)
+        priority.update(enabled=True, language=corpus['language'], source_sha256=source_hashes,
+                        original_order=original_ids, ranked_order=[row['id'] for row in candidates],
+                        interpretation='Static may-bypass priority; no online writer feedback or oracle proof.')
+        counts['writer_priority_supported'] = priority['supported_candidates']
+        write(args.output/'writer_priority.json', priority)
     selected = select_round(candidates, args.limit, previous.get('attempted_candidate_ids', []))
     for name in ['corpus.json', 'frontend.json', 'case.json', 'selection.json', 'issue.md']:
         source = args.source/name
@@ -185,6 +210,7 @@ def loop(args):
         pool=args.pool, strategy=args.strategy, max_edits=args.max_edits, workers=args.workers,
         group_size=args.group_size, timeout=args.timeout, include_baseline=args.include_baseline,
         representations_only=args.representations_only,
+        writer_priority=getattr(args, 'writer_priority', False),
         source_sha256=digest(args.source/'corpus.json'),
         algorithm_sha256={str(p.relative_to(ROOT)): digest(p) for p in algorithm_files()})
     if getattr(args, 'campaign_configuration', None):
@@ -229,6 +255,7 @@ def batch(args):
         rounds=args.rounds, limit=args.limit, pool=args.pool, strategy=args.strategy,
         max_edits=args.max_edits, workers=args.workers, group_size=args.group_size, timeout=args.timeout,
         include_baseline=args.include_baseline, representations_only=args.representations_only,
+        writer_priority=getattr(args, 'writer_priority', False),
         source_corpus_sha256={case: digest(args.source/case/'corpus.json') for case in cases},
         algorithm_sha256={str(p.relative_to(ROOT)): digest(p) for p in algorithm_files()})
     start(args.output, dict(stage='batch', **configuration))
@@ -254,6 +281,8 @@ def main():
     parser.add_argument('--previous', type=Path)
     parser.add_argument('--include-baseline', action='store_true')
     parser.add_argument('--representations-only', action='store_true')
+    parser.add_argument('--writer-priority', action='store_true',
+                        help='Prioritize source-supported Python exception contexts before fair scheduling')
     parser.add_argument('--strategy', choices=['profile', 'rotation'], default='profile')
     parser.add_argument('--max-edits', type=int, default=4)
     parser.add_argument('--rounds', type=int, default=2)
