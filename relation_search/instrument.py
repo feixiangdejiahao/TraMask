@@ -62,7 +62,13 @@ def _control_probes(candidate):
 
 
 def _program_edits(candidate):
-    return copy.deepcopy(candidate.get('program_edits', candidate.get('edits', [])))
+    # A composed candidate stores an input-only snapshot in program_edits.
+    # Later oracle revisions live in edits and must reach the emitted test.
+    # Only an already instrumented candidate needs the pre-probe snapshot,
+    # so repeated instrumentation does not insert each logger twice.
+    if candidate.get('instrumentation', {}).get('status') == 'instrumented':
+        return copy.deepcopy(candidate['program_edits'])
+    return copy.deepcopy(candidate.get('edits', []))
 
 
 def _probe_insertions(source, path, candidate_id, base_test_id, probes):
