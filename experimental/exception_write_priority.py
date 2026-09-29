@@ -180,6 +180,14 @@ def evidence(corpus, candidate, assertions, *, index=None):
                 if not any(w['method'] in initialized and w['method'] != path['writer_method'] for w in read['writers']):
                     continue
                 bypass = [s for edge in path['calls'] for s in edge.get('possible_bypass_sites', [])]
+                # A writer is the terminal program point even when it is in
+                # the operation method itself (a zero-call-edge path). Apply
+                # the same source-level may-exit predicate to that final leg;
+                # extracting/inlining a self helper must not hide this evidence.
+                # This still does not establish exception feasibility or q reachability.
+                bypass.extend(s for writer in read['writers']
+                              if writer['method'] == path['writer_method']
+                              for s in writer.get('possible_bypass_sites', []))
                 if not bypass:
                     continue
                 old_call = next((n for n in ast.walk(old_owner) if isinstance(n, ast.Call)

@@ -282,7 +282,8 @@ def _field_writers(module, cls, field):
                 if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == receiver and target.attr == field:
                     rows.append(dict(method=method.name, span=module.span(node), target_span=module.span(target),
                                      value=module.text(node.value), kind=type(node).__name__,
-                                     contexts=_contexts(module, method, node)))
+                                     contexts=_contexts(module, method, node),
+                                     possible_bypass_sites=_bypass_sites(module, method, node)))
     return sorted(rows, key=lambda row: (row['span']['start_byte'], row['method']))
 
 

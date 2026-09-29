@@ -62,10 +62,10 @@ def test_numeric_augmented_write_is_supported_without_boolean_state_names(monkey
         run(monkeypatch, corpus, generated)
 
 
-def test_inlining_the_writer_preserves_runtime_failure_but_loses_current_priority(monkeypatch):
+def test_inlining_the_writer_preserves_runtime_failure_and_priority(monkeypatch):
     # Both programs have the same initialization, exceptional bypass and q.
-    # The current algorithm checks call-edge bypass sites, missing the direct
-    # root-method writer when no self-call edge leads to that writer.
+    # The negative behavior is sealed at commit 0b8c556. The common may-exit
+    # predicate now also covers the path's terminal write, without a call edge.
     results = []
     for subject in [DIRECT, DELEGATED]:
         corpus, candidate, q, generated = example(subject)
@@ -73,7 +73,28 @@ def test_inlining_the_writer_preserves_runtime_failure_but_loses_current_priorit
         with pytest.raises(AssertionError):
             run(monkeypatch, corpus, generated)
         results.append(bool(evidence(corpus, candidate, [q])))
-    assert results == [False, True]
+    assert results == [True, True]
+
+
+@pytest.mark.parametrize('delegated', [False, True])
+def test_direct_and_helper_finally_writers_are_not_bypassed_by_protected_raise(monkeypatch, delegated):
+    final = 'self.commit()' if delegated else 'self.amount += 3'
+    subject = '''class Ledger:
+    def __init__(self):
+        self.amount = 17
+    def apply(self, fail):
+        try:
+            if fail:
+                raise ValueError('interrupted')
+        finally:
+            FINAL
+'''.replace('FINAL', final)
+    if delegated:
+        subject += '    def commit(self):\n        self.amount += 3\n'
+    corpus, candidate, q, generated = example(subject)
+    assert evidence(corpus, candidate, [q]) == []
+    run(monkeypatch, corpus, corpus['sources']['test_ledger.py']['code'])
+    run(monkeypatch, corpus, generated)
 
 
 def test_equivalent_try_except_catch_is_outside_pytest_context_adapter(monkeypatch):
@@ -111,4 +132,3 @@ def test_object_method_override_is_not_a_proved_call_to_the_old_class_writer(mon
         run(monkeypatch, corpus, generated)
     # The state does differ, but its executed operation is the replacement,
     # not the class method whose syntactic writer path supplied the priority.
-
