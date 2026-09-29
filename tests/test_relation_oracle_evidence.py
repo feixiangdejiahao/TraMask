@@ -1,0 +1,207 @@
+"""Semantic boundary tests for candidate-specific input evidence."""
+import copy
+import json
+
+import pytest
+
+from anchor_retrieval.syntax import Source
+from relational_gap.frontend import extract_frontend, to_emitter_corpus
+from relation_search.oracle_evidence import build_evidence
+
+
+def setup(language, code, before, after, extra=None, test_name=None):
+    path = {'python': 'tests/test_evidence.py', 'go': 'evidence_test.go', 'typescript': 'tests/evidence.test.ts'}[language]
+    sources = [Source(path, code, language)] + [Source(p, c, language) for p,c in (extra or {}).items()]
+    frontend = extract_frontend(sources)
+    corpus = to_emitter_corpus(frontend)
+    test_id = next(tid for tid, row in corpus['tests'].items() if test_name is None or row['name'] == test_name)
+    span = corpus['tests'][test_id]['span']
+    data = code.encode()
+    start = data.index(before.encode(), span['start_byte'])
+    candidate = dict(id='unlabeled', base_test_id=test_id, imports=[], source_test_ids=[], edits=[dict(
+        span=dict(path=path, start_byte=start, end_byte=start+len(before.encode())), before=before, after=after)])
+    return corpus, frontend, candidate
+
+
+@pytest.mark.parametrize('language,code', [
+    ('python', 'def twice(value): return value * 2\ndef test_case():\n    input = 1\n    result = twice(input)\n    assert result == 2\n'),
+    ('go', 'package demo\nimport "testing"\nfunc twice(value int) int { return value*2 }\nfunc TestCase(t *testing.T) { input := 1; result := twice(input); if result != 2 { t.Fatal(result) } }\n'),
+    ('typescript', "function twice(value: number) { return value*2; }\ntest('case', () => { const input = 1; const result = twice(input); expect(result).toBe(2); });\n"),
+])
+def test_recomputed_value_dependencies_and_actual_formal_across_languages(language, code):
+    c,f,k = setup(language, code, '1', '3')
+    result = build_evidence(c,f,k)
+    call = next(row for row in result['calls'] if row['callee'] == 'twice')
+    assert call['seed'] and call['related_assertions']
+    assert call['actual_formal'][0]['parameter'] == 'value'
+    assert result['modified_bindings_recomputed'] is True
+    assert result['complete_slice'] is False
+    assert result['status'] == 'ready'
+    assert build_evidence(c,f,k) == result
+    assert c['sources'][k['edits'][0]['span']['path']]['code'] == code
+
+
+def test_callee_change_rebinds_to_new_declaration_and_new_formal():
+    c,f,k = setup('python', '''def original(left): return left
+def alternate(right): return right + 1
+def test_case():
+    assert original(1) == 1
+''', 'original', 'alternate')
+    result = build_evidence(c,f,k)
+    call = next(row for row in result['calls'] if row['callee'] == 'alternate')
+    assert call['targets'][0]['function_id'].endswith(':alternate')
+    assert call['actual_formal'][0]['parameter'] == 'right'
+    assert 'def alternate(right)' in result['rendered']
+    assert 'def original(left)' not in result['rendered']
+
+
+def test_unknown_changed_receiver_does_not_reuse_old_class_method():
+    c,f,k = setup('python', '''class Box:
+    def read(self): return 1
+def test_case():
+    box = Box()
+    assert box.read() == 1
+''', 'Box()', 'factory()')
+    result = build_evidence(c,f,k)
+    call = next(row for row in result['calls'] if row['callee'] == 'box.read')
+    assert not call['targets']
+    assert any(u['reason'] == 'modified_callee_unresolved_or_ambiguous' and u['callee'] == 'box.read' for u in result['unknowns'])
+
+
+@pytest.mark.parametrize('language,code,extra,module,name,after', [
+    ('python', 'def test_case():\n    assert original(1) == 1\n', {'pkg/ops.py': 'def replacement(value): return value + 1\n'}, 'pkg.ops', 'replacement', 'generated_alias'),
+    ('typescript', "test('case', () => { expect(original(1)).toBe(1); });\n", {'src/ops.ts': 'export function replacement(value: number) { return value + 1; }\n'}, '../src/ops', 'replacement', 'generated_alias'),
+])
+def test_new_import_alias_is_bound_to_actual_module(language,code,extra,module,name,after):
+    c,f,k = setup(language, code, 'original', after, extra)
+    k['imports'] = [dict(name=after, module=module, imported_name=name, source_path=k['edits'][0]['span']['path'])]
+    result = build_evidence(c,f,k)
+    call = next(row for row in result['calls'] if row['callee'] == after)
+    assert call['targets'][0]['function_id'].endswith(':replacement')
+    assert call['actual_formal'][0]['parameter'] == 'value'
+    assert 'return value + 1' in result['rendered']
+
+
+def test_relative_ts_donor_import_is_rebased_before_resolution():
+    c,f,k = setup('typescript', "test('case', () => { expect(original(1)).toBe(1); });\n", 'original', 'synthetic',
+                 {'deep/ops.ts': 'export function replacement(value: number) { return value + 1; }\n',
+                  'deep/tests/donor.test.ts': "test('donor', () => { expect(1).toBe(1); });\n"}, test_name='case')
+    k['imports'] = [dict(name='synthetic', module='../ops', imported_name='replacement', source_path='deep/tests/donor.test.ts')]
+    result = build_evidence(c,f,k)
+    call = next(row for row in result['calls'] if row['callee'] == 'synthetic')
+    assert call['targets'][0]['function_id'] == 'deep/ops.ts:1:replacement'
+
+
+def test_edited_field_store_links_same_bound_receiver_to_observation():
+    c,f,k = setup('python', '''class Box:
+    def read(self): return self.value
+def test_case():
+    box = Box()
+    box.value = 1
+    result = box.read()
+    assert result == 1
+''', 'value = 1', 'value = 3')
+    result = build_evidence(c,f,k)
+    edges = [e for e in result['edges'] if e['kind'] == 'same_local_binding_after_field_write_may']
+    assert edges and edges[0]['field'] == 'value'
+    call = next(row for row in result['calls'] if row['callee'] == 'box.read')
+    assert call['seed'] and call['related_assertions']
+    assert 'return self.value' in result['rendered']
+
+
+@pytest.mark.parametrize('replacement', ['other = Box()', 'box = Box()'])
+def test_field_name_does_not_conflate_different_or_reassigned_receivers(replacement):
+    receiver = 'other' if replacement.startswith('other') else 'box'
+    c,f,k = setup('python', f'''class Box:
+    def read(self): return self.value
+def test_case():
+    box = Box()
+    box.value = 1
+    {replacement}
+    assert {receiver}.read() == 1
+''', 'value = 1', 'value = 3')
+    result = build_evidence(c,f,k)
+    assert not [e for e in result['edges'] if e['kind'] == 'same_local_binding_after_field_write_may']
+
+
+def test_exact_changed_argument_retrieves_complete_source_control():
+    c,f,k = setup('python', '''def decode(value): return value
+def test_case():
+    assert decode("a") == "a"
+def test_other():
+    context = "complete donor setup"
+    assert decode("b") == "b"
+''', '"a"', '"b"', test_name='test_case')
+    result = build_evidence(c,f,k)
+    assert any(row['reason'] == 'same_resolved_callee_and_changed_argument' for row in result['controls'])
+    contexts = [row['code'] for row in result['declarations'] if 'source_control_test' in row['roles']]
+    assert len(contexts) == 1
+    assert 'complete donor setup' in contexts[0] and 'assert decode("b") == "b"' in contexts[0]
+
+
+def test_budget_is_explicit_without_truncating_any_declaration():
+    c,f,k = setup('python', 'def twice(value): return value * 2\ndef test_case():\n    assert twice(1) == 2\n', '1','3')
+    full = build_evidence(c,f,k)
+    limited = build_evidence(c,f,k,max_bytes=10)
+    assert limited['status'] == 'over_budget'
+    assert limited['rendered'] == full['rendered']
+    assert limited['declarations'] == full['declarations']
+
+
+def test_runtime_probe_edits_are_removed_using_canonical_program_snapshot():
+    c,f,k = setup('python', 'def twice(value): return value * 2\ndef test_case():\n    assert twice(1) == 2\n', '1','3')
+    plain = build_evidence(c,f,k)
+    k['program_edits'] = copy.deepcopy(k['edits'])
+    k['instrumentation'] = dict(status='instrumented')
+    k['edits'][0]['after'] = 'probe_helper(3)'
+    instrumented = build_evidence(c,f,k)
+    assert instrumented == plain
+    assert 'probe_helper' not in instrumented['rendered']
+
+
+def test_invalid_original_source_edit_is_rejected():
+    c,f,k = setup('python', 'def test_case():\n    assert 1 == 1\n','1','3')
+    k['edits'][0]['before'] = 'wrong'
+    with pytest.raises(ValueError, match='does not match original'):
+        build_evidence(c,f,k)
+
+
+def test_go_alias_requires_exact_module_path_not_just_package_name():
+    code = 'package demo\nimport "testing"\nfunc TestCase(t *testing.T) { result := missing(1); if result != 1 { t.Fatal(result) } }\n'
+    c,f,k = setup('go', code, 'missing', 'library.Compute',
+                 {'lib/ops.go':'package lib\nfunc Compute(value int) int { return value + 1 }\n'})
+    k['imports'] = [dict(name='library',module='example.org/project/lib', imported_name=None)]
+    f['module_resolution']['go_modules'] = {'':'example.org/project'}
+    result = build_evidence(c,f,k)
+    call = next(row for row in result['calls'] if row['callee']=='library.Compute')
+    assert call['targets'][0]['function_id']=='lib/ops.go:2:Compute'
+    assert call['actual_formal'][0]['parameter']=='value'
+    k['imports'][0]['module']='different.org/project/lib'
+    result = build_evidence(c,f,k)
+    call = next(row for row in result['calls'] if row['callee']=='library.Compute')
+    assert not call['targets']
+
+
+def test_local_function_passed_to_external_api_is_shown_with_unknown_invocation():
+    c,f,k = setup('python', '''def grow(value):
+    return value + 1
+def test_case():
+    result = external_executor(grow, 1)
+    assert result == 2
+''', '1', '3')
+    result = build_evidence(c,f,k)
+    refs = result['function_valued_arguments']
+    assert refs and refs[0]['argument'] == 'grow'
+    assert refs[0]['invocation'].startswith('unknown')
+    assert any('function_valued_argument_declaration' in d['roles'] and 'return value + 1' in d['code'] for d in result['declarations'])
+
+
+def test_rebound_callback_name_does_not_inherit_module_function_declaration():
+    c,f,k = setup('python', '''def grow(value): return value + 1
+def test_case():
+    grow = factory()
+    result = external_executor(grow, 1)
+    assert result == 2
+''', '1', '3')
+    result = build_evidence(c,f,k)
+    assert not result['function_valued_arguments']
