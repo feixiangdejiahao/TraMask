@@ -18,6 +18,8 @@ twice(input) → 原静态切片may边 → assert result == 2
 
 如果callee语法已变、更换receiver或编辑了receiver的定义，旧target与参数binding不会被当成新调用的绑定；新callee只标unknown，不按名字猜函数。若仅改变实参值，原参数位置映射仍只标“原源码事实”，不声称变换后的参数数量或运行时状态已重新验证。新callee、动态分派、别名、跨线程先后关系和缺失声明都没有被这个接口解决。
 
+独立review另确认两个覆盖边界：`box.value = 2; result = box.read(); assert result == 2` 只把字段写入2改成3时，目前原value/input-slot事实无法接到read，得到空seed/q和明确unknown；这需要字段写入路径分析补充。整调用 `f(a,b)` 替换成 `f(b,a)` 时，编辑span覆盖callee会保守失效旧解析，尽管名字f未变；它丢失可利用证据，没有编造新目标。本轮不靠案例名补规则，也没有把这两个未知当正确结果。
+
 八项测试中七个集成toy使用真实frontend，覆盖Python/Go/TypeScript的setup→call→formal→q链、receiver定义、改callee、在callee边界插入receiver以及更改receiver定义，另一个检查源码去重不丢节点或边；与运输接口及现有guard/oracle共162项相关回归通过。固定32父程序的本地渲染存放在 `results/relation_search_20260929/singleton_call_evidence_focused_v1/`；此前逆向扩出同q其他call的初稿也留存在 `singleton_call_evidence_v1/`，其最大318KB揭示了保守切片边容易膨胀的问题。最终接口只整理编辑涉及的call和全部关联q，仍不宣称完整切片；没有读目标标签、没有模型调用或执行测试案例。
 
 这32父程序都有种子call，30个能从原frontend链到关联observation q；N08的两项没有此链接，保留未知。按候选计重复site，实际选中182个call、197个q、818个节点、1385条边，其中164条actual/formal、148条局部binding、69条源码target、721条call→q may边。与原facts审计的1245个call/10838条call→q边区别在于，这里明确只整理输入编辑涉及的call前沿。
