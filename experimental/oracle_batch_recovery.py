@@ -96,8 +96,12 @@ def validate_frozen_request(request):
                                                 for key in ("code", "observed")):
                 raise ValueError("wire/local assertion contents differ")
         try:
+            edits = candidate["edits"]
+            if request.get("evidence_mode") == "dependency":
+                from relation_search.instrument import _program_edits
+                edits = _program_edits(candidate)
             changes = [dict(before=edit["before"], after=edit["after"])
-                       for edit in candidate["edits"] if edit.get("role") != "semantic_expected"]
+                       for edit in edits if edit.get("role") != "semantic_expected"]
         except (TypeError, KeyError, AttributeError) as error:
             raise ValueError("local candidate edits are malformed") from error
         if wire.get("input_changes") != changes:
@@ -166,6 +170,8 @@ def plan_recovery(request, manifest, completion_text):
         child = copy.deepcopy(request)
         child["prompt"] = json.dumps(child_payload, ensure_ascii=False)
         child["offered"] = {"C0": copy.deepcopy(request["offered"][old_alias])}
+        if "analysis_evidence" in request:
+            child["analysis_evidence"] = {"C0": copy.deepcopy(request["analysis_evidence"][old_alias])}
         child["id"] = _sha(child["prompt"])
         child["candidate_source_hash"] = _record_sha(child["offered"])
         child["batch_recovery"] = dict(policy=POLICY, depth=1, reason=reason, ordinal=index,

@@ -47,19 +47,40 @@ judgment, not a request to discover features, choose the search or generate test
 '''
 
 
-def issue_contract(issue):
+def issue_contract(issue, *, max_chars=20000):
     """Separate the benchmark's runner instructions from its actual issue.
 
     Only the exact two-section wrapper is recognized. Subject requirements are
     otherwise preserved, including instructions quoted within ordinary issues.
     """
     if '\n## Recommended Workflow\n' not in issue or '\n## Command Execution Rules\n' not in issue:
-        return issue[:20000]
+        return issue if max_chars is None else issue[:max_chars]
     markers = ['\n## Recommended Workflow\n',
                '\n\nYou can execute bash commands and edit files to implement the necessary changes.',
                '\n\nIMPORTANT: Please work on this in a new branch from main and commit everything when you are done.']
     ends = [issue.index(marker) for marker in markers if marker in issue]
-    return issue[:min(ends)].strip()[:20000]
+    contract = issue[:min(ends)].strip()
+    return contract if max_chars is None else contract[:max_chars]
+
+
+DEPENDENCY_SYSTEM = SYSTEM + '''
+The dependency evidence is computed from source, not an oracle or a proof that
+a changed input must change an output. Follow actual/formal and receiver links
+to understand the edited calls. Distinguish original-source facts from resolved
+modified-source facts and unknown edges. Read the full modified test together
+with this supplementary evidence. Infer all affected expectations jointly;
+unaffected assertions remain part of the same program. For Python, decide the
+comparison together with the expected value: a None identity check can become
+a value equality check. A literal string or number normally uses ==/!=, not is.
+'''
+
+
+def program_candidate(candidate):
+    """A source-only view for reasoning; execution retains its recorded probes."""
+    from relation_search.instrument import _program_edits
+    result = copy.deepcopy(candidate)
+    result['edits'] = _program_edits(candidate)
+    return result
 
 
 def imported_api_contexts(corpus, source_path, candidate, max_contexts=4):
@@ -123,7 +144,10 @@ def preview(corpus, candidate):
     return data.decode()
 
 
-def prepare_requests(corpus, frontend, candidates, issue, max_requests=4, per_request=16):
+def prepare_requests(corpus, frontend, candidates, issue, max_requests=4, per_request=16,
+                     *, evidence_mode='baseline', impact_evidence_by_id=None):
+    if evidence_mode not in {'baseline', 'dependency'}:
+        raise ValueError('Unknown oracle evidence mode')
     observations = {}
     for row in frontend.get('observations', []):
         span = row.get('assertion_span', row.get('span'))
@@ -132,7 +156,7 @@ def prepare_requests(corpus, frontend, candidates, issue, max_requests=4, per_re
     requests, batch, size = [], [], 0
 
     def freeze(items):
-        wire, local = [], {}
+        wire, local, analysis = [], {}, {}
         for index, (candidate, code, holes) in enumerate(items):
             alias = 'C'+str(index)
             holemap = {'A'+str(i): hole for i, hole in enumerate(holes)}
@@ -141,35 +165,55 @@ def prepare_requests(corpus, frontend, candidates, issue, max_requests=4, per_re
             imports = [dict(name=name, module=value[0], imported_name=value[1])
                        for name, value in parsed_source.imports.items()]
             imports.extend(candidate.get('imports', []))
-            wire.append(dict(candidate=alias, source_test=candidate['base_test_id'],
+            source_candidate = program_candidate(candidate) if evidence_mode == 'dependency' else candidate
+            value = dict(candidate=alias, source_test=candidate['base_test_id'],
                              import_bindings=imports,
                              source_contexts=candidate.get('source_contexts', [])[:4],
                              imported_api_contexts=imported_api_contexts(corpus, source_path, candidate),
                              input_changes=[dict(before=e['before'], after=e['after'])
-                                            for e in candidate['edits'] if e.get('role') != 'semantic_expected'],
+                                            for e in source_candidate['edits'] if e.get('role') != 'semantic_expected'],
                              modified_test=code,
                              assertions=[dict(id=hid, code=hole['code'], observed=hole['observed'])
-                                         for hid, hole in holemap.items()]))
+                                         for hid, hole in holemap.items()])
+            if evidence_mode == 'dependency':
+                from relation_search.oracle_evidence import build_evidence
+                source_candidate['impact_evidence'] = (impact_evidence_by_id or {}).get(candidate['id'], {})
+                evidence = build_evidence(corpus, frontend, source_candidate)
+                analysis[alias] = evidence
+                # Keep the complete structured evidence locally. The prompt
+                # renders each source body once rather than repeating both its
+                # JSON representation and the human-readable source view.
+                value['dependency_evidence'] = {key: evidence[key] for key in
+                    ('version', 'rendered', 'rendered_bytes', 'status')}
+                value.pop('imported_api_contexts')
+                value.pop('source_contexts')
+            wire.append(value)
             local[alias] = dict(candidate=candidate, assertions=holemap)
-        contract = issue_contract(issue)
+        contract = issue_contract(issue, max_chars=None if evidence_mode == 'dependency' else 20000)
         payload = dict(language=corpus['language'], issue=contract, candidates=wire)
         prompt = json.dumps(payload, ensure_ascii=False)
-        return dict(id=hashlib.sha256(prompt.encode()).hexdigest(), system=SYSTEM, prompt=prompt,
+        request = dict(id=hashlib.sha256(prompt.encode()).hexdigest(),
+                    system=DEPENDENCY_SYSTEM if evidence_mode == 'dependency' else SYSTEM, prompt=prompt,
                     offered=local, kind='local_existing_assertion_oracle',
                     candidate_source_hash=hashlib.sha256(json.dumps(local, sort_keys=True).encode()).hexdigest(),
                     external_roles=['issue', 'source validations', 'program-generated input edits'],
                     issue_text_sha256=hashlib.sha256(issue.encode()).hexdigest(),
                     issue_contract_sha256=hashlib.sha256(contract.encode()).hexdigest(),
-                    benchmark_runner_wrapper_removed=contract != issue[:20000],
+                    benchmark_runner_wrapper_removed=contract != (issue if evidence_mode == 'dependency' else issue[:20000]),
                     independent_evaluation_required=True,
                     thinking='enabled')
+        if evidence_mode != 'baseline':
+            request['evidence_mode'] = evidence_mode
+            request['analysis_evidence'] = analysis
+        return request
 
     for candidate in candidates:
         if candidate.get('is_source_profile'):
             continue
         base = candidate['base_test_id']
         holes = []
-        occupied = [(e['span']['start_byte'], e['span']['end_byte']) for e in candidate['edits']]
+        source_candidate = program_candidate(candidate) if evidence_mode == 'dependency' else candidate
+        occupied = [(e['span']['start_byte'], e['span']['end_byte']) for e in source_candidate['edits']]
         seen = set()
         for row in observations.get(base, []):
             span = row.get('assertion_span', row['span'])
@@ -179,14 +223,14 @@ def prepare_requests(corpus, frontend, candidates, issue, max_requests=4, per_re
                 continue
             code = text(corpus, span)
             observed = row.get('observed', {}).get('text', '')
-            if not observed or len(code) > 3000:
+            if not observed or (evidence_mode == 'baseline' and len(code) > 3000):
                 continue
             seen.add((span['start_byte'], span['end_byte']))
             holes.append(dict(span=span, code=code, observed=observed))
         if not holes:
             continue
-        code = preview(corpus, candidate)
-        if len(code.encode()) > 20000:
+        code = preview(corpus, source_candidate)
+        if evidence_mode == 'baseline' and len(code.encode()) > 20000:
             continue
         estimate = len(code.encode()) + sum(len(h['code'].encode()) for h in holes)
         if batch and (len(batch) >= per_request or size + estimate > 70000):
@@ -264,7 +308,8 @@ def validate(request, payload, corpus):
             decisions.append(dict(candidate=candidate['id'], status='rejected_structure'))
             continue
         try:
-            rendered = preview(corpus, candidate)
+            source_view = program_candidate(candidate) if request.get('evidence_mode') == 'dependency' else candidate
+            rendered = preview(corpus, source_view)
             syntax = rendered if corpus['language'] != 'go' else 'package probe\n'+rendered
             if Source('probe', syntax, corpus['language']).root.has_error:
                 raise ValueError('syntax')

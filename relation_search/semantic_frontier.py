@@ -9,7 +9,8 @@ from .semantic_selection import select
 POLICY = 'persistent-source-semantic-frontier-v1'
 
 
-def advance(corpus, candidates, previous=None, *, budget=16, selected_ids=()):
+def advance(corpus, candidates, previous=None, *, budget=16, selected_ids=(),
+            frontend=None, selection_policy='shape'):
     previous = previous or {}
     catalogue = {row['id']: row for row in previous.get('candidates', [])}
     for row in candidates:
@@ -17,7 +18,15 @@ def advance(corpus, candidates, previous=None, *, budget=16, selected_ids=()):
             raise ValueError('Same semantic hypothesis ID has changed source edits')
         catalogue[row['id']] = row
     served = set(previous.get('selected_ids', [])) | set(selected_ids)
-    ordered = select(corpus, catalogue.values(), budget=len(catalogue))
+    if selection_policy == 'impact':
+        from .impact_selection import select as select_impact
+        if frontend is None:
+            raise ValueError('Impact selection requires source frontend facts')
+        ordered = select_impact(corpus, frontend, list(catalogue.values()), budget=len(catalogue))
+    elif selection_policy == 'shape':
+        ordered = select(corpus, catalogue.values(), budget=len(catalogue))
+    else:
+        raise ValueError('Unknown semantic selection policy')
     pending = [row for row in ordered['selected'] if row['id'] not in served]
     chosen = pending[:budget]
     chosen_ids = {row['id'] for row in chosen}

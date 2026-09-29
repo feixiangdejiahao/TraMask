@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from pathlib import Path
 import shutil
 import sys
+import threading
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +45,8 @@ def semantic_batch(prepared, output, args, previous_selected, previous_semantic=
                    semantic_frontier_policy=SEMANTIC_FRONTIER_POLICY,
                    previous_semantic_sha256=digest(previous_semantic/'semantic_frontier.json') if previous_semantic else None,
                    cache_sha256=digest(args.oracle_cache) if args.oracle_cache else None,
+                   selection_policy=getattr(args, 'semantic_policy', 'shape'),
+                   evidence_mode=getattr(args, 'oracle_evidence', 'baseline'),
                    previously_selected=sorted(previous_selected))
     start(output, request)
     done = output/'semantic_result.json'
@@ -66,17 +70,31 @@ def semantic_batch(prepared, output, args, previous_selected, previous_semantic=
         identity = dict(corpus_sha256=digest(prepared/'corpus.json'), issue_sha256=digest(prepared/'issue.md'))
         if prior and prior.get('source_identity') != identity:
             raise ValueError('Semantic backlog belongs to different source or issue')
-        queued = advance(corpus, candidates, prior, budget=args.semantic_budget, selected_ids=previous_selected)
+        frontend = read(prepared/'frontend.json')
+        queued = advance(corpus, candidates, prior, budget=args.semantic_budget, selected_ids=previous_selected,
+                         frontend=frontend, selection_policy=getattr(args, 'semantic_policy', 'shape'))
         selection = queued['selection']
-        write(output/'semantic_frontier.json', dict(**queued['frontier'], source_identity=identity))
-        pending_count = selection['pending_count']
-        write(output/'semantic_selection.json', selection)
         selected = selection['selected']
         selected_ids = [row['id'] for row in selected]
-        requests = prepare_requests(corpus, read(prepared/'frontend.json'), selected,
+        requests = prepare_requests(corpus, frontend, selected,
                                     (prepared/'issue.md').read_text(),
-                                    max_requests=args.semantic_budget, per_request=args.per_request)
+                                    max_requests=args.semantic_budget, per_request=args.per_request,
+                                    evidence_mode=getattr(args, 'oracle_evidence', 'baseline'),
+                                    impact_evidence_by_id={row['id']: row['evidence']
+                                        for row in selection['ranking'] if 'evidence' in row})
         offered_ids = [item['candidate']['id'] for request in requests for item in request['offered'].values()]
+        # Selection is an opportunity, not evidence that a model received the
+        # candidate. Preserve selected-but-unoffered programs in the backlog.
+        served = set(prior.get('selected_ids', [])) | set(previous_selected) | set(offered_ids)
+        pending_ids = [row['id'] for row in selection['ranking'] if row['id'] not in served
+                       and row.get('evidence', {}).get('eligible', True)]
+        queued['frontier'].update(selected_ids=sorted(served), pending_ids=pending_ids)
+        selection.update(offered_ids=offered_ids,
+                         selected_but_unoffered_ids=[cid for cid in selected_ids if cid not in set(offered_ids)],
+                         pending_count=len(pending_ids))
+        pending_count = len(pending_ids)
+        write(output/'semantic_frontier.json', dict(**queued['frontier'], source_identity=identity))
+        write(output/'semantic_selection.json', selection)
         request_paths = []
         for index, value in enumerate(requests):
             value['source_prepared'] = str(prepared.resolve())
@@ -147,7 +165,8 @@ def semantic_batch(prepared, output, args, previous_selected, previous_semantic=
                   offered_ids=offered_ids, distinct_offered_candidates=len(set(offered_ids)),
                   recovery_calls=recovery_calls, batch_recovery_policy=RECOVERY_POLICY,
                   pending_semantic_count=pending_count, semantic_frontier_policy=SEMANTIC_FRONTIER_POLICY,
-                  provider_calls=calls, previous_selected=sorted(set(previous_selected)|set(selected_ids)))
+                  provider_calls=calls, previous_selected=sorted(set(previous_selected)|
+                      set(offered_ids if args.oracle_mode == 'fresh' else selected_ids)))
     write(done, record)
     write(output/'prepare.json', dict(status='prepared', case=read(prepared/'case.json')['id'],
           source_prepare=str((prepared/'prepare.json').resolve()),
@@ -166,7 +185,11 @@ def campaign(args):
         include_baseline=args.include_baseline, representations_only=False,
         writer_priority=getattr(args, 'writer_priority', False),
         oracle_mode=args.oracle_mode, semantic_budget=args.semantic_budget,
+        semantic_policy=getattr(args, 'semantic_policy', 'shape'),
+        oracle_evidence=getattr(args, 'oracle_evidence', 'baseline'),
         per_request=args.per_request, model_workers=args.model_workers,
+        case_workers=getattr(args, 'case_workers', 1),
+        case_schedule=getattr(args, 'case_schedule', 'case'),
         batch_recovery=RECOVERY_POLICY,
         semantic_frontier_policy=SEMANTIC_FRONTIER_POLICY,
         oracle_cache_sha256=digest(args.oracle_cache) if args.oracle_cache else None,
@@ -182,55 +205,98 @@ def campaign(args):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT/relative, target)
     preserve_configuration(args.output/'configuration.json', configuration)
-    records = []
+    case_workers = getattr(args, 'case_workers', 1)
+    schedule = getattr(args, 'case_schedule', 'case')
+    if not 1 <= case_workers <= 4 or schedule not in {'case', 'round'}:
+        raise ValueError('Unsupported case scheduling configuration')
+    states, state_lock = {}, threading.Lock()
     for case in cases:
-        previous, previous_semantic, selected, rounds = None, None, [], []
-        stopped_reason, exhausted_prepare = 'round_budget', None
         case_root = args.output/case
-        case_configuration = {**configuration, 'source': str((args.source/case).resolve()), 'case': case}
-        preserve_configuration(case_root/'configuration.json', case_configuration)
+        preserve_configuration(case_root/'configuration.json',
+                               {**configuration, 'source': str((args.source/case).resolve()), 'case': case})
+        states[case] = dict(previous=None, previous_semantic=None, selected=[], rounds=[],
+                            stopped_reason='in_progress', exhausted_prepare=None, finished=False)
+
+    def record(case):
+        state = states[case]
+        return dict(case=case, source_corpus=str((args.source/case/'corpus.json').resolve()),
+                    execution_configuration=str((args.output/case/'configuration.json').resolve()),
+                    rounds=state['rounds'], stopped_reason=state['stopped_reason'],
+                    exhausted_prepare=state['exhausted_prepare'])
+
+    def save():
+        with state_lock:
+            snapshot = copy.deepcopy([record(case) for case in cases
+                if states[case]['rounds'] or states[case]['finished']])
+        write(args.output/'campaign.json', snapshot)
+
+    def step(case, index):
+        state, case_root = states[case], args.output/case
+        if state['finished']:
+            return
+        if code_identity() != configuration['algorithm_sha256']:
+            raise ValueError('Campaign code changed; completed work is preserved')
+        folder = case_root/f'round_{index:03d}'
+        preparation = prepare(SimpleNamespace(source=args.source/case, output=folder/'prepared', previous=state['previous'],
+            strategy=args.strategy, limit=args.limit, pool=args.pool, max_edits=args.max_edits,
+            include_baseline=args.include_baseline, representations_only=False,
+            writer_priority=getattr(args, 'writer_priority', False),
+            campaign_configuration=args.output/'configuration.json'))
+        pending_semantics = (args.oracle_mode == 'fresh' and state['previous_semantic'] is not None
+                             and read(state['previous_semantic']/'semantic_frontier.json')['pending_ids'])
+        if not preparation['selected'] and not pending_semantics:
+            with state_lock:
+                state.update(stopped_reason='exhausted', finished=True,
+                             exhausted_prepare=str((folder/'prepared/prepare.json').resolve()))
+            return
+        semantic = semantic_batch(folder/'prepared', folder/'semantic', args, state['selected'],
+                                  state['previous_semantic'] if args.oracle_mode == 'fresh' else None)
+        emission = emit_batch(SimpleNamespace(input=folder/'semantic', output=folder/'emitted',
+              group_size=args.group_size, timeout=args.timeout,
+              dependency_packages_root=args.dependency_packages_root))
+        execution = run(SimpleNamespace(input=folder/'emitted', output=folder/'executed',
+                                        workers=args.workers, registry=args.registry))
+        measured = feedback(SimpleNamespace(source=folder/'executed', output=folder/'feedback.json', previous=state['previous']))
+        row = dict(round=index, prepare_manifest=str((folder/'semantic/prepare.json').resolve()),
+                   candidates=str((folder/'semantic/candidates.json').resolve()),
+                   runs_index=str((folder/'executed/runs.json').resolve()),
+                   program_prepare_manifest=str((folder/'prepared/prepare.json').resolve()),
+                   prepared=preparation, semantic=semantic, emitted=emission,
+                   execution=execution, feedback=measured)
+        rounds = [*state['rounds'], row]
+        write(case_root/'rounds.json', rounds)
+        with state_lock:
+            state.update(rounds=rounds, previous=folder/'feedback.json', previous_semantic=folder/'semantic',
+                         selected=semantic['previous_selected'])
+            if index+1 == args.rounds:
+                state.update(stopped_reason='round_budget', finished=True)
+        print(json.dumps(dict(case=case, round=index, selected=preparation['selected'],
+              revised=semantic['revised_count'], profiles=measured['profiles'])), flush=True)
+
+    if schedule == 'case':
+        for case in cases:
+            for index in range(args.rounds):
+                step(case, index)
+                save()
+                if states[case]['finished']:
+                    break
+    else:
+        # A barrier between rounds gives every case its first-round budget
+        # before any case receives the next one. Each case owns its files.
         for index in range(args.rounds):
-            if code_identity() != configuration['algorithm_sha256']:
-                raise ValueError('Campaign code changed; completed work is preserved')
-            folder = case_root/f'round_{index:03d}'
-            preparation = prepare(SimpleNamespace(source=args.source/case, output=folder/'prepared', previous=previous,
-                strategy=args.strategy, limit=args.limit, pool=args.pool, max_edits=args.max_edits,
-                include_baseline=args.include_baseline, representations_only=False,
-                writer_priority=getattr(args, 'writer_priority', False),
-                campaign_configuration=args.output/'configuration.json'))
-            pending_semantics = (args.oracle_mode == 'fresh' and previous_semantic is not None
-                                 and read(previous_semantic/'semantic_frontier.json')['pending_ids'])
-            if not preparation['selected'] and not pending_semantics:
-                stopped_reason = 'exhausted'
-                exhausted_prepare = str((folder/'prepared/prepare.json').resolve())
-                break
-            semantic = semantic_batch(folder/'prepared', folder/'semantic', args, selected,
-                                      previous_semantic if args.oracle_mode == 'fresh' else None)
-            previous_semantic = folder/'semantic'
-            selected = semantic['previous_selected']
-            emission = emit_batch(SimpleNamespace(input=folder/'semantic', output=folder/'emitted',
-                  group_size=args.group_size, timeout=args.timeout,
-                  dependency_packages_root=args.dependency_packages_root))
-            execution = run(SimpleNamespace(input=folder/'emitted', output=folder/'executed',
-                                            workers=args.workers, registry=args.registry))
-            measured = feedback(SimpleNamespace(source=folder/'executed', output=folder/'feedback.json', previous=previous))
-            previous = folder/'feedback.json'
-            row = dict(round=index, prepare_manifest=str((folder/'semantic/prepare.json').resolve()),
-                       candidates=str((folder/'semantic/candidates.json').resolve()),
-                       runs_index=str((folder/'executed/runs.json').resolve()),
-                       program_prepare_manifest=str((folder/'prepared/prepare.json').resolve()),
-                       prepared=preparation, semantic=semantic, emitted=emission,
-                       execution=execution, feedback=measured)
-            rounds.append(row)
-            write(case_root/'rounds.json', rounds)
-            print(json.dumps(dict(case=case, round=index, selected=preparation['selected'],
-                  revised=semantic['revised_count'], profiles=measured['profiles'])), flush=True)
-        records.append(dict(case=case, source_corpus=str((args.source/case/'corpus.json').resolve()),
-                            execution_configuration=str((case_root/'configuration.json').resolve()),
-                            rounds=rounds, stopped_reason=stopped_reason,
-                            exhausted_prepare=exhausted_prepare))
-        write(args.output/'campaign.json', records)
-    return dict(cases=len(records), configuration=str((args.output/'configuration.json').resolve()))
+            pending = [case for case in cases if not states[case]['finished']]
+            errors = []
+            with ThreadPoolExecutor(max_workers=case_workers) as pool:
+                futures = {pool.submit(step, case, index): case for case in pending}
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as error:
+                        errors.append(error)
+                    save()
+            if errors:
+                raise errors[0]
+    return dict(cases=len(cases), configuration=str((args.output/'configuration.json').resolve()))
 
 
 if __name__ == '__main__':
@@ -252,8 +318,12 @@ if __name__ == '__main__':
     parser.add_argument('--oracle-mode', choices=['none', 'replay', 'fresh'], default='none')
     parser.add_argument('--oracle-cache', type=Path)
     parser.add_argument('--semantic-budget', type=int, default=16)
+    parser.add_argument('--semantic-policy', choices=['shape', 'impact'], default='shape')
+    parser.add_argument('--oracle-evidence', choices=['baseline', 'dependency'], default='baseline')
     parser.add_argument('--per-request', type=int, default=4)
     parser.add_argument('--model-workers', type=int, default=2)
+    parser.add_argument('--case-workers', type=int, default=1)
+    parser.add_argument('--case-schedule', choices=['case', 'round'], default='case')
     parser.add_argument('--registry', type=Path, default=ROOT/'data/relational_gap_v1/registry.json')
     parser.add_argument('--dependency-packages-root', type=Path, default=ROOT/'data/relational_gap_v1_dependency_packages')
     arguments = parser.parse_args()
