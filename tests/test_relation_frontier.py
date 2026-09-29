@@ -1,0 +1,92 @@
+from relation_search.frontier import Frontier, canonical_profile, select_round
+
+
+def event(values, phase='after', origins=None):
+    return dict(source_window='source-call', phase=phase, alias_partition=[],
+                roles=[dict(name=k, status='observed', value=v, origin_span=(origins or {}).get(k))
+                       for k, v in values.items()])
+
+
+def test_same_relative_order_ignores_absolute_integer_translation():
+    left = event({'x': {'type': 'int', 'value': 4}, 'y': {'type': 'int', 'value': 7}})
+    right = event({'x': {'type': 'int', 'value': 104}, 'y': {'type': 'int', 'value': 107}})
+    assert canonical_profile(left) == canonical_profile(right)
+    right['phase'] = 'before'
+    assert canonical_profile(left) != canonical_profile(right)
+    right['phase'] = 'after'
+    right['roles'][1]['origin_span'] = {'path': 'source.py', 'start_byte': 80}
+    assert canonical_profile(left) != canonical_profile(right)
+
+
+def test_dict_shape_uses_runtime_fields_and_ignores_opaque_metadata():
+    full = {'type': 'dict', 'items': [[{'type': 'str', 'value': 'a'}, {'type': 'int', 'value': 1}]], 'length': 1}
+    result = canonical_profile(event({'m': full, 'object': {'type': 'Custom', 'opaque': True, 'alias': 0}}))
+    assert result['presence'] == [('m', ['a'], False)]
+    assert ('object', 'Custom', 'opaque') in result['scalar']
+    missing = event({'m': {'type': 'dict', 'items': [], 'length': 0}})
+    assert canonical_profile(missing)['presence'] != result['presence']
+
+
+def test_unexecuted_hypothesis_never_counts_as_profile():
+    frontier = Frontier()
+    result = frontier.observe('candidate', [])
+    assert not result['retained'] and not frontier.profiles
+    assert result['status'] == 'no_runtime_profile'
+
+
+def test_all_unknown_events_do_not_create_profiles_or_retained_parents():
+    unknown = dict(source_window='source-call', phase='after', alias_partition=[], roles=[
+        dict(name='property', status='unknown', kind='read', reason='TypeError')])
+    frontier = Frontier()
+    result = frontier.observe('candidate', [unknown])
+    assert result == dict(candidate_id='candidate', measured_profiles=[], new_profiles=[],
+                          retained=False, status='no_runtime_profile')
+    assert not frontier.profiles
+    # Legacy event dictionaries use an explicit unknown marker as their value.
+    unknown['roles'] = {'property': {'status': 'unknown'}}
+    assert not frontier.observe('other', [unknown])['retained']
+    assert not frontier.profiles
+
+
+def test_repeated_runtime_containers_resolve_contents_instead_of_empty_presence():
+    from relation_search.runtime import HELPER_SOURCE
+    helper = {}
+    exec(HELPER_SOURCE, helper)
+    shared_dict, shared_list = {'field': 1}, [1, 2]
+    aliases, seen = {}, set()
+    values = {name: helper['_encode'](value, aliases, seen)
+              for name, value in [('map_first', shared_dict), ('map_again', shared_dict),
+                                  ('list_first', shared_list), ('list_again', shared_list)]}
+    assert values['map_again']['reference'] and values['list_again']['reference']
+    profile = canonical_profile(event(values))
+    assert profile['presence'] == [('list_again', 2, False), ('list_first', 2, False),
+                                   ('map_again', ['field'], False), ('map_first', ['field'], False)]
+
+
+def test_reference_resolution_uses_nested_first_occurrence_and_snapshot_scope():
+    from relation_search.runtime import HELPER_SOURCE
+    helper = {}
+    exec(HELPER_SOURCE, helper)
+    shared = {'field': 1}
+    aliases, seen = {}, set()
+    parent = helper['_encode']([shared], aliases, seen)
+    reference = helper['_encode'](shared, aliases, seen)
+    profile = canonical_profile(event({'parent': parent, 'child': reference}))
+    assert ('child', ['field'], False) in profile['presence']
+    # No earlier event or concrete object ID supplies content to this snapshot.
+    orphan = canonical_profile(event({'child': reference}))
+    assert orphan['presence'] == []
+
+
+def test_partial_string_capture_is_distinct_from_complete_shape():
+    full = event({'text': {'type': 'str', 'value': 'prefix', 'truncated': False}})
+    partial = event({'text': {'type': 'str', 'value': 'prefix', 'truncated': True}})
+    assert canonical_profile(full)['strings'] == [('text', True, False, False, False, False)]
+    assert canonical_profile(partial)['strings'] == [('text', True, False, False, False, True)]
+    assert canonical_profile(full) != canonical_profile(partial)
+
+
+def test_rotation_excludes_executed_ids_and_does_not_starve_second_operator():
+    rows = [dict(id=str(i), kind='a', base_test_id='one', edits=[{'after': str(i)}]) for i in range(30)]
+    rows.append(dict(id='other', kind='b', base_test_id='two', edits=[{'after': 'z'}]))
+    assert [r['id'] for r in select_round(rows, 2, ['0'])] == ['1', 'other']

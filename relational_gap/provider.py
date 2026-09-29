@@ -22,15 +22,19 @@ def write(path, value):
 
 def dispatch(request, output: Path, *, root: Path):
     output.mkdir(parents=True, exist_ok=False)
+    thinking = request.get('thinking', 'disabled')
+    if thinking not in {'enabled', 'disabled'}:
+        raise ValueError('Unsupported thinking mode')
     payload = {'model': 'deepseek-v4-flash', 'temperature': 0, 'max_tokens': 16384,
                'messages': [{'role': 'system', 'content': request['system']},
                             {'role': 'user', 'content': request['prompt']}],
                'response_format': {'type': 'json_object'}, 'stream': False,
-               'thinking': {'type': 'disabled'}}
+               'thinking': {'type': thinking}}
     write(output/'request.json', payload)
     record = {'request_id': request['id'], 'model': payload['model'],
               'request_sha256': hashlib.sha256(encoded(payload)).hexdigest(),
               'created_at': datetime.now(timezone.utc).isoformat(), 'external_model_calls': 0,
+              'thinking': thinking,
               'reference_or_verifier_inputs': False, 'execution_outcomes': False,
               'status': 'prepared', 'timeout_seconds': 300, 'max_response_bytes': 524288}
     write(output/'manifest.json', record)

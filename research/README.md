@@ -1,6 +1,6 @@
 # 组合测试研究与实验记录
 
-最新设计见 [用关系形状指导测试搜索](relation_search_method.md)：以观察和构造来源选取局部参与值，按联合相对关系给测试分组，用实际执行的新形状指导下一步输入编辑。新方向不要求竞争实现；此前[判别上下文方案](distinguishing_context_method.md)已被否决，保留设计历史。只有[独立机制原型](../experimental/relation_frontier_demo/README.md)通过有限检查，尚无新的真实 trial 成绩或新颖性结论。[17 条 trajectory 重审](trajectory_logic_20260928/README.md)和 [STARS 阅读](stars_abstraction_review.md)保留证据与依据。
+最新设计见 [用关系形状指导测试搜索](relation_search_method.md)：以观察和构造来源选取局部参与值，按联合相对关系给测试分组，用实际执行的新形状指导下一步输入编辑。新方向不要求竞争实现；此前[判别上下文方案](distinguishing_context_method.md)已被否决，保留设计历史。新代码和实际见证保存在[本轮检查点](relation_search_checkpoint_20260929.md)：累计正确见证 11/17，本轮生成来源 9/17，均不是统一预算的端到端检测率；运行反馈闭环仍未接入主驱动。[独立评价](relation_search_evaluation_20260928.md)、[17 条 trajectory 重审](trajectory_logic_20260928/README.md)和 [STARS 阅读](stars_abstraction_review.md)保留证据与依据。
 
 当前研究单位是带观察的关系 `(q, ρ)`：程序从已有验证恢复输入、对象和操作关系，构造新见证，并检查已有或受限修订的观察。实际实现仍有多个有界关系域，尚未实现统一完备的关系求解。
 

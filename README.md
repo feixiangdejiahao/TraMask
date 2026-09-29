@@ -1,10 +1,12 @@
 # 遗漏组合测试：带观察的关系见证
 
-最新研究设计见 [用关系形状指导测试搜索](research/relation_search_method.md)：从源码和验证提取有界的参与值，按同一对象、观察阶段下的联合关系分组，执行输入编辑并用实际新形状更新搜索。它不再以获得竞争实现为前提；原[判别上下文方案](research/distinguishing_context_method.md)保留为被否决的设计记录。新方向只有[独立机制原型](experimental/relation_frontier_demo/README.md)，尚未完成真实 trial 实现或证明效果、新颖性。原始证据见 [17 条轨迹重审](research/trajectory_logic_20260928/README.md)，设计原则来自 [STARS 阅读](research/stars_abstraction_review.md)。下文记录旧实现及真实结果。
+最新研究设计见 [用关系形状指导测试搜索](research/relation_search_method.md)：从源码和验证提取有界的参与值，按同一对象、观察阶段下的联合关系分组，执行输入编辑并用实际新形状更新搜索。它不再以获得竞争实现为前提；原[判别上下文方案](research/distinguishing_context_method.md)保留为被否决的设计记录。新实现及中断后的保存状态见[本轮检查点](research/relation_search_checkpoint_20260929.md)：已实现源代码组合构造器和局部断言修订，Python 运行关系有实际证据，但完整反馈搜索尚未接入主驱动。原始证据见 [17 条轨迹重审](research/trajectory_logic_20260928/README.md)，设计原则来自 [STARS 阅读](research/stars_abstraction_review.md)。
+
+**本轮累计确认 11/17 个 trial 有正确组合测试，其中本轮生成来源为 9/17；仍缺 6 例。** 此数是旧、新见证并集，部分见证来自收窄的源集合，不能当作统一预算的端到端算法成绩。N06 还是历史已执行关系的重建。逐例证据及误报见[独立评价](research/relation_search_evaluation_20260928.md)。
 
 当前原型以 `(q, ρ)` 为研究单位：`q` 是已有测试的观察，`ρ` 是输入、对象或操作之间的关系。程序恢复验证代码、提出关系见证并物化测试；模型只补充受限的局部期望表达式。关系构造、期望正确和真实缺陷检出分别评价，当前实现仍是有界关系域的组合，尚不是统一完备的关系求解器。模型为 **`deepseek-v4-flash`**，使用 `.env` 中已授权的 provider。
 
-**最好完整配置检出 4/17 个 trial：P2、N02、N07、N10，仍漏检 13/17。** 第六批为 3/17，第七批统一恢复完整源断言后重新运行全部 17 例，确认上述 4 例。17 个 trial 对应 14 个不同 task，都是已见开发集。全部检出的目标尚未达到，误报尚未穷尽标注，也没有 issue resolution rate 提升证据。
+**旧方法最好完整配置检出 4/17 个 trial：P2、N02、N07、N10，漏检 13/17。** 第六批为 3/17，第七批统一恢复完整源断言后重新运行全部 17 例，确认上述 4 例。17 个 trial 对应 14 个不同 task，都是已见开发集。全部检出的目标尚未达到，误报尚未穷尽标注，也没有 issue resolution rate 提升证据。
 
 - [当前方法与实现边界](research/relational_gap_method_v2.md)
 - [本轮五小时结果与逐例缺口](research/relational_gap_timebox_20260928.md)
@@ -34,7 +36,7 @@
 .venv/bin/python -m pytest tests -q
 ```
 
-当前静态生成入口为 `scripts/run_relational_gap.py`，执行入口为 `scripts/execute_relational_gap_v6.py`；断言恢复消融使用 `scripts/prepare_relational_gap_ablation.py` 和无模型调用的 `scripts/execute_relational_gap_v7.py`。参数与冻结边界见上述报告和执行协议。已有结果可只读复核：
+新实现入口为 `scripts/run_relation_search.py`、`scripts/execute_relation_search.py`、`scripts/relation_search_semantics.py`，已实现范围和恢复命令见[检查点](research/relation_search_checkpoint_20260929.md)。旧方法静态生成入口为 `scripts/run_relational_gap.py`，执行入口为 `scripts/execute_relational_gap_v6.py`；断言恢复消融使用 `scripts/prepare_relational_gap_ablation.py` 和无模型调用的 `scripts/execute_relational_gap_v7.py`。已有结果可只读复核：
 
 ```bash
 .venv/bin/python scripts/evaluate_relational_gap.py evaluate \
@@ -114,8 +116,10 @@ done
 
 | 位置 | 作用 |
 |---|---|
-| `relational_gap/` | 当前关系坐标、有限单元、源见证构造、观察选择及恢复消融 |
-| `scripts/run_relational_gap.py` | 当前静态准备入口 |
+| `relation_search/`、`experimental/relation_search_*.py` | 新源代码组合构造、局部 oracle、Python 运行关系模块；反馈闭环未接入 |
+| `scripts/run_relation_search.py`、`execute_relation_search.py`、`relation_search_semantics.py` | 新准备、执行、局部断言补全入口 |
+| `relational_gap/` | 旧关系坐标、有限单元、源见证构造、观察选择及恢复消融；新实现复用部分模块 |
+| `scripts/run_relational_gap.py` | 旧方法静态准备入口 |
 | `scripts/execute_relational_gap_v6.py`、`execute_relational_gap_v7.py` | 源假设和模型变体执行、无模型断言恢复消融 |
 | `experimental/semantic_transport/` | 先前动作上下文搜索、小期望表达式及冻结接口；部分工具仍被复用 |
 | `experimental/observation_projection.py` | 源观察切片迁移工具 |
