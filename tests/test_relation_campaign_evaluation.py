@@ -7,7 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from evaluate_relation_search_continuation import (named_outcomes, summarize, verify_campaign,
-                                                 verify_isolated_run, register_execution)
+                                                 verify_isolated_run, register_execution,
+                                                 verify_semantic_frontier)
 from evaluate_relational_gap import digest, freeze_file
 
 
@@ -259,6 +260,58 @@ def test_fresh_model_accounting_is_separate_from_semantic_replay(tmp_path):
     assert row['semantic_request_offered_count'] == 2
     assert row['semantic_provider_offered_count'] == 2
     assert row['oracle_mode'] == 'fresh'
+
+
+def frontier_fixture(tmp_path):
+    policy = 'persistent-source-semantic-frontier-v1'
+    history = {'old': {'id': 'old', 'edits': ['unchanged old material']},
+               'served': {'id': 'served'}, 'new': {'id': 'new'}}
+    identity = {'corpus_sha256': 'corpus', 'issue_sha256': 'issue'}
+    write(tmp_path/'semantic_frontier.json', {
+        'policy': policy, 'source_identity': identity, 'candidates': list(history.values()),
+        'selected_ids': ['served', 'old'], 'pending_ids': ['new']})
+    write(tmp_path/'semantic_selection.json', {
+        'policy': policy, 'budget': 1, 'catalogue_count': 3, 'eligible_count': 2,
+        'selected_count': 1, 'pending_count': 1, 'selected': [history['old']],
+        'ranking': [{'id': name, 'previously_selected': name == 'served', 'selected': name == 'old'}
+                    for name in ['served', 'old', 'new']]})
+    return dict(directory=tmp_path,
+                stage={'semantic_frontier_policy': policy, 'previous_semantic_sha256': 'previous',
+                       'previously_selected': ['served']},
+                configuration={'semantic_frontier_policy': policy, 'semantic_budget': 1},
+                history=history, served={'served'}, previous_sha256='previous', source_identity=identity,
+                model_result={'selected_ids': ['old'], 'previous_selected': ['served', 'old'],
+                              'pending_semantic_count': 1, 'semantic_frontier_policy': policy})
+
+
+def test_pending_old_source_candidate_can_receive_next_oracle_budget(tmp_path):
+    args = frontier_fixture(tmp_path)
+    valid, evidence, checksum = verify_semantic_frontier(**args)
+    assert valid and len(evidence) == 2
+    assert checksum == digest(tmp_path/'semantic_frontier.json')
+
+
+@pytest.mark.parametrize('corruption', ['material', 'source', 'chain', 'repeated', 'foreign', 'ranking'])
+def test_persisted_oracle_queue_rejects_unbound_or_repeated_candidates(tmp_path, corruption):
+    args = frontier_fixture(tmp_path)
+    frontier = json.loads((tmp_path/'semantic_frontier.json').read_text())
+    selection = json.loads((tmp_path/'semantic_selection.json').read_text())
+    if corruption == 'material':
+        frontier['candidates'][0]['edits'] = ['changed oracle input']
+    elif corruption == 'source':
+        frontier['source_identity']['issue_sha256'] = 'other issue'
+    elif corruption == 'chain':
+        args['stage']['previous_semantic_sha256'] = 'other previous record'
+    elif corruption == 'repeated':
+        selection['selected'] = [args['history']['served']]
+        args['model_result']['selected_ids'] = ['served']
+    elif corruption == 'foreign':
+        frontier['candidates'].append({'id': 'never program-selected'})
+    else:
+        selection['ranking'].reverse()
+    write(tmp_path/'semantic_frontier.json', frontier)
+    write(tmp_path/'semantic_selection.json', selection)
+    assert not verify_semantic_frontier(**args)[0]
 
 
 def test_named_execution_outcomes_do_not_infer_semantic_correctness(tmp_path):

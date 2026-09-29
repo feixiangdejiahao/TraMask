@@ -191,6 +191,53 @@ def named_outcomes(runs):
     return outcomes
 
 
+def verify_semantic_frontier(directory, stage, configuration, history, served,
+                             previous_sha256, source_identity, model_result):
+    """Validate a persisted queue against source material seen in prior rounds.
+
+    This checks receipts and queue transitions without importing the selector.
+    A valid queue is not evidence that its ranking finds a correct oracle.
+    """
+    frontier_record = freeze_file(directory/'semantic_frontier.json')
+    selection_record = freeze_file(directory/'semantic_selection.json')
+    frontier, selection = read(frontier_record['path']), read(selection_record['path'])
+    catalogue = frontier.get('candidates', [])
+    catalogue_ids = [row['id'] for row in catalogue]
+    ranking = selection.get('ranking', [])
+    ranking_ids = [row['id'] for row in ranking]
+    chosen = selection.get('selected', [])
+    chosen_ids = [row['id'] for row in chosen]
+    pending = [identifier for identifier in ranking_ids if identifier not in served]
+    budget = configuration['semantic_budget']
+    policy = configuration.get('semantic_frontier_policy')
+    checks = (
+        policy == 'persistent-source-semantic-frontier-v1',
+        stage.get('semantic_frontier_policy') == policy,
+        stage.get('previous_semantic_sha256') == previous_sha256,
+        set(stage.get('previously_selected', [])) == served,
+        frontier.get('policy') == selection.get('policy') == policy,
+        frontier.get('source_identity') == source_identity,
+        len(catalogue_ids) == len(set(catalogue_ids)) == len(history),
+        {row['id']: row for row in catalogue} == history,
+        len(ranking_ids) == len(set(ranking_ids)) == len(history),
+        set(ranking_ids) == set(history),
+        all(row.get('previously_selected') == (row['id'] in served) for row in ranking),
+        chosen_ids == pending[:budget] == model_result.get('selected_ids', []),
+        all(row == history.get(row['id']) for row in chosen),
+        all(row.get('selected') == (row['id'] in chosen_ids) for row in ranking),
+        set(frontier.get('selected_ids', [])) == served | set(chosen_ids),
+        frontier.get('pending_ids') == pending[budget:],
+        selection.get('budget') == budget,
+        selection.get('catalogue_count') == len(history),
+        selection.get('eligible_count') == len(pending),
+        selection.get('selected_count') == len(chosen),
+        selection.get('pending_count') == model_result.get('pending_semantic_count') == len(pending[budget:]),
+        model_result.get('semantic_frontier_policy') == policy,
+        set(model_result.get('previous_selected', [])) == served | set(chosen_ids),
+    )
+    return all(checks), [frontier_record, selection_record], frontier_record['sha256']
+
+
 def verify_multiround_campaign(campaign, ledger, campaign_path):
     """Check the coordinator's actual stage arguments, not a claimed config SHA."""
     root = Path(campaign_path).resolve().parent
@@ -227,7 +274,8 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
                      and source['sha256'] == configuration.get('source_corpus_sha256', {}).get(case)
                      and source_directory == _path(Path(configuration.get('source_root', '.'))/case))
         rounds, selected, executed, reports, indexes, outcomes = [], set(), set(), {}, [], {}
-        previous_feedback = None
+        previous_feedback, previous_semantic = None, None
+        semantic_history, semantic_served = {}, set()
         for index, round_row in enumerate(case_row['rounds']):
             if round_row['round'] != index:
                 raise ValueError('Campaign rounds must be consecutive and start at zero')
@@ -260,6 +308,8 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
                                and semantic_stage.get('budget') == configuration.get('semantic_budget')
                                and semantic_stage.get('per_request') == configuration.get('per_request')
                                and semantic_stage.get('model_workers') == configuration.get('model_workers')
+                               and semantic_stage.get('batch_recovery') == configuration.get('batch_recovery')
+                               and semantic_stage.get('semantic_frontier_policy') == configuration.get('semantic_frontier_policy')
                                and semantic_stage.get('cache_sha256') == configuration.get('oracle_cache_sha256')
                                and emission_stage.get('group_size') == configuration.get('group_size')
                                and emission_stage.get('timeout') == configuration.get('timeout')
@@ -285,6 +335,10 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
                              and len(ids) == len(candidates))
             program_candidates = read(program_dir/'candidates.json')['candidates']
             candidates_ok = candidates_ok and len(program_candidates) <= configuration['limit']
+            for candidate in program_candidates:
+                if candidate['id'] in semantic_history and semantic_history[candidate['id']] != candidate:
+                    raise ValueError('Historical program candidate material changed')
+                semantic_history[candidate['id']] = candidate
             runs = read(runs_record['path'])
             runs = runs['runs'] if isinstance(runs, dict) else runs
             for run in runs:
@@ -315,10 +369,14 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
             model_result = read(semantic_dir/'semantic_result.json')
             replay = read(semantic_dir/'semantic_replay.json') if (semantic_dir/'semantic_replay.json').exists() else {}
             request_offered, provider_offered, actual_calls = set(), set(), 0
+            request_material_ok = True
             request_paths = sorted((semantic_dir/'requests').glob('request_*.json'))
             for request_path in request_paths:
                 evidence.append(freeze_file(request_path))
-                offered = {row['candidate']['id'] for row in read(request_path).get('offered', {}).values()}
+                offered_rows = [row['candidate'] for row in read(request_path).get('offered', {}).values()]
+                offered = {row['id'] for row in offered_rows}
+                request_material_ok = request_material_ok and all(
+                    row == semantic_history.get(row['id']) for row in offered_rows)
                 request_offered |= offered
                 completion = semantic_dir/'completions'/request_path.stem
                 provider_manifest = completion/'manifest.json'
@@ -330,10 +388,20 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
                         provider_offered |= offered
             if configuration.get('oracle_mode') == 'fresh':
                 selected_for_model = set(model_result.get('selected_ids', []))
+                eligible_ids = {row['id'] for row in program_candidates}
+                frontier_ok = True
+                if configuration.get('semantic_frontier_policy'):
+                    frontier_ok, frontier_evidence, previous_semantic = verify_semantic_frontier(
+                        semantic_dir, semantic_stage, configuration, semantic_history, semantic_served,
+                        previous_semantic, {'corpus_sha256': digest(program_dir/'corpus.json'),
+                                            'issue_sha256': digest(program_dir/'issue.md')}, model_result)
+                    evidence.extend(frontier_evidence)
+                    eligible_ids = set(semantic_history)
                 round_config_ok = (round_config_ok and len(selected_for_model) <= configuration['semantic_budget']
-                                   and selected_for_model <= {row['id'] for row in program_candidates}
+                                   and selected_for_model <= eligible_ids and frontier_ok and request_material_ok
                                    and request_offered <= selected_for_model
                                    and actual_calls == model_result.get('provider_calls', 0))
+                semantic_served |= selected_for_model
             rounds.append({'round': index, 'scope_verified': all((round_config_ok, round_code_ok, round_source_ok, chain_ok, candidates_ok, execution_ok)),
                            'configuration_matches': round_config_ok, 'algorithm_snapshot_matches': round_code_ok,
                            'source_corpus_matches': round_source_ok, 'artifact_chain_matches': chain_ok,
