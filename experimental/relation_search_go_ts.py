@@ -39,7 +39,8 @@ _ASSERTION_METHODS = {
     "toHaveLength", "toThrow", "toBeInstanceOf", "Equal", "EqualValues",
     "NotEqual", "Greater", "GreaterOrEqual", "Less", "LessOrEqual", "Contains",
     "Error", "NoError", "True", "False", "Nil", "NotNil", "Fatal", "Fatalf",
-    "Errorf", "assert", "expect",
+    "Errorf", "ElementsMatch", "Exactly", "NotContains", "Len", "Fail", "FailNow",
+    "Log", "Logf", "assert", "expect",
 }
 
 
@@ -173,6 +174,73 @@ def _assertion_call(source: Source, node) -> bool:
     return False
 
 
+def _expected_regions(source: Source, observations=()):
+    """Freeze expected expressions and locals used exclusively by them.
+
+    Frontend assertion roles cover failure guards as well as framework calls.
+    The syntax fallback handles ordinary matcher/assert APIs for standalone
+    source input. A fixture shared by an actual call and an expectation is not
+    classified as an expected-only definition.
+    """
+    regions = set()
+    for observation in observations:
+        span = (observation.get("expected") or {}).get("span") or {}
+        if observation.get("kind") == "assertion" and span.get("path") == source.path:
+            regions.add((span["start_byte"], span["end_byte"]))
+    for node in walk(source.root):
+        if node.type not in CALLS or not _assertion_call(source, node):
+            continue
+        function, args = call_parts(node)
+        path = _path(source, function)
+        method = path[-1] if path else source.text(attr_parts(function)[1]) if function is not None and function.type in ATTRS else ""
+        expected = []
+        if source.language == "typescript":
+            if method.startswith("to"):
+                expected = args
+            elif method != "expect" and args:
+                expected = args[1:]
+        elif source.language == "go":
+            if method in {"Equal", "EqualValues", "NotEqual", "ElementsMatch", "Exactly"}:
+                expected = args[1:2] + args[3:]
+            elif method in {"Greater", "GreaterOrEqual", "Less", "LessOrEqual", "Contains", "NotContains", "Len"}:
+                expected = args[2:]
+            elif method in {"Errorf", "Fatalf", "Error", "Fatal", "Fail", "FailNow", "Log", "Logf"} and path and path[0] not in source.imports:
+                expected = args
+            else:
+                expected = args[2:]
+        regions.update((arg.start_byte, arg.end_byte) for arg in expected)
+    bindings = _bindings(source)
+    identifiers = [node for node in walk(source.root) if node.type == "identifier"]
+    references, resolved = defaultdict(list), {}
+    for node in identifiers:
+        binding = _resolve(bindings, source.text(node), node)
+        if binding is not None:
+            resolved[node.start_byte] = binding
+            references[(binding[0].start_byte, binding[1].start_byte)].append(node)
+    def covered(node):
+        return any(start <= node.start_byte and node.end_byte <= end for start, end in regions)
+    changed = True
+    while changed:
+        changed = False
+        for identifier in identifiers:
+            binding = resolved.get(identifier.start_byte)
+            if binding is None or not covered(identifier):
+                continue
+            name, value, _ = binding
+            if covered(value):
+                continue
+            # A multi-result initializer is shared by its declared bindings.
+            siblings = [(other_name, other_value) for definitions in bindings.values()
+                        for other_name, other_value, _ in definitions
+                        if other_value.start_byte == value.start_byte]
+            uses = [use for other_name, other_value in siblings
+                    for use in references[(other_name.start_byte, other_value.start_byte)]]
+            if uses and all(covered(use) for use in uses):
+                regions.add((value.start_byte, value.end_byte))
+                changed = True
+    return sorted(regions)
+
+
 def _constant(source: Source, node):
     try:
         value = literal(source.text(node))
@@ -250,6 +318,64 @@ def routing_templates(sources: Iterable[Source]) -> list[dict]:
                    "carrier": carrier, "source_sha256": hashlib.sha256(source.data).hexdigest()}
             templates.setdefault(key, row)
     return [templates[key] for key in sorted(templates, key=repr)]
+
+
+def _bound_record_profiles(source, arguments, bindings):
+    """Compare keys at a bound factory's definition and invocation.
+
+    This records a lexical set relation, not a claim that the first record is a
+    schema or that missing fields must receive defaults. Both record operands
+    and the shared callable binding are source witnesses. Unknown/spread keys
+    do not manufacture a profile.
+    """
+    profiles, evidence = [], []
+    for position, argument in enumerate(arguments):
+        actual_records = []
+        if argument.type in CALLS:
+            function, actual_arguments = call_parts(argument)
+            name = _path(source, function)
+            actual_records = [(i, _record_items(source, arg)) for i, arg in enumerate(actual_arguments)]
+            actual_records = [(i, record) for i, record in actual_records if record is not None]
+            absent = not actual_arguments
+        else:
+            name = _path(source, argument)
+            absent = argument.type == "identifier"
+        if name is None or len(name) != 1:
+            continue
+        binding = _resolve(bindings, name[0], argument)
+        if binding is None or binding[1].type not in CALLS:
+            continue
+        _, initializer_arguments = call_parts(binding[1])
+        for definition_slot, definition in enumerate(initializer_arguments):
+            record = _record_items(source, definition)
+            if record is None:
+                continue
+            reference_keys = {key for _, key, _ in record[1]}
+            operands = [(None, None)] if absent else actual_records
+            for actual_slot, actual in operands:
+                keys = None if actual is None else {key for _, key, _ in actual[1]}
+                if keys is None:
+                    relation = "absent"
+                elif keys == reference_keys:
+                    relation = "equal"
+                elif not keys:
+                    relation = "empty"
+                elif keys < reference_keys:
+                    relation = "strict_subset"
+                elif reference_keys < keys:
+                    relation = "strict_superset"
+                elif keys.isdisjoint(reference_keys):
+                    relation = "disjoint"
+                else:
+                    relation = "partial_overlap"
+                profiles.append([position, definition_slot, actual_slot, relation])
+                evidence.append({"binding": _span(source, binding[0]),
+                                 "definition_record": _span(source, definition),
+                                 "invocation": _span(source, argument),
+                                 "definition_keys": sorted(reference_keys),
+                                 "invocation_keys": None if keys is None else sorted(keys),
+                                 "relation": relation})
+    return profiles, evidence
 
 
 def _local_in_expression(source: Source, identifier, expression) -> bool:
@@ -542,10 +668,10 @@ def _go_results(source, declaration):
     return names, values[0] if len(values) == 1 and values[0].type in CALLS else None
 
 
-def _guest_container_neighbors(source: Source, donors):
+def _guest_container_neighbors(source: Source, donors, views=None):
     if source.language != "go":
         return []
-    views = _go_array_views([source, *donors])
+    views = _go_array_views([source, *donors]) if views is None else views
     bindings, result = _bindings(source), []
     source_hash = hashlib.sha256(source.data).hexdigest()
     for unit in _tests(source):
@@ -717,7 +843,7 @@ def _go_getter_projection(source, invocation):
             "helper": _span(source, helper.node)}
 
 
-def _guest_alias_neighbors(source: Source, donors):
+def _guest_alias_neighbors(source: Source, donors, views=None):
     """Duplicate a guest closure's identity across a transported container.
 
     Source facts determine the producer, transfer call, typed host getter,
@@ -727,7 +853,8 @@ def _guest_alias_neighbors(source: Source, donors):
     """
     if source.language != "go":
         return []
-    views = [view for view in _go_array_views([source, *donors]) if view["container_kind"] == "sequence"]
+    views = [view for view in (_go_array_views([source, *donors]) if views is None else views)
+             if view["container_kind"] == "sequence"]
     result, source_hash = [], hashlib.sha256(source.data).hexdigest()
     for unit in _tests(source):
         declarations = [node for node in walk(unit.body) if node.type == "short_var_declaration"]
@@ -1126,7 +1253,106 @@ def _observed_numeric_bindings(source, unit):
     return names
 
 
-def _owner_prefix_neighbors(source: Source):
+def _go_call_type_facts(corpus, frontend):
+    """Known scalar types at resolved calls, with unknown facts left open.
+
+    This deliberately does not replace Go's compiler. It proves only builtin
+    scalar and explicitly declared scalar types, following source aliases.
+    Interfaces, generics, unresolved targets and external named types remain
+    unknown and must be checked by compilation.
+    """
+    if not frontend or corpus.get("language") != "go":
+        return {}
+    metadata = corpus.get("sources", {})
+    parsed = {}
+    scalar_cache = {}
+    builtin = set("bool string int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 complex64 complex128".split())
+    def source_at(path):
+        if path not in parsed and path in metadata:
+            parsed[path] = Source(path, metadata[path]["code"], "go")
+        return parsed.get(path)
+    def scalar(path, spelling, seen=()):
+        key = path, spelling.strip()
+        if key in seen:
+            return None
+        if key not in scalar_cache:
+            scalar_cache[key] = resolve_scalar(path, spelling, seen)
+        return scalar_cache[key]
+    def resolve_scalar(path, spelling, seen=()):
+        spelling = spelling.strip()
+        if spelling in {"byte", "rune"}:
+            spelling = {"byte": "uint8", "rune": "int32"}[spelling]
+        if spelling in builtin:
+            return ("builtin", spelling)
+        if not re.fullmatch(r"\w+(?:\.\w+)?", spelling) or (path, spelling) in seen:
+            return None
+        current = source_at(path)
+        if current is None:
+            return None
+        if "." in spelling:
+            alias, name = spelling.split(".")
+            imported = current.imports.get(alias)
+            if not imported:
+                return None
+            module = imported[0]
+            paths = [p for p in metadata if p.endswith(".go") and
+                     (module == posixpath.dirname(p) or module.endswith("/" + posixpath.dirname(p)))]
+        else:
+            name = spelling
+            paths = [p for p in metadata if p.endswith(".go") and posixpath.dirname(p) == posixpath.dirname(path)]
+        for candidate_path in paths:
+            # Cheap prefilter before parsing a package's irrelevant files.
+            if not re.search(r"\b" + re.escape(name) + r"\b", metadata[candidate_path]["code"]):
+                continue
+            declaration_source = source_at(candidate_path)
+            for node in walk(declaration_source.root):
+                if node.type not in {"type_spec", "type_alias"}:
+                    continue
+                declared_name, underlying = child(node, "name"), child(node, "type")
+                if declared_name is None or underlying is None or declaration_source.text(declared_name) != name:
+                    continue
+                base = scalar(candidate_path, declaration_source.text(underlying), (*seen, (path, spelling)))
+                if base is None:
+                    return None
+                if node.type == "type_alias":
+                    return base
+                return ("named", posixpath.dirname(candidate_path), name)
+        return None
+    test_paths = {test.get("definition_span", test.get("span", {})).get("path")
+                  for test in corpus.get("tests", {}).values()}
+    relevant_calls = [call for call in frontend.get("calls", []) if call.get("span", {}).get("path") in test_paths]
+    needed = {target.get("function_id") for call in relevant_calls for target in call.get("targets", [])}
+    functions = {}
+    for function in frontend.get("functions", []):
+        if function["id"] not in needed:
+            continue
+        span = function.get("span", {})
+        path = span.get("path")
+        if path not in metadata:
+            continue
+        # Parse just this declaration to avoid repeatedly walking large files.
+        text = metadata[path]["code"].encode()[span["start_byte"]:span["end_byte"]].decode()
+        fragment = Source("signature.go", "package signatures\n" + text, "go")
+        declaration = next((n for n in fragment.root.named_children if n.type in {"function_declaration", "method_declaration"}), None)
+        returned = child(declaration, "result") if declaration is not None else None
+        if returned is not None and returned.type == "parameter_list":
+            first = next(iter(returned.named_children), None)
+            returned = child(first, "type") if first is not None else None
+        result_type = scalar(path, fragment.text(returned)) if returned is not None else None
+        parameters = {p["index"]: scalar(path, p.get("type") or "") for p in function.get("parameters", [])}
+        functions[function["id"]] = (result_type, parameters)
+    facts = {}
+    for call in relevant_calls:
+        targets = [functions[t["function_id"]] for t in call.get("targets", [])
+                   if t.get("resolved") and t.get("function_id") in functions]
+        if len(targets) != 1 or len(call.get("targets", [])) != 1:
+            continue
+        span = call["span"]
+        facts[(span["path"], span["start_byte"], span["end_byte"])] = targets[0]
+    return facts
+
+
+def _owner_prefix_neighbors(source: Source, call_types=None):
     """Bind a consumer input to an observed result on the same fixture owner.
 
     The complete source prefix after owner construction is retained, including
@@ -1138,6 +1364,28 @@ def _owner_prefix_neighbors(source: Source):
         return []
     tests, bindings = _tests(source), _bindings(source)
     producers, result = [], []
+    call_types = call_types or {}
+    def result_type(node, seen=()):
+        if node.type in CALLS:
+            return call_types.get((source.path, node.start_byte, node.end_byte), (None, {}))[0]
+        if node.type == "identifier" and node.start_byte not in seen:
+            binding = _resolve(bindings, source.text(node), node)
+            if binding is not None and binding[1].type in CALLS:
+                declaration = binding[0]
+                while declaration is not None and declaration.type not in {"short_var_declaration", "var_spec"}:
+                    declaration = declaration.parent
+                names, rhs = _go_results(source, declaration) if declaration is not None else ([], None)
+                # Call facts currently prove only the first returned scalar.
+                # A later tuple binding must remain unknown, not inherit it.
+                if rhs is not None and names and names[0].start_byte != binding[0].start_byte:
+                    return None
+            return result_type(binding[1], (*seen, node.start_byte)) if binding else None
+        if node.type == "binary_expression":
+            left, right = child(node, "left"), child(node, "right")
+            for typed, untyped in ((left, right), (right, left)):
+                if typed is not None and untyped is not None and _closed_numeric(source, untyped):
+                    return result_type(typed, seen)
+        return None
     for unit in tests:
         numeric = _observed_numeric_bindings(source, unit)
         statements = _statements(unit)
@@ -1165,7 +1413,8 @@ def _owner_prefix_neighbors(source: Source):
                     end = following.end_byte
             producers.append({"unit": unit, "owner": path[0], "owner_creator": _creator(source, bindings, path[0], rhs),
                               "start": owner_statement.end_byte, "end": end, "result": source.text(names[0]),
-                              "result_span": _span(source, names[0]), "call": source.text(rhs)})
+                              "result_span": _span(source, names[0]), "call": source.text(rhs),
+                              "result_type": result_type(rhs)})
         # Arithmetic terms already present in an observation are independent
         # producer-derived inputs too. Follow receiver bindings to the fixture
         # root and copy through the last value definition, not through the
@@ -1222,7 +1471,8 @@ def _owner_prefix_neighbors(source: Source):
                 producers.append({"unit": unit, "owner": owner_name, "owner_creator": creator,
                                   "start": owner_statement.end_byte, "end": end,
                                   "result": source.text(expression), "result_node": expression,
-                                  "result_span": _span(source, expression), "call": source.text(expression)})
+                                  "result_span": _span(source, expression), "call": source.text(expression),
+                                  "result_type": result_type(expression)})
     source_hash = hashlib.sha256(source.data).hexdigest()
     for unit in tests:
         for node in walk(unit.body):
@@ -1241,6 +1491,10 @@ def _owner_prefix_neighbors(source: Source):
                     continue
                 for producer in producers:
                     if producer["unit"] is unit or producer["owner_creator"] != owner_creator:
+                        continue
+                    formal = call_types.get((source.path, node.start_byte, node.end_byte), (None, {}))[1].get(argument_index)
+                    actual = producer["result_type"]
+                    if formal is not None and actual is not None and formal != actual:
                         continue
                     start, end = producer["start"], producer["end"]
                     mapping = {producer["owner"]: path[0]}
@@ -1264,12 +1518,12 @@ def _owner_prefix_neighbors(source: Source):
                             substitutions.append({"span": _span(source, item), "before": name, "after": mapping[name]})
                     prefix = _edit_bytes(source.data[start:end], substitutions, offset=start).decode()
                     if "result_node" in producer:
-                        node = producer["result_node"]
+                        result_node = producer["result_node"]
                         result_edits = [{"span": _span(source, part), "before": source.text(part),
                                          "after": mapping[source.text(part)]}
-                                        for part in walk(node) if part.type == "identifier" and source.text(part) in mapping]
-                        produced = _edit_bytes(source.data[node.start_byte:node.end_byte], result_edits,
-                                               offset=node.start_byte).decode()
+                                        for part in walk(result_node) if part.type == "identifier" and source.text(part) in mapping]
+                        produced = _edit_bytes(source.data[result_node.start_byte:result_node.end_byte], result_edits,
+                                               offset=result_node.start_byte).decode()
                     else:
                         produced = mapping[producer["result"]]
                     insertion = {"path": source.path, "start_byte": statement.start_byte,
@@ -1287,7 +1541,9 @@ def _owner_prefix_neighbors(source: Source):
                                    "evidence": {"source_test": donor_unit.name, "source_test_span": _span(source, donor_unit.node),
                                                 "prefix_span": {"path": source.path, "start_byte": start, "end_byte": end},
                                                 "producer_result": producer["result_span"], "renaming": mapping,
-                                                "owner_creator": list(owner_creator)},
+                                                "owner_creator": list(owner_creator),
+                                                "type_check": {"actual": actual, "formal": formal,
+                                                               "status": "known_compatible" if actual and formal else "compiler_required"}},
                                    "oracle_status": "retained_source_assertions_require_contract_review",
                                    "priority": (1, 0, node.start_byte, end - start),
                                    "generated_test_name": "rs_" + identifier})
@@ -1306,7 +1562,8 @@ def analyze_source(path: str, code: str, language: str) -> dict:
 
 def propose_neighbors(source: Source, donors: Iterable[Source] = (), *, budget=128,
                       operators: Iterable[str] = OPERATORS,
-                      _routing=None, _contexts=None) -> list[dict]:
+                      _routing=None, _contexts=None, _observations=(), _call_types=None,
+                      _guest_views=None) -> list[dict]:
     """Return bounded edits with original anchors; never infer expected values."""
     enabled = set(operators)
     unknown = enabled - set(OPERATORS)
@@ -1433,25 +1690,31 @@ def propose_neighbors(source: Source, donors: Iterable[Source] = (), *, budget=1
                         continue
                     routed_fn = ".".join([carrier["owner"], *template["wrapper_path"], path[-1]])
                     after = routed_fn + "(" + ", ".join([receiver, *(source.text(a) for a in args)]) + ")"
+                    payload_profile, payload_evidence = _bound_record_profiles(source, args, bindings)
                     offer(unit, node, after, "receiver_route",
                           {"kind": "receiver_context", "before": source.text(fn), "after": routed_fn,
-                           "receiver_becomes_argument": 0},
-                          {"template": template, "carrier": carrier},
+                           "receiver_becomes_argument": 0, "profile": payload_profile},
+                          {"template": template, "carrier": carrier,
+                           "bound_record_relations": payload_evidence},
                           (0, 0, node.start_byte, len(args)))
     unique = {p["id"]: p for p in proposals}
     if "guest_result_container" in enabled:
-        unique.update({p["id"]: p for p in _guest_container_neighbors(source, all_sources)})
+        unique.update({p["id"]: p for p in _guest_container_neighbors(source, all_sources, _guest_views)})
     if "owner_prefix_rebind" in enabled:
-        unique.update({p["id"]: p for p in _owner_prefix_neighbors(source)})
+        unique.update({p["id"]: p for p in _owner_prefix_neighbors(source, _call_types)})
     if "guest_alias_route" in enabled:
-        unique.update({p["id"]: p for p in _guest_alias_neighbors(source, donors)})
+        unique.update({p["id"]: p for p in _guest_alias_neighbors(source, donors, _guest_views)})
     if "sequence_interval_extend" in enabled:
         unique.update({p["id"]: p for p in _sequence_interval_neighbors(source)})
     if "structured_literal_route" in enabled:
         unique.update({p["id"]: p for p in _structured_literal_neighbors(source)})
     if "numeric_context_route" in enabled:
         unique.update({p["id"]: p for p in _numeric_context_neighbors(source)})
-    return sorted(unique.values(), key=lambda p: (p["priority"], p["id"]))[:budget]
+    expected_regions = _expected_regions(source, _observations)
+    def edits_inputs_only(proposal):
+        return not any(edit["span"]["start_byte"] < end and start < edit["span"]["end_byte"]
+                       for edit in proposal["edits"] for start, end in expected_regions)
+    return _diverse_order([proposal for proposal in unique.values() if edits_inputs_only(proposal)], budget)
 
 
 def _edit_bytes(data: bytes, edits: list[dict], *, offset=0) -> bytes:
@@ -1528,8 +1791,8 @@ def enrich(corpus: dict, frontend=None, budget=128) -> list[dict]:
     """Adapt neighbours to generic_composition.emitter's candidate contract.
 
     Only tests already present in the supplied corpus are admitted.  The input
-    corpus is not modified.  ``frontend`` is reserved for a caller's shared
-    index; this version obtains its bounded facts directly from source ASTs.
+    corpus is not modified. The shared frontend supplies assertion roles and
+    resolved scalar argument types; other bounded facts come from source ASTs.
     """
     language = corpus.get("language")
     if language not in {"go", "typescript"}:
@@ -1554,11 +1817,13 @@ def enrich(corpus: dict, frontend=None, budget=128) -> list[dict]:
     proposals = []
     routing = routing_templates(donors)
     contexts = constructor_templates(donors)
+    call_types = _go_call_type_facts(corpus, frontend)
+    guest_views = _go_array_views(donors) if language == "go" else []
     dedup_contexts = {}
-    def canonical_tokens(source, node):
+    def canonical_tokens(source, node, omitted=()):
         tokens = []
         def visit(part):
-            if part.type == "comment":
+            if part.type == "comment" or (part.start_byte, part.end_byte) in omitted:
                 return
             if not part.children:
                 token = source.text(part)
@@ -1573,26 +1838,30 @@ def enrich(corpus: dict, frontend=None, budget=128) -> list[dict]:
         visit(node)
         return tokens
     def equivalent_key(source, row):
-        if source.language != "go":
-            return row["id"]
         if source.path not in dedup_contexts:
-            test_ranges = {(unit.node.start_byte, unit.node.end_byte) for unit in _tests(source)}
-            # Keep every non-test declaration, including helper bodies, global
-            # initializers and imports. Similar tests with different helper
-            # semantics are intentionally not collapsed.
-            context = [canonical_tokens(source, node) for node in source.root.named_children
-                       if (node.start_byte, node.end_byte) not in test_ranges]
+            test_nodes = [unit.node for unit in _tests(source)]
+            if source.language == "typescript":
+                test_nodes = [node.parent if node.parent is not None and node.parent.type == "expression_statement"
+                              else node for node in test_nodes]
+            test_ranges = {(node.start_byte, node.end_byte) for node in test_nodes}
+            # Keep helpers, global initializers, imports and enclosing lexical
+            # fixture/hook code. Remove only test bodies, including tests nested
+            # in TypeScript describe blocks. Different contexts stay separate.
+            context = canonical_tokens(source, source.root, test_ranges)
             written = corpus["sources"][source.path].get("written_path") or source.path
             dedup_contexts[source.path] = (posixpath.dirname(written), context)
         span = row["test_span"]
         transformed = _edit_bytes(source.data[span["start_byte"]:span["end_byte"]], row["edits"],
                                   offset=span["start_byte"]).decode()
-        temporary = Source("dedup_test.go", "package dedup\n" + transformed, "go", source.origin)
+        prefix = "package dedup\n" if source.language == "go" else ""
+        temporary = Source("dedup_test", prefix + transformed, source.language, source.origin)
         return _digest([dedup_contexts[source.path], canonical_tokens(temporary, temporary.root)])
     for source in sources:
         by_start = {test.get("definition_span", test["span"])["start_byte"]: (identifier, test)
                     for identifier, test in by_path[source.path]}
-        for row in propose_neighbors(source, budget=max(256, budget), _routing=routing, _contexts=contexts):
+        for row in propose_neighbors(source, donors, budget=max(256, budget), _routing=routing, _contexts=contexts,
+                                     _observations=(frontend or {}).get("observations", ()), _call_types=call_types,
+                                     _guest_views=guest_views):
             matched = by_start.get(row["test_span"]["start_byte"])
             if matched is None:
                 continue
@@ -1616,21 +1885,51 @@ def enrich(corpus: dict, frontend=None, budget=128) -> list[dict]:
         else:
             unique[key] = row
     proposals = list(unique.values())
-    # Deterministic round-robin across original observations.  A large fixture
-    # does not consume the complete budget before another test is considered.
+    return _diverse_order(proposals, budget)
+
+
+def _diverse_order(proposals, budget):
+    """Cycle construction families and ordinal shapes, then source tests.
+
+    A shape is a scheduling bucket, never an equivalence proof or a filter.
+    Operator-provided ordinal profiles preserve distinct arrangements at equal
+    branch coverage. Concrete values, test names and source positions do not
+    define a shape; all source contexts remain represented inside its bucket.
+    """
     groups = defaultdict(list)
     for row in sorted(proposals, key=lambda r: (r["priority"], r["id"])):
-        groups[row["base_test_id"]].append(row)
-    ordered = sorted(groups, key=lambda key: (
-        groups[key][0]["priority"][:2], groups[key][0]["source_retrieval_rank"], key))
+        relation = row.get("relation", row.get("relation_target", {}))
+        profile = relation.get("profile", relation.get("path_relations", []))
+        shape = (row["operator"], json.dumps(profile, sort_keys=True))
+        row["search_shape"] = {"operator": row["operator"], "profile": profile}
+        groups[shape].append(row)
+    queues = {}
+    for shape, rows in groups.items():
+        by_source = defaultdict(list)
+        for row in rows:
+            source_id = row.get("base_test_id", str(row.get("test_span", {}).get("start_byte", "")))
+            by_source[source_id].append(row)
+        ordered_sources = sorted(by_source, key=lambda key: (
+            by_source[key][0]["priority"][:2], by_source[key][0].get("source_retrieval_rank", 100000), key))
+        queue = []
+        while ordered_sources:
+            remaining = []
+            for key in ordered_sources:
+                queue.append(by_source[key].pop(0))
+                if by_source[key]:
+                    remaining.append(key)
+            ordered_sources = remaining
+        queues[shape] = queue
+    ordered = sorted(queues, key=lambda key: (
+        queues[key][0]["priority"][:2], queues[key][0].get("source_retrieval_rank", 100000), key))
     result = []
     while ordered and len(result) < budget:
         remaining = []
         for key in ordered:
             if len(result) >= budget:
                 break
-            result.append(groups[key].pop(0))
-            if groups[key]:
+            result.append(queues[key].pop(0))
+            if queues[key]:
                 remaining.append(key)
         ordered = remaining
     return result

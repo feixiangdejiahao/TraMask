@@ -9,10 +9,12 @@ import argparse
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
+import fcntl
 import json
 import re
 import shlex
 import tomllib
+import time
 from pathlib import Path
 import sys
 
@@ -72,8 +74,20 @@ def python_source_environment(repository):
 def emit_batch(args):
     from generic_composition.emitter import emit
     from generic_composition.runner import infer_harness
+    from relation_search.instrument import instrument_candidates
+    from relation_search.checkpoint import start, completed, seal, digest
     frozen(args.input)
-    args.output.mkdir(parents=True, exist_ok=False)
+    completed(args.input)
+    request = dict(stage='emit', input=str(args.input.resolve()), input_sha256=digest(args.input/'prepare.json'),
+                   group_size=args.group_size, timeout=args.timeout,
+                   algorithm_sha256={name: digest(ROOT/name) for name in (
+                       'scripts/execute_relation_search.py', 'scripts/relational_phase_runner.py',
+                       'relation_search/instrument.py', 'relation_search/runtime.py',
+                       'generic_composition/emitter.py', 'generic_composition/runner.py')})
+    start(args.output, request)
+    existing = completed(args.output)
+    if existing is not None:
+        return {**existing, 'resumed': True}
     case = load(args.input/'case.json')
     corpus = load(args.input/'corpus.json')
     selection = load(args.input/'selection.json')
@@ -102,8 +116,14 @@ def emit_batch(args):
              'selection': 'frozen program-owned candidate batch',
              'max_group_size': args.group_size}
     write(args.output/'execution_lanes.json', lanes)
-    unique = {candidate['id']: candidate for candidate in candidates}
-    write(args.output/'accepted.json', list(unique.values()))
+    raw = {candidate['id']: candidate for candidate in candidates if not candidate.get('is_source_profile')}
+    instrumentation = instrument_candidates(corpus, list(raw.values()))
+    write(args.output/'instrumentation.json', instrumentation)
+    write(args.output/'raw_candidates.json', list(raw.values()))
+    all_instrumented = {row['id']: row for row in instrumentation['candidates']}
+    unique = {key: all_instrumented[key] for key in raw}
+    write(args.output/'accepted.json', list(all_instrumented.values()))
+    helper_files = {row['path']: row['code'] for row in instrumentation['helper_files']}
     groups = defaultdict(list)
     for candidate in unique.values():
         key = (candidate['execution_lane'], corpus['tests'][candidate['base_test_id']]['span']['path'])
@@ -114,6 +134,9 @@ def emit_batch(args):
     artifacts = []
     for index, ((lane, path), members) in enumerate(batches):
         emitted = emit(corpus, members)
+        source_profile_ids = {key for row in members for key in row.get('source_profile_ids', [])}
+        profiles = [all_instrumented[key] for key in sorted(source_profile_ids)]
+        profile_emitted = emit(corpus, profiles) if profiles else None
         folder = args.output/f'group_{index:03d}'
         if case['language'] == 'go':
             from scripts.go_history_dependencies_v6 import recover_go_dependencies
@@ -151,6 +174,8 @@ def emit_batch(args):
             write(folder/'control_dependency_recovery.json', control_dependencies)
             write(folder/'control_dependency_import_aliases.json', control_aliases)
         write(folder/'control_emission.json', control_emitted)
+        if profile_emitted:
+            write(folder/'source_profile_emission.json', profile_emitted)
         def selector(rows):
             if case['language'] == 'python':
                 return ' or '.join(row['test_name'] for row in rows)
@@ -163,14 +188,25 @@ def emit_batch(args):
                                     name_filter=selector(emitted['obligations']))
             control_harness = infer_harness(Path(case['repository']), case['language'], list(control_emitted['files']),
                                            name_filter=selector(emitted['controls']))
+            profile_harness = infer_harness(Path(case['repository']), case['language'], list(profile_emitted['files']),
+                                            name_filter=selector(profile_emitted['obligations'])) if profile_emitted and profile_emitted['obligations'] else None
         except ValueError as exc:
             write(folder/'unsupported.json', {'error': str(exc)})
             continue
         mounts = []
         python_env = python_source_environment(Path(case['repository'])) if case['language'] == 'python' else {'command': ''}
         phases = []
-        for role, emission, current_harness in [('control', control_emitted, control_harness), ('generated', emitted, harness)]:
+        phase_inputs = [('control', control_emitted, control_harness)]
+        if profile_harness:
+            phase_inputs.append(('source_profile', profile_emitted, profile_harness))
+        phase_inputs.append(('generated', emitted, harness))
+        for role, emission, current_harness in phase_inputs:
             files = {**emission['files'], **current_harness.get('files', {})}
+            if role != 'control':
+                for helper_path, helper_code in helper_files.items():
+                    if helper_path in files and files[helper_path] != helper_code:
+                        raise ValueError('Runtime helper conflicts with source test')
+                    files[helper_path] = helper_code
             phase_files = []
             for name, code in files.items():
                 destination = folder/role/'files'/name
@@ -200,19 +236,38 @@ def emit_batch(args):
                     'source_environment': python_env,
                     'phases': phases, 'control_context': 'separate_source_control_snapshot_with_recorded_binding_materialization',
                     'mounts': mounts, 'obligations': emitted['obligations'], 'controls': emitted['controls'],
-                    'timeout': 2 * args.timeout + 30, 'original_input': str(args.input.resolve())}
+                    'profile_obligations': profile_emitted['obligations'] if profile_emitted else [],
+                    'source_profile_ids': sorted(source_profile_ids),
+                    'timeout': len(phases) * args.timeout + 30, 'original_input': str(args.input.resolve())}
         write(folder/'manifest.json', manifest)
         artifacts.append(str(folder.resolve()))
     write(args.output/'artifacts.json', artifacts)
-    return {'execution_hypotheses': len(unique), 'source_q': lanes['source_q_count'],
-            'llm_q': lanes['llm_q_count'], 'artifacts': len(artifacts)}
+    result = {'execution_hypotheses': len(unique), 'source_profiles': len(all_instrumented)-len(unique),
+              'source_q': lanes['source_q_count'],
+              'llm_q': lanes['llm_q_count'], 'artifacts': len(artifacts)}
+    seal(args.output, result)
+    return result
 
 
 def run(args):
     from combination_testing.test_reports import parse_report
+    from relation_search.checkpoint import start, completed, seal, digest
     from scripts.run_relational_gap_case import run_case
-    args.output.mkdir(parents=True, exist_ok=False)
+    if not 1 <= args.workers <= 2:
+        raise ValueError('Offline replay supports at most two workers')
+    completed(args.input)  # Verify a new-style frozen materialization, if present.
     artifacts = load(args.input/'artifacts.json')
+    request = dict(stage='run', input=str(args.input.resolve()), workers=args.workers,
+                   artifacts_sha256={path: digest(Path(path)/'manifest.json') for path in artifacts},
+                   registry_sha256=digest(args.registry), runner_sha256=digest(Path(__file__)))
+    start(args.output, request)
+    lock = (args.output/'.run.lock').open('a')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    existing = completed(args.output)
+    if existing is not None:
+        lock.close()
+        return {**existing, 'resumed': True}
+
     def worker(path):
         path = Path(path)
         manifest = load(path/'manifest.json')
@@ -220,15 +275,24 @@ def run(args):
             if hashlib.sha256(Path(mount['source']).read_bytes()).hexdigest() != mount['sha256']:
                 raise ValueError('Frozen emitted file modified')
         destination = args.output/path.name
-        result = run_case(manifest['case'], manifest['command'], mounts=manifest['mounts'],
-                          timeout=manifest['timeout'], output=destination, registry=args.registry)
-        rows = []
-        reports = {}
+        # A completed Docker process can be normalized again after interruption.
+        # An incomplete attempt is preserved and replayed in a fresh directory.
+        attempt = 0
+        while destination.exists() and not (destination/'execution.json').exists():
+            attempt += 1
+            destination = args.output/(path.name + '_attempt_' + str(attempt))
+        if (destination/'execution.json').exists():
+            result = load(destination/'execution.json')
+        else:
+            result = run_case(manifest['case'], manifest['command'], mounts=manifest['mounts'],
+                              timeout=manifest['timeout'], output=destination, registry=args.registry)
+        rows, reports = [], {}
         for phase in manifest['phases']:
             role = phase['role']
             phase_output = destination/role
             phase_result = load(phase_output/'result.json') if (phase_output/'result.json').exists() else {'error': 'phase_not_observed', **result}
-            items = manifest['controls'] if role == 'control' else manifest['obligations']
+            items = (manifest['controls'] if role == 'control' else
+                     manifest.get('profile_obligations', []) if role == 'source_profile' else manifest['obligations'])
             normalized = parse_report(phase_output, phase['report'], phase_result, selected_names=[x['id'] for x in items])
             write(phase_output/'normalized.json', normalized)
             reports[role] = normalized
@@ -236,29 +300,50 @@ def run(args):
                 rows.append({'case': manifest['case'], 'candidate_id': item.get('candidate_id'),
                          'execution_lane': manifest['execution_lane'],
                          'static_parent_id': manifest['static_parent_ids'].get(item.get('candidate_id')),
-                         'base_test_id': item['base_test_id'], 'role': 'control' if item['is_control'] else 'generated',
+                         'base_test_id': item['base_test_id'], 'role': role,
                          'test_ids': [item['id']], 'control_ids': item.get('control_ids', []),
                          'result': str((phase_output/'normalized.json').resolve()),
+                         'trace': str((phase_output/'relation_trace.jsonl').resolve()),
                          'execution_context': {'phase': role, 'source_snapshot': phase['files'],
                                                'control_context': manifest['control_context'],
                                                'context_file': str((phase_output/'context.json').resolve())},
                          'manifest': str((path/'manifest.json').resolve())})
-        return rows, {**reports['generated'], 'control_phase': reports['control']}
+        counts = {role: report['counts'] for role, report in reports.items()}
+        elapsed = sum(load(destination/phase['role']/'result.json').get('elapsed_seconds', 0)
+                      for phase in manifest['phases'] if (destination/phase['role']/'result.json').exists())
+        return rows, {**reports.get('generated', {'status': 'error', 'counts': {}, 'errors': ['missing_generated_phase']}),
+                      'phase_counts': counts, 'elapsed_test_seconds': elapsed, 'output': str(destination)}
+
     runs, summary = [], []
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(worker, artifact): artifact for artifact in artifacts}
-        for future in as_completed(futures):
-            artifact = futures[future]
-            try:
-                rows, result = future.result()
-                runs.extend(rows)
-                summary.append({'artifact': artifact, 'status': result['status'], 'counts': result['counts'], 'errors': result['errors']})
-            except Exception as exc:
-                summary.append({'artifact': artifact, 'status': 'error', 'error_type': type(exc).__name__})
-            write(args.output/'runs.json', runs)
-            write(args.output/'summary.json', summary)
-            print(json.dumps(summary[-1]), flush=True)
-    return {'artifacts': len(artifacts), 'outcomes': summary}
+    started = time.monotonic()
+    try:
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futures = {pool.submit(worker, artifact): artifact for artifact in artifacts}
+            for future in as_completed(futures):
+                artifact = futures[future]
+                try:
+                    rows, result = future.result()
+                    runs.extend(rows)
+                    summary.append({'artifact': artifact, 'status': result['status'], 'counts': result['counts'],
+                                    'errors': result['errors'], 'phase_counts': result['phase_counts'],
+                                    'elapsed_test_seconds': result['elapsed_test_seconds'], 'output': result['output']})
+                except Exception as exc:
+                    summary.append({'artifact': artifact, 'status': 'error', 'error_type': type(exc).__name__,
+                                    'error': str(exc)})
+                runs.sort(key=lambda row: (row['manifest'], {'control': 0, 'source_profile': 1, 'generated': 2}[row['role']], row['test_ids']))
+                summary.sort(key=lambda row: row['artifact'])
+                write(args.output/'runs.json', runs)
+                write(args.output/'summary.json', summary)
+                print(json.dumps(summary[-1]), flush=True)
+        # Empty rounds still have explicit execution records.
+        write(args.output/'runs.json', runs)
+        write(args.output/'summary.json', summary)
+        result = {'artifacts': len(artifacts), 'outcomes': summary,
+                  'wall_seconds': round(time.monotonic()-started, 3)}
+        seal(args.output, result)
+        return result
+    finally:
+        lock.close()
 
 
 def main():

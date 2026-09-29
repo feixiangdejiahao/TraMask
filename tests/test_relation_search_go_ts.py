@@ -384,3 +384,176 @@ def test_local_oracle_accepts_go_expected_guard_without_changing_observer_or_bod
     assert not _valid_assertion(fixed + '\nsideEffect()', old, "got", "go")
     assert not _valid_assertion(old.replace('want {', 'compute() {'), old, "got", "go")
     assert not _valid_assertion(old.replace('got != want', 'got != got'), old, "got", "go")
+
+
+@pytest.mark.parametrize("name,offset", [("construct", 0), ("assemble", 37)])
+def test_nested_expected_calls_and_their_private_definitions_are_frozen(name, offset):
+    source = ts(f'''it('observation',()=>{{
+const expected={name}({{n:{1+offset},flag:true}});
+const shared={name}({{n:{2+offset},flag:true}});
+expect(run(shared)).toEqual(expected);
+expect(run(shared)).toEqual({name}({{n:{3+offset},flag:true}}));
+expect(run(shared)).toEqual(shared);
+}});''')
+    rows = propose_neighbors(source, operators=["record_delete", "argument_omit"])
+    assert rows
+    expected_start = source.code.index("const expected=")
+    expected_end = source.code.index(";", expected_start)
+    nested_start = source.code.index("toEqual(" + name)
+    nested_end = source.code.index(";", nested_start)
+    for row in rows:
+        for edit in row["edits"]:
+            position = edit["span"]["start_byte"]
+            assert not expected_start <= position < expected_end
+            assert not nested_start <= position < nested_end
+    assert any(edit["before"].startswith("{n:") for row in rows for edit in row["edits"])
+
+
+def test_frontend_expected_role_freezes_go_comparison_initializer():
+    source = Source("sample_test.go", '''package sample
+func TestState(t *testing.T) {
+ want:=build(Config{N:3,Flag:true})
+ got:=build(Config{N:4,Flag:true})
+ if got != want { t.Errorf("got %v want %v", got, want) }
+}
+''', "go")
+    position = source.code.index("want {")
+    observations = [{"kind": "print", "expected": None}, {"kind": "assertion", "expected": {"span": {
+        "path": source.path, "start_byte": position, "end_byte": position+4}}}]
+    rows = propose_neighbors(source, operators=["record_delete"], _observations=observations)
+    assert len(rows) == 2
+    assert all(row["edits"][0]["span"]["start_byte"] > source.code.index("got:=") for row in rows)
+
+
+def test_enrich_forwards_cross_file_guest_container_donors():
+    from anchor_retrieval.syntax import units
+    target = Source("calls_test.go", '''package sample_test
+import ("example.org/guest"; "testing")
+func TestCalls(t *testing.T) {
+ c:=run(`makeFn:=func(seed){n:=seed;return func(x){n+=x;return n}}`)
+ result,err:=c.Lookup("makeFn").Object().Invoke(integer(3))
+ assert.NoError(t,err); check(t,4,invoke(result,integer(1)))
+}
+''', "go")
+    donor = Source("container_test.go", '''package sample_test
+import "example.org/guest"
+func TestView(t *testing.T) { bag:=value.(*guest.Vector); _=bag.Elements[0] }
+''', "go")
+    corpus = {"language": "go", "sources": {}, "tests": {}}
+    for source in (target, donor):
+        corpus["sources"][source.path] = {"code": source.code}
+        unit = next(unit for unit in units(source)[0] if unit.test)
+        corpus["tests"][unit.name] = {"name": unit.name, "span": {
+            "path": source.path, "start_byte": unit.node.start_byte, "end_byte": unit.node.end_byte}}
+    rows = enrich(corpus, budget=128)
+    assert any(row["operator"] == "guest_result_container" and row["base_test_id"] == "TestCalls" for row in rows)
+
+
+@pytest.mark.parametrize("name,offset", [("Position", 0), ("Index", 41)])
+def test_owner_prefix_prunes_proved_named_scalar_mismatch(name, offset):
+    from anchor_retrieval.syntax import units, walk, child, CALLS
+    from experimental.relation_search_go_ts import _go_call_type_facts
+    source = Source("sample_test.go", f'''package sample
+type {name} uint64
+type Alias = int
+type state struct{{}}
+func open() *state {{return &state{{}}}}
+func (s *state) Value() {name} {{return {2+offset}}}
+func (s *state) Pair() ({name}, int) {{return {2+offset}, {4+offset}}}
+func (s *state) Good(x {name}) {{}}
+func (s *state) Bad(x int) {{}}
+func (s *state) Opaque(x any) {{}}
+func TestProducer(t *testing.T) {{ s:=open(); n:=s.Value(); assert.Equal(t,{2+offset},n); assert.Equal(t,{4+offset},n+2) }}
+func TestPair(t *testing.T) {{ s:=open(); _,n:=s.Pair(); assert.Equal(t,{6+offset},n+2) }}
+func TestConsumer(t *testing.T) {{ s:=open(); s.Good({900+offset}); s.Bad({900+offset}); s.Opaque({900+offset}) }}
+''', "go")
+    corpus = {"language": "go", "sources": {source.path: {"code": source.code}},
+              "tests": {"t": {"span": {"path": source.path}}}}
+    frontend = {"functions": [], "calls": []}
+    for unit in units(source)[0]:
+        frontend["functions"].append({"id": unit.name, "span": {"path": source.path,
+            "start_byte": unit.node.start_byte, "end_byte": unit.node.end_byte},
+            "parameters": [{"index": i, "type": unit.param_types.get(p)} for i,p in enumerate(unit.params)]})
+    for node in walk(source.root):
+        if node.type not in CALLS:
+            continue
+        text = source.text(node)
+        method = next((m for m in ("Value", "Pair", "Good", "Bad", "Opaque") if text.startswith("s."+m+"(")), None)
+        if method:
+            frontend["calls"].append({"span": {"path": source.path, "start_byte": node.start_byte,
+                "end_byte": node.end_byte}, "targets": [{"function_id": method, "resolved": True}]})
+    facts = _go_call_type_facts(corpus, frontend)
+    all_rows = propose_neighbors(source, operators=["owner_prefix_rebind"], _call_types=facts)
+    rows = [row for row in all_rows if row["evidence"]["source_test"] == "TestProducer"]
+    good = source.code.index("s.Good(")
+    bad = source.code.index("s.Bad(")
+    opaque = source.code.index("s.Opaque(")
+    assert rows
+    assert any(row["edits"][0]["span"]["start_byte"] == good for row in rows)
+    assert not any(row["edits"][0]["span"]["start_byte"] == bad for row in rows)
+    assert any(row["edits"][0]["span"]["start_byte"] == opaque for row in rows)
+    assert {row["evidence"]["type_check"]["status"] for row in rows} == {"known_compatible", "compiler_required"}
+    pair_rows = [row for row in all_rows if row["evidence"]["source_test"] == "TestPair"]
+    assert any(row["edits"][0]["span"]["start_byte"] == bad and
+               row["evidence"]["type_check"]["status"] == "compiler_required" for row in pair_rows)
+
+
+@pytest.mark.parametrize("key,prefix", [("doc", "a"), ("renamed", "shifted")])
+def test_shape_schedule_reaches_distinct_orders_before_repeated_source_contexts(key, prefix):
+    sources = []
+    for index in range(12):
+        lines = [prefix + str(index+j) for j in range(3)]
+        base = "\\n".join(lines)+"\\n"
+        left = "\\n".join([lines[0], "left", lines[2]])+"\\n"
+        right = "\\n".join([lines[0], "right", lines[2]])+"\\n"
+        sources.append(f'''it('trial{index}',()=>{{
+save({{{key}:"{base}"}});save({{{key}:"{left}"}});save({{{key}:"{right}"}});
+expect(compare()).toBe(true);
+}});''')
+    source = ts("\n".join(sources))
+    rows = propose_neighbors(source, operators=["sequence_interval_extend"], budget=8)
+    profiles = [tuple(row["relation_target"]["profile"]) for row in rows]
+    assert len(set(profiles[:4])) == 4
+    assert (-1, -1, 1, -1) in profiles  # strict partial, independent of payload/key spelling
+    all_rows = propose_neighbors(source, operators=["sequence_interval_extend"], budget=1000)
+    assert len(all_rows) > len(rows)  # Diversity schedules; it does not discard distinct contexts.
+
+
+def test_typescript_history_dedup_preserves_enclosing_hooks_and_local_fixtures():
+    from anchor_retrieval.syntax import units
+    def build(second_hook):
+        corpus = {"language": "typescript", "sources": {}, "tests": {}}
+        for index, value in enumerate((1, second_hook)):
+            path = f"tests/rh_{index}_sample.test.ts"
+            code = f'''describe('scope',()=>{{
+let fixture; beforeEach(()=>{{fixture={value}}});
+it('exercise',()=>{{ run({{n:4,flag:true}},fixture); }});
+}});'''
+            source = ts(code, path)
+            unit = next(unit for unit in units(source)[0] if unit.test)
+            corpus["sources"][path] = {"code": code, "origin": "trajectory", "written_path": "tests/sample.test.ts"}
+            corpus["tests"][str(index)] = {"name": unit.name, "retrieval_rank": index, "span": {
+                "path": path, "start_byte": unit.node.start_byte, "end_byte": unit.node.end_byte}}
+        return corpus
+    same = enrich(build(1), budget=128)
+    different = enrich(build(2), budget=128)
+    assert same and len(different) == len(same)*2
+    assert all(len(row["equivalent_candidates"]) == 1 for row in same)
+
+
+@pytest.mark.parametrize("fields,offset", [(('a','b'),0), (('renamed','other'),50)])
+def test_receiver_schedule_preserves_definition_invocation_key_relations(fields, offset):
+    a,b = fields
+    donor = ts("import {make} from '../lib';it('donor',()=>{const owner=make();const item=owner.obtain();owner.pending.write(item,1)});")
+    bodies = [("absent","Options"),("empty","Options({})"),
+              ("equal",f"Options({{{a}:{1+offset},{b}:true}})"),
+              ("strict_subset",f"Options({{{a}:{2+offset}}})")]
+    source = ts("import {make,shape} from '../lib';" +
+        f"const Options=shape({{{a}:{offset},{b}:false}});" +
+        "\n".join(f"it('{kind}',()=>{{const owner=make();const item=owner.obtain();item.write({argument});}});"
+                  for kind,argument in bodies))
+    rows = propose_neighbors(source,[donor],operators=["receiver_route"],budget=4)
+    assert {row["relation_target"]["profile"][0][-1] for row in rows} == {kind for kind,_ in bodies}
+    assert all(row["evidence"]["bound_record_relations"][0]["definition_keys"] == sorted(fields) for row in rows)
+    subset = next(row for row in rows if row["relation_target"]["profile"][0][-1] == "strict_subset")
+    assert subset["evidence"]["bound_record_relations"][0]["invocation_keys"] == [a]

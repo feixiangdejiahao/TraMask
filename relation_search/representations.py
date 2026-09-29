@@ -54,52 +54,67 @@ def generate(corpus, frontend=None, budget=128):
                      and span(n)['start_byte'] == definition['start_byte']), None)
         if unit is None:
             continue
-        # Track each simple local's latest direct construction. Nested scopes
-        # are deliberately excluded; a same-spelled variable is not identity.
-        bindings = {}
+        # Group every supported serialization of one lexical construction.
+        # Editing only one consumer leaves another command with broken quoting.
+        bindings, resources = {}, []
+        def expressions(node):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda, ast.Assert)):
+                return
+            yield node
+            for child in ast.iter_child_nodes(node):
+                yield from expressions(child)
         for statement in unit.body:
+            for node in expressions(statement):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                    bindings.pop(node.id, None)
             if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
                 name, value = statement.targets[0].id, statement.value
-                bindings.pop(name, None)
                 if (isinstance(value, ast.BinOp) and isinstance(value.op, ast.Div)
                         and isinstance(value.right, ast.Constant) and type(value.right.value) is str
                         and value.right.value and '/' not in value.right.value):
-                    bindings[name] = value.right
-            # Calls inside lambdas/comprehensions/nested definitions need a
-            # different execution cut and are outside this bounded operator.
-            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue
-            for node in ast.walk(statement):
+                    record = dict(name=name, leaf=value.right, consumers=[])
+                    bindings[name] = record
+                    resources.append(record)
+            for node in expressions(statement):
                 if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod)
                         and isinstance(node.left, ast.Constant) and type(node.left.value) is str
                         and isinstance(node.right, ast.Name) and node.right.id in bindings):
                     continue
                 if node.left.value.count('%s') != 1 or '%' in node.left.value.replace('%s', ''):
                     continue
-                leaf = bindings[node.right.id]
-                stem, dot, extension = leaf.value.rpartition('.')
-                stem, tail = (stem, '.'+extension) if dot and stem else (leaf.value, '')
-                for marker in (' space', "'quoted"):
-                    changed = stem + marker + tail
-                    encoded = f'{code(node.left)} % __import__("shlex").quote(str({node.right.id}))'
-                    edits = [dict(span=span(leaf), before=code(leaf), after=repr(changed), role='input'),
-                             dict(span=span(node), before=code(node), after=encoded, role='input_encoding')]
-                    identifier = 'route_' + stable([test['id'], edits])
-                    plans[test['id']].append(dict(
-                        id=identifier, base_test_id=test['id'], source_test_ids=[], imports=[],
-                        language='python', kind='resource_representation_route', edits=edits,
-                        relation=dict(domain='resource_serialization', binding=node.right.id,
-                                      producer=span(leaf), consumer=span(node),
-                                      representation='shell_word',
-                                      joint_shape=[any(c.isspace() for c in changed), "'" in changed, True],
-                                      status='statically_constructed_runtime_unconfirmed'),
-                        oracle=dict(mode='retain_all', applicability='requires_contract_review'),
-                        provenance=dict(source_spans=[span(leaf), span(node)],
-                                        basis='same lexical path binding consumed by percent interpolation'),
-                        runtime_probes=[dict(phase='before_serialized_consumer', insert_before=span(statement),
-                                             roles=[dict(name='resource', expression=node.right.id, origin_span=span(leaf)),
-                                                    dict(name='component', expression=repr(changed),
-                                                         control_expression=repr(leaf.value), origin_span=span(leaf))])]))
+                bindings[node.right.id]['consumers'].append((node, statement))
+        for resource in resources:
+            consumers, leaf, binding = resource['consumers'], resource['leaf'], resource['name']
+            if not consumers:
+                continue
+            stem, dot, extension = leaf.value.rpartition('.')
+            stem, tail = (stem, '.'+extension) if dot and stem else (leaf.value, '')
+            for marker in (' space', "'quoted"):
+                changed = stem + marker + tail
+                edits = [dict(span=span(leaf), before=code(leaf), after=repr(changed), role='input')]
+                probes = []
+                for node, statement in consumers:
+                    encoded = f'{code(node.left)} % __import__("shlex").quote(str({binding}))'
+                    edits.append(dict(span=span(node), before=code(node), after=encoded, role='input_encoding'))
+                    probes.append(dict(phase='before_serialized_consumer', insert_before=span(statement), roles=[
+                        dict(name='resource', expression=binding, origin_span=span(leaf)),
+                        dict(name='component', expression=repr(changed), control_expression=repr(leaf.value),
+                             origin_span=span(leaf), input_span=span(leaf))]))
+                identifier = 'route_' + stable([test['id'], edits])
+                plans[test['id']].append(dict(
+                    id=identifier, base_test_id=test['id'], source_test_ids=[], imports=[],
+                    language='python', kind='resource_representation_route', edits=edits,
+                    relation=dict(domain='resource_serialization', binding=binding,
+                                  producer=span(leaf), consumer=span(consumers[0][0]),
+                                  consumers=[span(node) for node, _ in consumers],
+                                  representation='shell_word',
+                                  joint_shape=[any(c.isspace() for c in changed), "'" in changed, True],
+                                  status='statically_constructed_runtime_unconfirmed'),
+                    oracle=dict(mode='retain_all', applicability='requires_contract_review'),
+                    provenance=dict(source_spans=[span(leaf), *[span(node) for node, _ in consumers]],
+                                    basis='one lexical construction and all supported percent-interpolation consumers',
+                                    limits='other encodings and nested closures are outside this operator'),
+                    runtime_probes=probes))
     queue = deque(iter(rows) for rows in plans.values())
     result = []
     while queue and len(result) < budget:

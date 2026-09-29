@@ -2,7 +2,30 @@ import json
 
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
-from relation_search.oracle import prepare_requests, validate
+from relation_search.oracle import imported_api_contexts, issue_contract, prepare_requests, validate
+
+
+def test_benchmark_runner_wrapper_is_not_part_of_the_contract():
+    issue = ('Implement the requested behavior.\n\n'
+             'You can execute bash commands and edit files to implement the necessary changes.\n'
+             '\n## Recommended Workflow\nRun commands.\n'
+             '\n## Command Execution Rules\nSubmit output.')
+    assert issue_contract(issue) == 'Implement the requested behavior.'
+    ordinary = 'The document should explain: You can execute bash commands.'
+    assert issue_contract(ordinary) == ordinary
+
+
+def test_import_context_follows_source_alias_and_barrel_to_function_body():
+    source = dict(language='typescript', sources={
+        'lib/index.ts': {'code': "export * from './wrap.ts';"},
+        'lib/wrap.ts': {'code': 'export function wrap(x: object): object;\nexport function wrap(x: object) { return {...x, stamp: true}; }'},
+        'elsewhere/wrap.ts': {'code': 'export function wrap(x: object) { return {other: x}; }'}})
+    candidate = {'imports': [{'name': 'generated_alias', 'module': '../lib/index.ts', 'imported_name': 'wrap',
+                               'source_path': 'tests/donor.test.ts'}]}
+    rows = imported_api_contexts(source, 'tests/target.test.ts', candidate)
+    assert len(rows) == 1
+    assert rows[0]['path'] == 'lib/wrap.ts' and rows[0]['imported_alias'] == 'generated_alias'
+    assert 'stamp: true' in rows[0]['code'] and 'other' not in rows[0]['code']
 
 
 def setup():

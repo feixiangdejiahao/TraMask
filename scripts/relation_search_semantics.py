@@ -76,7 +76,7 @@ def merge(args):
     if any(row.get('semantic_revision', {}).get('parent') not in originals for row in revisions):
         raise ValueError('revision parent absent from prepared source candidates')
     for path in args.input.iterdir():
-        if path.is_file() and path.name not in {'prepare.json', 'candidates.json'}:
+        if path.is_file() and path.name not in {'prepare.json', 'candidates.json', 'checkpoint.json', 'stage.json'}:
             (args.output/path.name).symlink_to(path.resolve())
     # Model omissions never remove the original program-generated hypothesis.
     write(args.output/'candidates.json', dict(candidates=[*original, *revisions],

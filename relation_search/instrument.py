@@ -214,16 +214,23 @@ def instrument_candidates(corpus, candidates):
                          'source_profiles_must_seed_seen_before_generated_events': True}}
 
 
-def _runtime_parent(item):
+def _runtime_parent(item, strategy='profile'):
     if 'candidate' in item:
         candidate, feedback = item['candidate'], item.get('feedback', {})
     else:
         candidate, feedback = item, item.get('runtime_feedback', {})
-    if (feedback.get('status') != 'runtime_observed' or feedback.get('retained') is not True
-            or not feedback.get('measured_profiles')
-            or feedback.get('candidate_id', candidate['id']) != candidate['id']
-            or candidate.get('is_source_profile')):
+    if (feedback.get('candidate_id', candidate['id']) != candidate['id']
+            or candidate.get('is_source_profile') or feedback.get('parent_eligible') is False):
         return None
+    if strategy == 'profile':
+        if (feedback.get('status') != 'runtime_observed' or feedback.get('retained') is not True
+                or not feedback.get('measured_profiles') or feedback.get('profile_baseline_measured') is False):
+            return None
+    elif strategy == 'rotation':
+        if feedback.get('executed') is not True or feedback.get('parent_eligible') is not True:
+            return None
+    else:
+        raise ValueError('Unknown search strategy')
     return candidate, feedback
 
 
@@ -349,14 +356,18 @@ def _composed_probes(candidate, merged):
     return changed, originals, skipped
 
 
-def compose_neighbors(retained_candidates, source_pool, max_edits=4, budget=128):
-    """Append compatible source edits only to parents with measured retention.
+def compose_neighbors(retained_candidates, source_pool, max_edits=4, budget=128, strategy='profile'):
+    """Append compatible source edits to eligible actually executed parents.
 
     Parents carry ``runtime_feedback`` equal to Frontier.observe's result, or
     use ``{candidate, feedback}`` wrappers. Input spans remain coordinates of
     the original source. Oracle revisions and instrumentation never become
-    search edits. Every returned combination needs fresh execution/admission.
+    search edits. The profile strategy requires measured retention. The explicit
+    rotation control uses all executed eligible parents with the same constructor
+    and never manufactures profile feedback. Every combination needs fresh execution.
     """
+    if strategy not in {'profile', 'rotation'}:
+        raise ValueError('Unknown search strategy')
     if type(max_edits) is not int or max_edits < 1 or type(budget) is not int or budget < 0:
         raise ValueError('max_edits must be positive and budget nonnegative')
     pools = defaultdict(list)
@@ -369,7 +380,7 @@ def compose_neighbors(retained_candidates, source_pool, max_edits=4, budget=128)
         existing.add(_edits_key(source['base_test_id'], edits))
     streams = []
     for item in retained_candidates:
-        parent = _runtime_parent(item)
+        parent = _runtime_parent(item, strategy)
         if parent is None:
             continue
         candidate, feedback = parent
@@ -394,8 +405,8 @@ def compose_neighbors(retained_candidates, source_pool, max_edits=4, budget=128)
             row = copy.deepcopy(candidate)
             left_probes, left_controls, left_skipped = _composed_probes(candidate, merged)
             right_probes, right_controls, right_skipped = _composed_probes(donor, merged)
-            row.update(id='composed_' + key, kind='retained_profile_extension',
-                       operator='retained_profile_extension', edits=merged, program_edits=copy.deepcopy(merged),
+            row.update(id='composed_' + key, kind='executed_parent_extension',
+                       operator='executed_parent_extension', edits=merged, program_edits=copy.deepcopy(merged),
                        source_test_ids=sorted(set(candidate.get('source_test_ids', [])) | set(donor.get('source_test_ids', []))),
                        imports=list({ _canonical(value): value for value in [*candidate.get('imports', []), *donor.get('imports', [])] }.values()),
                        parent_candidate_ids=[candidate['id'], donor['id']],
@@ -407,13 +418,14 @@ def compose_neighbors(retained_candidates, source_pool, max_edits=4, budget=128)
             for field in ('instrumentation', 'source_profile_ids', 'semantic_admission', 'semantic_revision',
                           'semantic_model_judgment', 'runtime_feedback'):
                 row.pop(field, None)
-            row['relation'] = {'domain': 'retained_profile_extension',
+            row['relation'] = {'domain': 'executed_parent_extension',
                                'status': 'statically_composed_runtime_unconfirmed',
                                'parents': [candidate.get('relation'), donor.get('relation')]}
             row['oracle'] = {**candidate.get('oracle', {}), 'applicability': 'unknown_requires_fresh_admission'}
             row['provenance'] = {**candidate.get('provenance', {}),
                                  'composition': {'parents': [candidate['id'], donor['id']],
                                                  'runtime_parent_feedback': copy.deepcopy(feedback),
+                                                 'selection_strategy': strategy,
                                                  'rule': 'same_base_nonoverlapping_original_source_edits',
                                                  'unavailable_probe_roles': [*left_skipped, *right_skipped],
                                                  'added_edit_count': len(extra)}}

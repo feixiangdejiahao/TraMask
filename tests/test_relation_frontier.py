@@ -90,3 +90,25 @@ def test_rotation_excludes_executed_ids_and_does_not_starve_second_operator():
     rows = [dict(id=str(i), kind='a', base_test_id='one', edits=[{'after': str(i)}]) for i in range(30)]
     rows.append(dict(id='other', kind='b', base_test_id='two', edits=[{'after': 'z'}]))
     assert [r['id'] for r in select_round(rows, 2, ['0'])] == ['1', 'other']
+
+
+def test_rotation_preserves_frontend_relation_order_across_source_seeds():
+    rows = [dict(id='first', operator='a', base_test_id='z_seed', edits=[{'after': 'long_value'}]),
+            dict(id='second', operator='a', base_test_id='a_seed', edits=[{'after': 'x'}]),
+            dict(id='third', operator='b', base_test_id='other', edits=[{'after': 'z'}])]
+    assert [row['id'] for row in select_round(rows, 3)] == ['first', 'third', 'second']
+
+
+def test_frontier_resume_preserves_representative_limit_and_checks_sha():
+    import copy
+    import pytest
+    observed = event({'x': {'type': 'bool', 'value': True}})
+    frontier = Frontier()
+    frontier.observe('first', [observed])
+    resumed = Frontier.restore(frontier.snapshot())
+    assert resumed.observe('second', [observed])['retained']
+    assert not resumed.observe('third', [observed])['retained']
+    changed = copy.deepcopy(frontier.snapshot())
+    changed['representatives'] += 1
+    with pytest.raises(ValueError, match='checkpoint changed'):
+        Frontier.restore(changed)

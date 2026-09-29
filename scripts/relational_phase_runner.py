@@ -22,6 +22,11 @@ def write(path, value):
 
 def execute_plan(plan, repository=Path('/app'), logs=Path('/replay-logs')):
     repository, logs = Path(repository).resolve(), Path(logs).resolve()
+    roles = [phase['role'] for phase in plan['phases']]
+    order = {'control': 0, 'source_profile': 1, 'generated': 2}
+    if (any(role not in order for role in roles) or len(roles) != len(set(roles))
+            or roles != sorted(roles, key=order.__getitem__)):
+        raise ValueError('Execution phases must be unique and source-before-generated')
     targets = {item['target'] for phase in plan['phases'] for item in phase['files']}
     originals = {}
     for relative in targets:
@@ -32,7 +37,7 @@ def execute_plan(plan, repository=Path('/app'), logs=Path('/replay-logs')):
     summaries = []
     for phase in plan['phases']:
         role = phase['role']
-        if role not in {'control', 'generated'}:
+        if role not in {'control', 'source_profile', 'generated'}:
             raise ValueError('Unsupported execution phase')
         output = logs / role
         output.mkdir(parents=True, exist_ok=False)

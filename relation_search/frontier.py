@@ -110,6 +110,23 @@ class Frontier:
         self.representatives = representatives
         self.profiles = defaultdict(list)
 
+    def snapshot(self):
+        state = dict(version=1, representatives=self.representatives,
+                     profiles=dict(sorted(self.profiles.items())))
+        return {**state, 'sha256': fingerprint(state)}
+
+    @classmethod
+    def restore(cls, snapshot):
+        state = {key: value for key, value in snapshot.items() if key != 'sha256'}
+        if state.get('version') != 1 or snapshot.get('sha256') != fingerprint(state):
+            raise ValueError('Frontier checkpoint changed or unsupported')
+        result = cls(state['representatives'])
+        for key, members in state['profiles'].items():
+            if len(members) > result.representatives or len(members) != len(set(members)):
+                raise ValueError('Invalid Frontier representative set')
+            result.profiles[key] = list(members)
+        return result
+
     def observe(self, candidate_id, events):
         new, retained, keys = [], False, []
         for event in events:
@@ -130,32 +147,25 @@ class Frontier:
 
 
 def select_round(candidates, budget=128, previously_executed=()):
-    """Fair rotation over operator and seed, with a stable minimal-edit order."""
+    """Rotate operators while preserving their deterministic proposal order.
+
+    Frontends already rotate source seeds and relation shapes. Sorting again by
+    opaque test IDs or edit text would destroy that analysis-derived ordering.
+    """
     prior = set(previously_executed)
-    groups = defaultdict(list)
+    groups = defaultdict(deque)
     seen = set()
     for row in candidates:
         edit_key = fingerprint([row['base_test_id'], row.get('edits', [])])
         if edit_key in seen or row['id'] in prior:
             continue
         seen.add(edit_key)
-        groups[(row.get('operator', row.get('kind', 'unknown')), row['base_test_id'])].append(row)
-    families = defaultdict(deque)
-    for (family, seed), rows in sorted(groups.items()):
-        rows.sort(key=lambda row: (len(row.get('edits', [])),
-                                  sum(len(e.get('after', '')) for e in row.get('edits', [])), row['id']))
-        families[family].append(iter(rows))
-    queue = deque((family, streams) for family, streams in sorted(families.items()))
+        groups[row.get('operator', row.get('kind', 'unknown'))].append(row)
+    queue = deque((family, rows) for family, rows in sorted(groups.items()))
     chosen = []
     while queue and len(chosen) < budget:
-        family, streams = queue.popleft()
-        while streams:
-            stream = streams.popleft()
-            row = next(stream, None)
-            if row is not None:
-                chosen.append(row)
-                streams.append(stream)
-                break
-        if streams:
-            queue.append((family, streams))
+        family, rows = queue.popleft()
+        chosen.append(rows.popleft())
+        if rows:
+            queue.append((family, rows))
     return chosen
