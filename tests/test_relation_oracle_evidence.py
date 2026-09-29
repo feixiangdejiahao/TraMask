@@ -233,3 +233,16 @@ def test_render_groups_dense_call_observation_edges_without_dropping_targets():
     assert 'CALL c0 run M0:0..1' in rendered
     assert all('OBSERVATION q'+str(i)+' M0:0..1' in rendered for i in range(5))
     assert 'MODIFIED-SOURCE M0=source.py' in rendered
+
+
+def test_render_callback_and_control_references_point_to_nonfirst_call_alias():
+    from relation_search.oracle_evidence import render_evidence
+    span = dict(path='source.py',start_byte=0,end_byte=1)
+    calls = [dict(id=name,callee=name,span=span,code=name+'()',targets=[],actual_formal=[]) for name in ['first','second']]
+    evidence = dict(added_import_bindings=[],changes=[],calls=calls,assertions=[],declarations=[],unknowns=[],edges=[],
+        function_valued_arguments=[dict(call_id='second',argument='grow',invocation='unknown')],
+        controls=[dict(test_id='source_control',call_id='second')])
+    rendered = render_evidence(evidence)
+    lines = [line for line in rendered.splitlines() if line.startswith(('FUNCTION ARGUMENT','SOURCE CONTROL'))]
+    assert len(lines)==2 and all('"call_id": "c1"' in line for line in lines)
+    assert 'CALL c1 second M0:0..1' in rendered

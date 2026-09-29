@@ -517,10 +517,18 @@ def render_evidence(evidence):
             grouped_edges[key].append(target)
     for (source,kind,extra),targets in grouped_edges.items():
         lines.append(source+' --'+kind+'--> '+', '.join(targets)+((' '+extra) if extra!='{}' else ''))
+    def call_reference(record):
+        shown = dict(record)
+        if 'call_id' in shown:
+            if shown['call_id'] in call_aliases:
+                shown['call_id'] = call_aliases[shown['call_id']]
+            else:
+                shown['call_reference_status'] = 'unknown; call outside rendered frontier'
+        return shown
     for callback in evidence.get('function_valued_arguments', []):
-        lines.append('FUNCTION ARGUMENT '+json.dumps(callback,sort_keys=True,ensure_ascii=False))
+        lines.append('FUNCTION ARGUMENT '+json.dumps(call_reference(callback),sort_keys=True,ensure_ascii=False))
     for control in evidence['controls']:
-        lines.append('SOURCE CONTROL '+json.dumps(control, sort_keys=True, ensure_ascii=False))
+        lines.append('SOURCE CONTROL '+json.dumps(call_reference(control), sort_keys=True, ensure_ascii=False))
     rendered_contexts = []
     for context in sorted(evidence['declarations'], key=lambda c:(c['span']['path'],c['span']['start_byte'],-c['span']['end_byte'])):
         owner = next((row for row in rendered_contexts if row['source_sha256']==context['source_sha256']
