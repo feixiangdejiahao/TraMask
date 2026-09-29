@@ -76,6 +76,99 @@ def _path(value):
     return str(Path(value).resolve())
 
 
+def verify_isolated_run(row):
+    """Bind a per-test Go view to its own process, without sibling errors."""
+    report = Path(row['result'])
+    normalized = read(report)
+    isolation = normalized.get('isolation')
+    if not isolation or 'provenance' not in isolation:
+        return []
+    proof_path = Path(isolation['provenance'])
+    proof, result = read(proof_path), read(report.parent/'result.json')
+    evidence = [freeze_file(p) for p in (report, proof_path, report.parent/'result.json')]
+    for record in proof.get('raw_evidence', []) + proof.get('compiled_binaries', []):
+        verify_file(record)
+        evidence.append(record)
+    phase = Path(row['execution_context']['context_file']).resolve().parent
+    context = read(phase/'context.json')
+    assert _path(proof['source_context_file']) == _path(phase/'context.json'), 'Wrong isolated source context'
+    assert _path(result['source_context_file']) == _path(phase/'context.json'), 'Wrong process source context'
+    assert proof['source_snapshot'] == context['source_files'] == row['execution_context']['source_snapshot'], 'Wrong isolated source snapshot'
+    summary_path = Path(proof['group_summary'])
+    assert summary_path.resolve().parent == phase, 'Wrong isolated group summary'
+    summary = read(summary_path)
+    matches = [item for item in summary.get('tests', []) if
+               item['package'] == proof['package'] and item['test'] == proof['test_name']]
+    selected = matches[0] if len(matches) == 1 else None
+    status = selected['status'] if selected else 'missing_isolated_execution'
+    assert status == proof['status'] == isolation['status'] == result['isolation_status'], 'Inconsistent isolated status'
+    assert row.get('test_ids') == [proof['test_name']], 'Isolated process must bind one exact declared test'
+    assert proof['scope'] == 'one_exact_test_in_one_process'
+    assert digest(report.parent/'go.jsonl') == proof['derived_report_sha256'], 'Changed isolated report'
+    evidence.extend(freeze_file(p) for p in (summary_path, phase/'context.json', report.parent/'go.jsonl'))
+    process = (selected or {}).get('process', {})
+    assert all(result.get(key) == value for key, value in process.items()), 'Process result differs from sidecar'
+    if process.get('stdout'):
+        relative = Path(process['stdout']).relative_to(Path(summary['report']).parent)
+        raw_path = (phase/relative).resolve()
+        assert raw_path.is_relative_to(phase), 'Raw report escapes phase'
+        assert read(raw_path.parent/'process.json') == process, 'Unbound isolated process'
+        assert raw_path.read_bytes() == (report.parent/'stdout.txt').read_bytes(), 'Changed raw process output'
+        if status in {'pass', 'fail', 'skip'}:
+            assert not process.get('timed_out') and not process.get('error'), 'Incomplete process cannot be a test outcome'
+            assert raw_path.read_bytes() == (report.parent/'go.jsonl').read_bytes(), 'Completed report must be exact raw stdout'
+            events = [json.loads(line) for line in raw_path.read_text().splitlines()]
+            terminal = [event['Action'] for event in events if event.get('Test') == proof['test_name']
+                        and event.get('Action') in {'pass', 'fail', 'skip'}]
+            assert terminal and terminal[-1] == status, 'No matching native terminal event'
+        evidence.extend(freeze_file(p) for p in (raw_path, raw_path.parent/'process.json', report.parent/'stdout.txt'))
+    tests, errors, _ = runtime_tests(report)
+    if status not in {'pass', 'fail', 'skip'}:
+        assert errors or normalized.get('errors'), 'Incomplete isolated test must remain an execution error'
+    else:
+        native = {event['Test']: event['Action'] for event in events
+                  if event.get('Test') and event.get('Action') in {'pass', 'fail', 'skip'}}
+        actual = [test for test in tests if matches_runtime(test['id'], proof['test_name'])]
+        # The frozen normalizer retains leaves when a Go test has subtests.
+        assert actual and all(native.get(test['id'].rsplit('::', 1)[-1]) == test['status']
+                              for test in actual), 'Normalized outcome differs from native test'
+        if status == 'fail' and not any(test['status'] == 'fail' for test in actual):
+            assert errors or normalized.get('errors'), 'A dropped parent failure must not become a pass'
+    return evidence
+
+
+def register_execution(case, candidate_id, runs_json, output, origin='new_search'):
+    """Register an exact execution, including Go views nested under a phase."""
+    rows = read(runs_json)
+    matches = [row for row in rows if row['case'] == case and row.get('candidate_id') == candidate_id
+               and row['role'] == 'generated']
+    if len(matches) != 1:
+        raise ValueError('One exact generated execution must be selected')
+    generated = matches[0]
+    selected = [row for row in rows if row['case'] == case and
+                (row.get('candidate_id') == candidate_id or
+                 (row['role'] == 'control' and row.get('manifest') == generated.get('manifest')
+                  and set(row['test_ids']) & set(generated['control_ids'])))]
+    for row in selected:
+        verify_isolated_run(row)
+    manifest = read(generated['manifest'])
+    files = [freeze_file(Path(mount['source'])) for mount in manifest['mounts']
+             if '/generated/' in mount['target'] and mount['target'].endswith('.snapshot')]
+    if not files:
+        raise ValueError('Phase manifest has no generated source snapshot')
+    context = generated.get('execution_context', {}).get('context_file')
+    actual = Path(context).parent.parent/'manifest.json' if context else Path(generated['result']).parent.parent/'manifest.json'
+    if read(actual).get('request', {}).get('program') != 'candidate':
+        raise ValueError('Registration requires actual candidate Docker manifest')
+    index = output.with_name(output.name + '_runtime_index.json')
+    write_new(index, selected)
+    delivery = dict(case=case, id=candidate_id, origin=origin, execution_scope='full_repository',
+                    test_files=files, source_validation=[generated['base_test_id']], runs_json=str(index.resolve()),
+                    execution_manifest=freeze_file(actual))
+    write_new(output.with_name(output.name + '_deliveries.json'), [delivery])
+    return delivery, selected
+
+
 def named_outcomes(runs):
     """Failures are execution inventory; semantic review remains separate."""
     reports, outcomes = {}, {}
@@ -194,6 +287,8 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
             candidates_ok = candidates_ok and len(program_candidates) <= configuration['limit']
             runs = read(runs_record['path'])
             runs = runs['runs'] if isinstance(runs, dict) else runs
+            for run in runs:
+                evidence.extend(verify_isolated_run(run))
             for identifier, statuses in named_outcomes(runs).items():
                 outcomes.setdefault(identifier, set()).update(statuses)
             run_ids = {row['candidate_id'] for row in runs if row.get('role') == 'generated'}
@@ -218,13 +313,40 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
             evidence.append(freeze_file(feedback_file))
             previous_feedback = digest(feedback_file)
             model_result = read(semantic_dir/'semantic_result.json')
+            replay = read(semantic_dir/'semantic_replay.json') if (semantic_dir/'semantic_replay.json').exists() else {}
+            request_offered, provider_offered, actual_calls = set(), set(), 0
+            request_paths = sorted((semantic_dir/'requests').glob('request_*.json'))
+            for request_path in request_paths:
+                evidence.append(freeze_file(request_path))
+                offered = {row['candidate']['id'] for row in read(request_path).get('offered', {}).values()}
+                request_offered |= offered
+                completion = semantic_dir/'completions'/request_path.stem
+                provider_manifest = completion/'manifest.json'
+                if provider_manifest.exists():
+                    evidence.extend(freeze_file(path) for path in sorted(completion.rglob('*')) if path.is_file())
+                    calls = read(provider_manifest).get('external_model_calls', 0)
+                    actual_calls += calls
+                    if calls:
+                        provider_offered |= offered
+            if configuration.get('oracle_mode') == 'fresh':
+                selected_for_model = set(model_result.get('selected_ids', []))
+                round_config_ok = (round_config_ok and len(selected_for_model) <= configuration['semantic_budget']
+                                   and selected_for_model <= {row['id'] for row in program_candidates}
+                                   and request_offered <= selected_for_model
+                                   and actual_calls == model_result.get('provider_calls', 0))
             rounds.append({'round': index, 'scope_verified': all((round_config_ok, round_code_ok, round_source_ok, chain_ok, candidates_ok, execution_ok)),
                            'configuration_matches': round_config_ok, 'algorithm_snapshot_matches': round_code_ok,
                            'source_corpus_matches': round_source_ok, 'artifact_chain_matches': chain_ok,
                            'selected_candidates_match': candidates_ok, 'execution_index_matches': execution_ok,
                            'selected_count': len(ids), 'indexed_generated_count': len(run_ids),
                            'provider_calls': model_result.get('provider_calls', 0),
-                           'semantic_selected_count': len(model_result.get('selected_ids', []))})
+                           'semantic_selected_count': len(model_result.get('selected_ids', [])),
+                           'semantic_request_count': len(request_paths),
+                           'semantic_request_offered_count': len(request_offered),
+                           'semantic_provider_offered_count': len(provider_offered),
+                           'cache_consulted_count': replay.get('counts', {}).get('originals', 0),
+                           'cache_hit_parent_count': len({row['parent'] for row in replay.get('records', [])}),
+                           'cache_revision_count': replay.get('counts', {}).get('replayed', 0)})
         complete = len(rounds) == configuration['rounds']
         exhausted_ok = False
         if case_row.get('stopped_reason') == 'exhausted':
@@ -252,6 +374,9 @@ def verify_multiround_campaign(campaign, ledger, campaign_path):
                       'selected_count': len(selected), 'indexed_generated_count': len(executed),
                       'provider_calls': sum(row['provider_calls'] for row in rounds),
                       'semantic_selected_count': sum(row['semantic_selected_count'] for row in rounds),
+                      **{key: sum(row[key] for row in rounds) for key in
+                         ('cache_consulted_count', 'cache_hit_parent_count', 'cache_revision_count',
+                          'semantic_request_count', 'semantic_request_offered_count', 'semantic_provider_offered_count')},
                       'named_outcome_counts': {status: sum(status in values for values in outcomes.values())
                                                for status in ('passed', 'failed', 'not_observed', 'execution_error', 'other')},
                       'named_failed_ids': {identifier for identifier, statuses in outcomes.items() if 'failed' in statuses},
@@ -308,13 +433,16 @@ def verify_campaign(campaign, ledger, campaign_path=None):
     return rows, configuration_sha
 
 
-def summarize(ledger, witnesses, provenance_reviews, campaign_rows, previous=None):
+def summarize(ledger, witnesses, provenance_reviews, campaign_rows, previous=None, reassessments=()):
     summaries = []
     provenance = {(r['case'], r['id']): r for r in provenance_reviews}
     preceding = {r['case']: r for r in (previous or {}).get('cases', [])}
+    pending = {(row['case'], row['id']) for row in reassessments
+               if row['status'] == 'pending_contract_reassessment'}
     for old in ledger['cases']:
         case = old['case']
-        fresh = [r for r in witnesses if r['case'] == case and r['controlled_target_detection']]
+        fresh = [r for r in witnesses if r['case'] == case and r['controlled_target_detection']
+                 and (case, r['id']) not in pending]
         automatic = []
         current = campaign_rows.get(case, {})
         for row in fresh:
@@ -330,10 +458,16 @@ def summarize(ledger, witnesses, provenance_reviews, campaign_rows, previous=Non
                                ('scenario_hit', 'correct_oracle', 'target_failure_match')))}
         false_alarms = {row['id'] for row in witnesses if row['case'] == case and row.get('confirmed_false_alarm')}
         fresh_ids = sorted({r['id'] for r in fresh} | set(preceding.get(case, {}).get('fresh_correct_ids', [])))
+        historical_ids = {r['id'] for r in inherited} | set(fresh_ids)
+        reliable_ids = sorted(identifier for identifier in historical_ids if (case, identifier) not in pending)
         summaries.append({'case': case, 'inherited_ids': [r['id'] for r in inherited],
                           'fresh_correct_ids': fresh_ids,
                           'fixed_configuration_automatic_ids': automatic,
                           'cumulative_correct_witness': bool(inherited or fresh_ids),
+                          'currently_supported_cumulative_witness': bool(reliable_ids),
+                          'currently_supported_ids': reliable_ids,
+                          'pending_contract_reassessment_ids': sorted(identifier for identifier in historical_ids
+                                                                     if (case, identifier) in pending),
                           'fresh_correct_witness': bool(fresh_ids),
                           'fixed_configuration_correct': bool(automatic),
                           'fixed_configuration_warm_replay_correct': bool(automatic) and current.get('oracle_mode') == 'replay',
@@ -345,6 +479,9 @@ def summarize(ledger, witnesses, provenance_reviews, campaign_rows, previous=Non
                           'indexed_generated_candidates': current.get('indexed_generated_count', 0),
                           'provider_calls': current.get('provider_calls', 0),
                           'semantic_selected_candidates': current.get('semantic_selected_count', 0),
+                          **{key: current.get(key, 0) for key in
+                             ('cache_consulted_count', 'cache_hit_parent_count', 'cache_revision_count',
+                              'semantic_request_count', 'semantic_request_offered_count', 'semantic_provider_offered_count')},
                           'named_outcome_counts': current.get('named_outcome_counts', {}),
                           'unreviewed_failed_candidates': len(current.get('named_failed_ids', set()) - adjudicated),
                           'confirmed_false_alarm_candidates': len(current.get('named_failed_ids', set()) & false_alarms),
@@ -359,13 +496,40 @@ def audit(args):
     if [x['case'] for x in ledger['cases']] != CASES or ledger['denominator'] != 17:
         raise ValueError('The denominator and order remain fixed17')
     deliveries = read(args.deliveries)
+    isolated_evidence = []
     for delivery in deliveries:
         if delivery['origin'] == 'baseline_retained':
             raise ValueError('Old witnesses belong to inherited ledger, not fresh deliveries')
         manifest = Path(delivery['execution_manifest']['path']).resolve()
         if not manifest.is_relative_to(OUT.parent):
             raise ValueError('A fresh delivery requires an actual new-round execution manifest')
+        for row in read(delivery['runs_json']):
+            isolated_evidence.extend(verify_isolated_run(row))
     fresh = evaluate(SimpleNamespace(ledger=args.ledger, deliveries=args.deliveries, reviews=args.reviews))
+    fresh['evidence_files'] = list({record['path']: record for record in
+                                  fresh['evidence_files'] + isolated_evidence}.values())
+    reassessment_path = OUT/'semantic_reassessments_v1.json'
+    reassessments = read(reassessment_path) if reassessment_path.exists() else []
+    pending = {(row['case'], row['id']) for row in reassessments
+               if row['status'] == 'pending_contract_reassessment'}
+    for reassessment in reassessments:
+        for record in reassessment['evidence']:
+            verify_file(record)
+    for row in fresh['deliveries']:
+        if (row['case'], row['id']) in pending:
+            row.update(correct_oracle=None, correct_test_delivered=False,
+                       controlled_target_detection=False, unknown_failure=row['named_test_failure'],
+                       semantic_reassessment='pending_contract_reassessment')
+    for case_row in fresh['cases']:
+        selected = [row for row in fresh['deliveries'] if row['case'] == case_row['case']]
+        case_row.update(correct_test_delivered=any(row['correct_test_delivered'] for row in selected),
+                        controlled_target_detection=any(row['controlled_target_detection'] for row in selected),
+                        new_search_detection=any(row['controlled_target_detection'] and row['origin'] == 'new_search'
+                                                 for row in selected),
+                        baseline_retained=any(row['correct_test_delivered'] and row['origin'] == 'baseline_retained'
+                                              for row in selected))
+    fresh['counts'] = {name: sum(row[name] for row in fresh['cases']) for name in fresh['counts']}
+    fresh['all_17_correct_tests_delivered'] = all(row['controlled_target_detection'] for row in fresh['cases'])
     campaign = read(args.campaign) if args.campaign else None
     campaign_rows, configuration = verify_campaign(campaign, ledger, args.campaign)
     # The live coordinator appends cases. Freeze the observed index itself so
@@ -390,25 +554,33 @@ def audit(args):
             raise ValueError('Previous checkpoint must belong to this continuation round')
         for record in previous['inputs'] + previous['fresh_evaluation']['evidence_files'] + previous.get('campaign_evidence_files', []):
             verify_file(record)
-    rows = summarize(ledger, fresh['deliveries'], read(args.reviews), campaign_rows, previous)
+    rows = summarize(ledger, fresh['deliveries'], read(args.reviews), campaign_rows, previous, reassessments)
+    schedule = OUT.parent/'resource_schedule_v2.json'
+    schedule_record = freeze_file(schedule) if schedule.exists() else None
     counts = {key: sum(bool(r[key]) for r in rows) for key in
-              ('cumulative_correct_witness', 'fresh_correct_witness', 'fixed_configuration_correct',
+              ('cumulative_correct_witness', 'currently_supported_cumulative_witness', 'fresh_correct_witness', 'fixed_configuration_correct',
                'fixed_configuration_warm_replay_correct', 'fixed_configuration_fresh_model_correct',
                'fixed_configuration_no_current_model_correct')}
     result = {'denominator': 17, 'start_utc': ledger['start_utc'], 'deadline_utc': ledger['deadline_utc'],
               'counts': counts, 'configuration_sha256': configuration,
+              'semantic_reassessments': reassessments,
               'execution_inventory': {
                   **{status: sum(row['named_outcome_counts'].get(status, 0) for row in rows)
                      for status in ('passed', 'failed', 'not_observed', 'execution_error', 'other')},
                   'confirmed_false_alarm_candidates': sum(row['confirmed_false_alarm_candidates'] for row in rows),
                   'unreviewed_failed_candidates': sum(row['unreviewed_failed_candidates'] for row in rows)},
+              'semantic_inventory': {key: sum(row[key] for row in rows) for key in
+                                     ('provider_calls', 'semantic_selected_candidates', 'cache_consulted_count',
+                                      'cache_hit_parent_count', 'cache_revision_count', 'semantic_request_count',
+                                      'semantic_request_offered_count', 'semantic_provider_offered_count')},
               'all17_same_campaign_completed': len(campaign_rows) == 17 and all(r['complete'] and r['scope_verified'] for r in campaign_rows.values()),
               'cases': rows, 'fresh_evaluation': fresh,
               'live_campaign_index': str(Path(args.campaign).resolve()) if args.campaign else None,
+              'resource_schedule': schedule_record,
               'campaign_evidence_files': list({record['path']: record for row in campaign_rows.values()
                                                for record in row.get('evidence_files', [])}.values()),
-              'inputs': [freeze_file(args.ledger), freeze_file(args.deliveries), freeze_file(args.reviews)] + ([freeze_file(campaign_snapshot)] if campaign_snapshot else []) + ([freeze_file(args.previous)] if args.previous else []),
-              'limits': 'Automation provenance and oracle correctness are separate cited reviews. Manual assertion edits never count as automated. Warm semantic replay reuses historical model judgments and is not a fresh end-to-end model run. No-current-model denotes this campaign, not the entire history of its source tests. N06 remains historical even if regenerated. Counts are development-case results, not population FPR/FNR.'}
+              'inputs': [freeze_file(args.ledger), freeze_file(args.deliveries), freeze_file(args.reviews)] + ([freeze_file(campaign_snapshot)] if campaign_snapshot else []) + ([freeze_file(args.previous)] if args.previous else []) + ([schedule_record] if schedule_record else []) + ([freeze_file(reassessment_path)] if reassessments else []),
+              'limits': 'Automation provenance and oracle correctness are separate cited reviews. Manual assertion edits never count as automated. Warm semantic replay reuses historical model judgments and consults all program-selected candidates; fresh model requests apply a separate bounded semantic selection first. These modes do not differ only in provider stability. No-current-model denotes this campaign, not the entire history of its source tests. N06 remains historical even if regenerated. Counts are development-case results, not population FPR/FNR. Concurrent campaigns share host resources; elapsed wall time is budget accounting, not an isolated fair speed comparison.'}
     write_new(args.output, result)
     return {'denominator': 17, 'counts': counts, 'all17_same_campaign_completed': result['all17_same_campaign_completed']}
 

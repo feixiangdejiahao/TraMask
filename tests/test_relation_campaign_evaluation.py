@@ -6,7 +6,8 @@ import sys
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from evaluate_relation_search_continuation import named_outcomes, summarize, verify_campaign
+from evaluate_relation_search_continuation import (named_outcomes, summarize, verify_campaign,
+                                                 verify_isolated_run, register_execution)
 from evaluate_relational_gap import digest, freeze_file
 
 
@@ -14,6 +15,108 @@ def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True))
     return path
+
+
+def isolated_go_fixture(tmp_path, status='fail'):
+    phase = tmp_path/'executed/group_000/generated'
+    view = phase/'isolated/test_hash'
+    name = 'TestGC_target'
+    raw = phase/'go.runner/test_0000/stdout.txt'
+    raw.parent.mkdir(parents=True)
+    events = [{'Action': 'run', 'Test': name}, {'Action': 'fail', 'Test': name}]
+    raw.write_text(''.join(json.dumps(event)+'\n' for event in events))
+    process = {'stdout': str(raw), 'returncode': -9 if status == 'timeout' else 1,
+               'timed_out': status == 'timeout', 'command': ['go', 'tool', 'test2json']}
+    write(raw.parent/'process.json', process)
+    context = write(phase/'context.json', {'source_files': []})
+    # A sibling timeout makes the shared phase erroneous. It must not erase
+    # the completed target's native terminal event in its independent process.
+    summary = write(phase/'go.runner.json', {
+        'report': str(phase/'go.jsonl'), 'status': 'error',
+        'tests': [{'package': './', 'test': name, 'status': status, 'process': process},
+                  {'package': './', 'test': 'TestGC_sibling', 'status': 'timeout'}]})
+    write(phase/'result.json', {'error': 'a_sibling_timed_out'})
+    write(view/'result.json', {**process, 'isolation_status': status, 'source_context_file': str(context)})
+    (view/'stdout.txt').write_bytes(raw.read_bytes())
+    (view/'go.jsonl').write_text(json.dumps(events[0])+'\n' if status == 'timeout' else raw.read_text())
+    proof = write(view/'provenance.json', {
+        'scope': 'one_exact_test_in_one_process', 'package': './', 'test_name': name,
+        'source_context_file': str(context), 'source_snapshot': [], 'group_summary': str(summary),
+        'status': status, 'raw_evidence': [freeze_file(raw)], 'compiled_binaries': [],
+        'derived_report_sha256': digest(view/'go.jsonl')})
+    report = write(view/'normalized.json', {
+        'status': 'error' if status == 'timeout' else 'fail',
+        'tests': [] if status == 'timeout' else [{'id': name, 'status': 'fail'}],
+        'isolation': {'status': status, 'provenance': str(proof)}})
+    row = {'case': 'N08', 'candidate_id': 'candidate', 'role': 'generated', 'result': str(report),
+           'test_ids': [name], 'execution_context': {'context_file': str(context), 'source_snapshot': []}}
+    return row, phase, view
+
+
+def test_isolated_failure_survives_sibling_timeout_but_not_its_own(tmp_path):
+    completed, _, _ = isolated_go_fixture(tmp_path/'completed')
+    assert verify_isolated_run(completed)
+    assert named_outcomes([completed]) == {'candidate': {'failed'}}
+    timeout, _, _ = isolated_go_fixture(tmp_path/'timeout', 'timeout')
+    assert verify_isolated_run(timeout)
+    assert named_outcomes([timeout]) == {'candidate': {'execution_error'}}
+
+
+def test_isolated_native_output_tampering_is_rejected(tmp_path):
+    row, _, view = isolated_go_fixture(tmp_path)
+    (view/'stdout.txt').write_text('replaced raw output')
+    with pytest.raises(AssertionError, match='Changed raw process output'):
+        verify_isolated_run(row)
+
+
+def test_isolated_normalized_names_may_include_go_package(tmp_path):
+    row, _, view = isolated_go_fixture(tmp_path)
+    normalized = json.loads((view/'normalized.json').read_text())
+    normalized['tests'][0]['id'] = 'example.org/project::TestGC_target'
+    write(view/'normalized.json', normalized)
+    assert verify_isolated_run(row)
+
+
+def test_isolated_normalizer_may_retain_only_subtest_leaves(tmp_path):
+    row, phase, view = isolated_go_fixture(tmp_path)
+    raw = phase/'go.runner/test_0000/stdout.txt'
+    raw.write_text(raw.read_text()+json.dumps({'Test': 'TestGC_target/child', 'Action': 'fail'})+'\n')
+    (view/'stdout.txt').write_bytes(raw.read_bytes())
+    (view/'go.jsonl').write_bytes(raw.read_bytes())
+    proof = json.loads((view/'provenance.json').read_text())
+    proof.update(raw_evidence=[freeze_file(raw)], derived_report_sha256=digest(view/'go.jsonl'))
+    write(view/'provenance.json', proof)
+    normalized = json.loads((view/'normalized.json').read_text())
+    normalized['tests'][0]['id'] = 'example.org/project::TestGC_target/child'
+    write(view/'normalized.json', normalized)
+    assert verify_isolated_run(row)
+
+
+def test_timeout_cannot_be_relabelled_as_completed_test_failure(tmp_path):
+    row, phase, view = isolated_go_fixture(tmp_path)
+    summary = json.loads((phase/'go.runner.json').read_text())
+    summary['tests'][0]['process']['timed_out'] = True
+    process = summary['tests'][0]['process']
+    write(phase/'go.runner.json', summary)
+    write(Path(process['stdout']).parent/'process.json', process)
+    result = json.loads((view/'result.json').read_text())
+    write(view/'result.json', {**result, 'timed_out': True})
+    with pytest.raises(AssertionError, match='Incomplete process'):
+        verify_isolated_run(row)
+
+
+def test_registration_uses_shared_context_for_nested_go_report(tmp_path):
+    row, phase, view = isolated_go_fixture(tmp_path)
+    source = tmp_path/'generated_test.go'
+    source.write_text('package project\n')
+    emitted = write(tmp_path/'emitted/manifest.json', {'mounts': [
+        {'source': str(source), 'target': '/generated/test.snapshot'}]})
+    actual = write(phase.parent/'manifest.json', {'request': {'program': 'candidate'}})
+    row.update(manifest=str(emitted), control_ids=[], base_test_id='original')
+    runs = write(tmp_path/'runs.json', [row])
+    delivery, _ = register_execution('N08', 'candidate', runs, tmp_path/'review/candidate')
+    assert delivery['execution_manifest'] == freeze_file(actual)
+    assert delivery['test_files'] == [freeze_file(source)]
 
 
 def campaign_files(tmp_path, mode='replay', round_limit=None, case_budget=None):
@@ -64,6 +167,9 @@ def campaign_files(tmp_path, mode='replay', round_limit=None, case_budget=None):
         write(semantic/'corpus.json', json.loads(corpus.read_text()))
         write(semantic/'semantic_result.json', dict(provider_calls=1 if mode == 'fresh' else 0,
                                                   selected_ids=['candidate_'+str(index)] if mode == 'fresh' else []))
+        if mode == 'fresh':
+            write(semantic/'requests/request_000.json', {'offered': {'C0': {'candidate': candidate}}})
+            write(semantic/'completions/request_000/manifest.json', {'external_model_calls': 1})
         interpreted = write(semantic/'prepare.json', dict(
             source_prepare=str(prepared), files_sha256={name: digest(semantic/name) for name in
             ['stage.json', 'candidates.json', 'corpus.json', 'semantic_result.json']}))
@@ -150,6 +256,8 @@ def test_fresh_model_accounting_is_separate_from_semantic_replay(tmp_path):
     assert row['scope_verified']
     assert row['provider_calls'] == 2
     assert row['semantic_selected_count'] == 2
+    assert row['semantic_request_offered_count'] == 2
+    assert row['semantic_provider_offered_count'] == 2
     assert row['oracle_mode'] == 'fresh'
 
 
@@ -182,3 +290,16 @@ def test_model_modes_never_merge_their_correct_counts(tmp_path, mode):
     assert row['fixed_configuration_warm_replay_correct'] == (mode == 'replay')
     assert row['fixed_configuration_fresh_model_correct'] == (mode == 'fresh')
     assert row['fixed_configuration_no_current_model_correct'] == (mode == 'none')
+
+
+def test_pending_contract_review_does_not_erase_history_or_count_as_reliable():
+    ledger = {'cases': [{'case': 'N08', 'inherited_witnesses': [{'id': 'old'}], 'historical_axis': None}]}
+    pending = [{'case': 'N08', 'id': 'old', 'status': 'pending_contract_reassessment'}]
+    old = summarize(ledger, [], [], {}, reassessments=pending)[0]
+    assert old['cumulative_correct_witness']
+    assert not old['currently_supported_cumulative_witness']
+    new = summarize(ledger, [{'case': 'N08', 'id': 'new', 'origin': 'new_search',
+                             'controlled_target_detection': True}], [], {}, reassessments=pending)[0]
+    assert new['currently_supported_cumulative_witness']
+    assert new['currently_supported_ids'] == ['new']
+    assert new['pending_contract_reassessment_ids'] == ['old']

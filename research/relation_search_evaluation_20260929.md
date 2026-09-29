@@ -4,15 +4,76 @@
 `254ca6111340728a256807c60121b551ae00329c`。分母保持 17 个开发 trial；旧轮文件保持不变。
 评价器不调用模型、不生成输入或修订断言、不向生成端传递隐藏 verifier 或参考补丁。
 
-最新 `checkpoint_07.json`：**累计正确见证 17/17，本轮新执行 7/17，固定配置自动检出 0/17**。
+原始探索汇总 `checkpoint_07.json` 历史记录为 **17/17 见证**；本次复查发现 N08
+旧见证带有未经契约保证的额外前提。随后 v2 自动生成的净化前缀新测试
+`04e6ed47ff5921a625aa` 已通过独立复核，**当前累计恢复 17/17 可靠见证**；
+旧 N08 测试本身仍待契约重审，不能用新测试替它背书。
+旧记录的本轮新执行为 7/17、固定配置自动检出为 0/17。
 本轮 P1、P3、P6、P7、N03、N04、N05 已通过独立复核。相较旧累计 11/17，补齐的是
 6 个原来缺失案例；N03 是已知案例的新闭环执行。该结果混合旧见证与局部探索，
 仍不能写成统一配置自动检出 17/17。
+
+统一 warm v1 已完成全部 17 例，独立评价封存在
+`evaluation/uniform_warm_v1/checkpoint_07.json`：**准确检出 16/17**，唯一未检出为
+N08。17 例完整语料、同一配置和实际阶段参数均通过核验。命名结果库存为
+585 通过、1320 失败、897 执行错误、70 未观察、28 其他状态；已独立确认其中
+16 条正确目标见证和 1 条错误 oracle，另 1303 条失败未裁决。这不是整体精度或
+误报率估计。warm 查询了 2955 个程序候选的历史缓存，命中 17 个 parent 并恢复
+17 个修订；当前 provider 调用为零。
+
+已确认的错误 oracle 是 N05 原始 width5→100 变体仍期待短 `ba`；正确实现应保留
+完整 `bar`，所以该原始失败不能报警。其模型修订副本才提供正确预期。N07 虽然
+已有有效 unequal-start/equal-end 重叠见证，另外两个严格 partial-overlap 变体被
+同组其他 Go 候选缺少必需参数的编译错误阻断；没有把“选中”当作“执行并检出”。
+
+新模型请求的单独增量评价 `evaluation/uniform_fresh_v1/checkpoint_05.json` 确认
+N01、N02、N03、N06、N07，当前 **5/17**，已经完成 N01—N07。这五条目标见证保留原源断言，
+所以不能据此声称模型修订带来检出增益。fresh 固定每轮最多 16 条语义候选；
+N04 未获得有效 oracle 修订，不能用 warm 的缓存命中代替 fresh 检出。N05 目标
+原始变体进入程序列表，却始终未被 16 条语义队列选中；其 stale oracle 的当前
+失败已单独确认是误报。下一轮只选新程序候选，导致这条未修订候选失去再次被
+语义选择的机会。
+
+另一个 Python 低预算消融（每轮 8 条、4 轮）已完成 profile 臂的独立复核：
+`evaluation/ablation_python_v1/profile/checkpoint_01.json`，**4/8**，为 P3、N01、
+N02、N03。它只选择了事先声明的 8 个 Python trial，不等同于 17-case 完整实验；
+其余 9 个 trial 没参加该消融。rotation 臂也完成独立复核，封存于
+`evaluation/ablation_python_v1/rotation/checkpoint_01.json`，同样 **4/8**，命中集合相同。
+当前证据没有支持 profile 选择比轮转有更高检出率。
+
+N08 旧见证 `a9212ca40d6edaa912da` 的主体以两条 Sync 写入建立 `seqNum+2`
+这个未写入序号，随后验证 close 唤醒，主体关系合理。但完整复制的前缀还要求
+**首次提交之前** `WaitForDurability(0)` 成功；issue 仅保证零在任意提交之后成功。
+源测试在候选实现上通过不能证明这个额外前提。审查记录位于
+`evaluation/semantic_reassessments_v1.json`，旧 checkpoint 保持不变，新 checkpoint
+将历史累计字段与 `currently_supported_cumulative_witness` 分开。新证据封存在
+`evaluation/uniform_warm_v2/checkpoint_01.json`：净化前缀只保留两条 Sync 写入及
+批次序号，订阅首个未写入序号后关闭 DB；实际收到 nil 而不是要求的关闭错误，
+独立源控制通过。它的每测试进程、原生 Go 结果、源码哈希均已核验。这个首个
+v2 checkpoint 尚未关联完成的 campaign 索引，所以不能当作 v2 统一实验完成。
+
+静态诊断另行封存，不混入执行命中。持久语义队列的离线反事实在已有两轮程序输入的
+6 例上，目标父候选覆盖仍是 **2/6→2/6**；没有新的模型请求或检出。合并固定两轮
+程序候选后，总语义判断预算 16/32/64/128 对应覆盖 **2/2/4/4（分母 6）**。
+N04 目标排第 53，N05 排第 170；后者前面有来自 95 个 seed 的 161 个 shape
+首代表。保存旧候选能恢复排队机会，却不自动解决这种排序饥饿。
+证据为 `evaluation/semantic_backlog_counterfactual_review_v1.json` 和
+`evaluation/semantic_budget_curve_review_v1.json`。
+
+独立的 q→writer 静态原型在预先固定的 8 个 Python corpus 上，只能对 3 例的
+目标 A/q 建立可排序证据。源码顺序破同分时 A Hit@10 和 q Hit@10 都是 **2/8**；
+同证据层任意排序的稳健下界均为 **1/8**，可能上界均为 **3/8**。P1/P2 的解构
+返回绑定、P4 的 fixture/方法结果、N03 的标量与集合长度、N04 的嵌套资源和查询
+结果尚不支持。这是源测试定位评价，不代表生成测试有效或真实同对象流得到证明。
+完整目标映射见 `evaluation/assertion_write_origin_census_review_v2.json`。
 
 初始化已核验旧 checkpoint08 的记录文件与哈希。初始
 `results/relation_search_20260929/evaluation/checkpoint_00.json` 的状态是：
 **累计正确见证 11/17，本轮新执行正确见证 0/17，固定配置自动检出 0/17**。
 旧 11 例未被伪装为新配置运行。
+
+下面表格保留 `checkpoint_07` 之前的探索状态；正在运行的统一 campaign 进度以上述
+单独评价文件为准。
 
 | Trial | 继承正确见证 | 本轮正确见证 | 本轮统一配置 |
 |---|---|---|---|
@@ -87,6 +148,12 @@ stage 中的参数。仅抄写相同全局 SHA 不够：预算、源目录、模
 warm replay 即使达到 17/17，也不能写成新模型请求的端到端 17/17。第三类只描述
 本轮行为，并不声称历史验证测试从未使用模型。每种模式还记录实际请求次数、语义
 候选数、程序候选数和已索引执行数；执行索引存在本身不等于测试正确。
+
+目前 warm 对全部程序选中候选查找缓存，fresh 才先执行每轮 16 条的语义选择。
+因此二者差异还包含语义选择覆盖范围，不能只解释成模型输出稳定性的差异。
+`cache_consulted_count / cache_hit_parent_count / cache_revision_count` 分别记录缓存
+咨询输入数、匹配的父候选数和重放的修订数；warm 的新语义选择数为 0，不表示它
+没有使用历史模型信息。不存在缓存正确性筛选，错误的历史修订也会保留。
 
 ```bash
 .venv/bin/python scripts/evaluate_relation_search_continuation.py audit \
