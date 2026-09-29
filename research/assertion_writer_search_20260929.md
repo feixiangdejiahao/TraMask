@@ -29,9 +29,13 @@ N01 的原测试构造一个 response，消费 JSON，最后检查 `response.is_
 
 固定的八个 Python 源码候选池共有 768 个候选。静态条件支持 N01 的 15/93、N02 的 136/195，其余六例没有支持项。原数组中 N01 目标由第 6 位前移到第 2 位，N02 保持第 1；接入同一公平调度器时，两者分别为 35→2、3→3。这些是不同顺序下的排名，不能与此前 profile 消融中 N01 的累计第 26 次提案混用。[独立静态复核](../results/relation_search_20260929/evaluation/exception_write_priority_review_v2.json)保留了全部候选及对应证据。
 
-随后进行了真实排序消融：所有八个 Python 案例，两臂使用相同源池、相同公平调度器，每例一轮八个提案，保留原断言；没有调用模型或重放语义缓存。完整执行已经结束，独立目标评价登记在[本轮评价](relation_search_evaluation_20260929.md)，不能用原数组排名替代执行结果。[冻结协议](../results/relation_search_20260929/exception_write_ablation_v1/protocol.json)及[执行结果](../results/relation_search_20260929/exception_write_ablation_v1/results.json)可复查。
+随后进行了真实排序消融：所有八个 Python 案例，两臂使用相同源池、相同公平调度器，每例一轮八个提案，保留原断言；没有调用模型或重放语义缓存。已确认检出由原调度的 **3/8（N02、P3、P4）提高到 4/8（新增 N01）**。主驱动的可选 `--writer-priority` 又执行了一遍相同设置，八例的 64 个选中候选完整编辑与独立消融一致，也确认 4/8。独立目标评价登记在[本轮评价](relation_search_evaluation_20260929.md)，不能用原数组排名替代执行结果。[冻结协议](../results/relation_search_20260929/exception_write_ablation_v1/protocol.json)及[执行结果](../results/relation_search_20260929/exception_write_ablation_v1/results.json)可复查。
 
-对 N01/N02 已有首轮全部 32 组测试进行了写入插桩。所有 phase 的逐测试结果与未插桩运行一致。自动审计记录了 331 条有效标量读及 6 条复杂值 unknown；43 个可比较的组内源 q 中有 10 个出现新的 writer。N01 的关闭断言实际读到了初始化的 False，源控制则读到 close 的 True；N02 也出现相同区别。新 writer 的统计不是正确缺陷数，控制失败和 oracle 不适用仍须排除。[原型说明](observed_write_runtime_prototype_20260929.md)及[全部 trace 审计](../results/relation_search_20260929/observed_write_full_analysis_v2/summary.json)记录支持边界。
+对 N01/N02 已有首轮全部 32 组测试进行了写入插桩。所有 phase 的逐测试结果与未插桩运行一致。自动审计记录了 331 条有效标量读及 6 条复杂值 unknown；43 个可比较的组内源 q 中有 10 个出现新的 writer。独立复核确认这 10 组 q、73 次新 writer 读取均有通过的同源控制。N01 的关闭断言实际读到了初始化的 False，源控制则读到 close 的 True；N02 也出现相同区别。新 writer 的统计不是正确缺陷数。[原型说明](observed_write_runtime_prototype_20260929.md)及[全部 trace 审计](../results/relation_search_20260929/observed_write_full_analysis_v2/summary.json)记录支持边界。
+
+离线前沿按源 q、源构造、字段、实际 writer 和内建标量值保留代表，14 个新代表中有 7 个完整正确 oracle、6 个沿用失效期望、1 个前提未知；两个已知关闭问题都仍有代表。因此它能压缩部分见证，但并未排除误报。精确标量值域也不是有限域，不能声称获得了有限语义商或完备剪枝。这一步尚未成为在线搜索反馈。[独立复核](../results/relation_search_20260929/evaluation/observed_write_frontier_review_v1.json)保留完整预期判断。
+
+进一步固定全部32组 trace 的处理顺序，**仅从前沿 key 删除 writer，14个代表、原 q 状态数及全部保留决定都没有变化**。独立重算复核了297条决定及原始 trace。因此目前不能声称 writer 身份在动态搜索中优于同一断言的值反馈。writer 路径仍提供静态排序和解释证据，但它与标量变化的增量作用尚未区分。见[独立消融复核](../results/relation_search_20260929/evaluation/observed_writer_key_ablation_review_v1.json)及[学术审查](assertion_writer_academic_review_20260929.md)。
 
 ## 这还没有解决什么
 

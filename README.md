@@ -1,138 +1,71 @@
-# 遗漏组合测试：带观察的关系见证
+# 程序分析辅助的组合测试推理
 
-最新研究设计见 [用关系形状指导测试搜索](research/relation_search_method.md)：从源码和验证提取有界的参与值，按同一对象、观察阶段下的联合关系分组，执行输入编辑并用实际新形状更新搜索。它不再以获得竞争实现为前提；原[判别上下文方案](research/distinguishing_context_method.md)保留为被否决的设计记录。新实现及中断后的保存状态见[本轮检查点](research/relation_search_checkpoint_20260929.md)：已实现源代码组合构造器和局部断言修订，Python 运行关系有实际证据，但完整反馈搜索尚未接入主驱动。原始证据见 [17 条轨迹重审](research/trajectory_logic_20260928/README.md)，设计原则来自 [STARS 阅读](research/stars_abstraction_review.md)。
+本项目研究 validation tests 为什么遗漏操作间的交互，以及如何自动生成能检出这些问题的组合测试。程序分析用于梳理输入绑定、调用、状态读写和断言依赖，帮助模型在具体源码证据上进行语义推理；测试执行与独立评价检查推理是否成立。
 
-**本轮累计确认 11/17 个 trial 有正确组合测试，其中本轮生成来源为 9/17；仍缺 6 例。** 此数是旧、新见证并集，部分见证来自收窄的源集合，不能当作统一预算的端到端算法成绩。N06 还是历史已执行关系的重建。逐例证据及误报见[独立评价](research/relation_search_evaluation_20260928.md)。
+当前设计见 [method_design.md](research/method_design.md)。目前还没有在冷启动、统一预算下可靠覆盖全部17个 trial 的方法，也没有证明能够泛化到未参与设计的任务。17个 trial 对应14个不同任务，均为开发材料。模型使用 `.env` 指定的 **deepseek-v4-flash**；密钥不进入 Git 或实验记录。
 
-当前原型以 `(q, ρ)` 为研究单位：`q` 是已有测试的观察，`ρ` 是输入、对象或操作之间的关系。程序恢复验证代码、提出关系见证并物化测试；模型只补充受限的局部期望表达式。关系构造、期望正确和真实缺陷检出分别评价，当前实现仍是有界关系域的组合，尚不是统一完备的关系求解器。模型为 **`deepseek-v4-flash`**，使用 `.env` 中已授权的 provider。
+本轮改进、负面结果和保存范围汇总于[五小时研究记录](research/relation_search_timebox_20260929.md)。
 
-**旧方法最好完整配置检出 4/17 个 trial：P2、N02、N07、N10，漏检 13/17。** 第六批为 3/17，第七批统一恢复完整源断言后重新运行全部 17 例，确认上述 4 例。17 个 trial 对应 14 个不同 task，都是已见开发集。全部检出的目标尚未达到，误报尚未穷尽标注，也没有 issue resolution rate 提升证据。
+## 当前证据
 
-- [当前方法与实现边界](research/relational_gap_method_v2.md)
-- [本轮五小时结果与逐例缺口](research/relational_gap_timebox_20260928.md)
-- [第七批独立评价](research/relational_gap_batch7_evaluation.md)、[第六批评价](research/relational_gap_batch6_evaluation.md)与[第五批评价](research/relational_gap_batch5_evaluation.md)
-- [新增十条轨迹与组合特征](research/expanded_trials_20260926/README.md)
-- [完整原断言恢复消融协议](research/relational_gap_v7_ablation_protocol.md)
+- 历史 oracle 缓存重放的统一 v2 运行已确认 **17/17**；这是已获取模型判断的重放，不能当作冷启动成绩。
+- 全新模型请求 v1 已完成全部17例，确认 **12/17**；v2 单独运行和评价，完成状态、漏检环节、已知错误 oracle 见[独立实验报告](research/relation_search_evaluation_20260929.md)。未完成案例不判漏检，多个运行不拼接成一次成绩。
+- 八个 Python 任务，相同候选池和单轮八提案、零模型调用：写入路径静态优先排序使已确认检出 **3/8 → 4/8**。
+- 旧关系 profile 与轮换对照均为4/8；新 writer 前沿在32组已有 trace 上去掉 writer 后，14个代表及全部保留决定也完全相同。尚无额外动态反馈收益证据。
+- 同14个预期槽位请求开启 thinking 后，完整正确修订0→4；真实重放中，3个失效预期报警被消除，P6正确检出，另1个错误 P1 修订仍误报。4次调用耗尽输出预算无可用JSON。这是补充实验，不回填冻结主配置。
+- 相同14个 enabled 请求去掉源码上下文，完整正确修订从4/14降为1/14；每条件只采样一次，尚未排除模型波动。新增的调用依赖和断言到写入路径 renderer 只完成确定性证据整理，尚未验证模型收益。
 
-旧领域算子原型曾达到七个 pilot 的 7/7，但算子在已知缺陷后设计，存在过拟合，不能作为当前方法的结果。旧文档与运行方式已[归档](research/archive/README_pilot.md)，代码标签为 `combination-v0.1-pilot`。以下保留先前方法的研究记录：
+完整报警尚未穷尽标注，不报告整体误报率。当前也没有配对修复实验，不能声称提高 issue resolution rate。
 
-- [前一方法：动作、观察与小期望变换](research/method_design.md)
-- [前一方法实验与失败记录](research/semantic_transport_results.md)
-- [前一方法独立评价约定](research/semantic_composition_evaluation_plan.md)
-- [历史类比方格基线](research/method_design_analogy_baseline.md)
-- [前一方法五小时实验记录](research/semantic_transport_timebox_report.md)
-- [上一轮五小时实验交付与保留基线](research/timeboxed_experiment_report.md)
-- [跨版本实验、失败与模型成本](research/generic_generation_cross_version_results.md)
-- [实验评价约定](research/generic_generation_evaluation_plan.md)与[版本选择规则](research/generic_version_selection.md)
-- [观察前沿检索](research/observation_frontier_method.md)及[独立检索结果](research/observation_frontier_experiment.md)
+## 研究与代码入口
 
-检索命中、生成数量、执行失败、有效缺陷检出是不同指标；没有生成候选也不等于零误报的可靠检测器。目前没有测量 issue resolution rate 的提升。
+| 内容 | 入口 |
+|---|---|
+| 当前流程、实现与待验证假设 | [方法说明](research/method_design.md) |
+| 17条轨迹与组合缺口重审 | [轨迹分析](research/trajectory_logic_20260928/README.md) |
+| 写入来源分析、静态排序及限制 | [局部搜索机制](research/assertion_writer_search_20260929.md) |
+| 通用性反例、等价内联修复 | [审查](research/writer_priority_generality_audit_20260929.md)、[修复](research/writer_priority_terminal_write_fix_20260929.md) |
+| 模型任务粒度、源码上下文与输出接口 | [预期判断实验](research/singleton_expected_slots_20260929.md) |
+| 输入侧程序信息整理 | [调用依赖证据](research/call_dependency_evidence_20260929.md)、[断言到写入路径](research/assertion_path_context_prototype_20260929.md) |
+| 学术证据与最小消融 | [学术审查](research/assertion_writer_academic_review_20260929.md) |
+| STARS及2026论文启发 | [STARS逐节阅读](research/stars_abstraction_review.md)、[文献记录](research/literature_2026.md) |
+| 源测试恢复、候选构造、搜索反馈 | `relation_search/`、`experimental/relation_search_*.py` |
+| 断言与局部对象/字段写入分析 | `experimental/assertion_write_origin.py`、`exception_write_priority.py` |
+| 有界模型语义判断 | `relation_search/oracle.py`、独立原型 `experimental/singleton_oracle_slots.py` |
+| 固定配置主驱动 | `scripts/run_relation_campaign.py` |
+| 物化与离线执行 | `scripts/execute_relation_search.py` |
+| 独立评价 | `scripts/evaluate_relation_search_continuation.py` |
+
+Python 关系探针与跨轮搜索已接入主驱动。新的 writer 运行跟踪仅有离线前沿实验；槽位接口也仍是独立原型，均不能写成已完成统一在线方法。源码编辑传递修复及真实测试见[专项记录](research/semantic_edit_transport_fix_20260929.md)。
 
 ## 运行
 
-本地 `.venv`、依赖、Docker 镜像和 harness 已准备。单元测试默认禁止真实网络请求：
+本地 `.venv`、依赖、Docker镜像和离线 harness 已准备。单元测试默认禁止真实网络请求：
 
 ```bash
 .venv/bin/python -m pytest tests -q
 ```
 
-新实现入口为 `scripts/run_relation_search.py`、`scripts/execute_relation_search.py`、`scripts/relation_search_semantics.py`，已实现范围和恢复命令见[检查点](research/relation_search_checkpoint_20260929.md)。旧方法静态生成入口为 `scripts/run_relational_gap.py`，执行入口为 `scripts/execute_relational_gap_v6.py`；断言恢复消融使用 `scripts/prepare_relational_gap_ablation.py` 和无模型调用的 `scripts/execute_relational_gap_v7.py`。已有结果可只读复核：
+零模型的八例静态排序实验可用新输出目录复现：
 
 ```bash
-.venv/bin/python scripts/evaluate_relational_gap.py evaluate \
-  --batch-root results/relational_gap_20260928/batch6 \
-  --emitted-root results/relational_gap_20260928/batch6_emitted \
-  --reviews results/relational_gap_20260928/batch6_reviews_audited.json \
-  --output /tmp/relational-gap-batch6-recheck.json
+.venv/bin/python scripts/run_relation_campaign.py \
+  --source results/relational_gap_20260928/batch7 \
+  --output results/my_writer_search \
+  --cases N01 N02 N03 N04 P1 P2 P3 P4 \
+  --rounds 1 --limit 8 --pool 512 --include-baseline \
+  --group-size 8 --workers 1 --timeout 180 \
+  --oracle-mode none --writer-priority
 ```
 
-下列命令属于历史动作组合方法。入口 `scripts/run_semantic_transport.py` 先从已有 source-only preparation 构造候选；模型补全与执行分开：
+主驱动还支持历史缓存 `replay` 与新请求 `fresh`，配置、源码哈希和预算冻结后不能修改并覆盖原实验。模型和生成阶段不读取参考补丁、隐藏 verifier 或封存评价标签。执行失败、合法JSON、结构接收和正确缺陷检出分别记账。
 
-```bash
-.venv/bin/python scripts/run_semantic_transport.py prepare \
-  --case P1 --source-prepared results/semantic_transport_inputs/batch1/pilot/P1 \
-  --output results/my_transport/P1
-for round_id in r1 r2; do
-  .venv/bin/python scripts/run_semantic_transport.py complete \
-    --case P1 --output results/my_transport/P1 --rerun-id "$round_id"
-done
-for round_id in r1 r2; do
-  .venv/bin/python scripts/run_semantic_transport.py freeze \
-    --case P1 --output results/my_transport/P1 --rerun-id "$round_id"
-done
-# 独立评审并封存 oracle 后，再分别 run --program candidate。
-```
+## 历史材料
 
-prepare 默认使用标准配置。显式添加 `--completion-profile reasoned_32k` 可使用预先登记的推理预算对照；它保持程序候选与语义消息不变，仅调整输出上限和推理设置。配置、请求及缓存均按轮冻结。
+旧版本的成绩和限制保留，不与当前配置合并：
 
-source-only preparation 可由下面通用 CLI 的 `prepare --generator context` 建立。下面保留整测试类比基线运行示例；各输出目录必须是新目录：
-
-```bash
-.venv/bin/python scripts/run_generic_experiment.py prepare \
-  --generator analogy-views --registry pilot --case P1 \
-  --model deepseek-v4-flash --output results/my_generic/P1
-
-# 只有 admit 联系模型；两轮各最多发固定的一次请求，不按结果挑选或重试。
-for round_id in r1 r2; do
-  .venv/bin/python scripts/run_generic_experiment.py admit \
-    --case P1 --output results/my_generic/P1 --rerun-id "$round_id" \
-    --model deepseek-v4-flash
-  .venv/bin/python scripts/run_generic_experiment.py freeze \
-    --case P1 --output results/my_generic/P1 --rerun-id "$round_id"
-  .venv/bin/python scripts/run_generic_experiment.py run \
-    --case P1 --output results/my_generic/P1 --rerun-id "$round_id"
-done
-
-.venv/bin/python scripts/run_generic_experiment.py summarize \
-  --case P1 --output results/my_generic/P1
-```
-
-无模型的直接生成对照使用 `freeze`、`run` 的 `--direct-baseline`。`prepare` 保存算法快照和输入哈希；冻结后代码或输入发生变化会被拒绝，不能用新代码覆盖旧实验。模型没有返回有效选择时，该轮保留为协议失败，不能当作主动拒绝全部候选。
-
-模型请求仅包含已授权的 issue、候选代码、来源测试及静态证据；生成与模型阶段不读取参考补丁、隐藏 verifier、封存评价真值或执行结果。参考运行只用于冻结后的独立评价。密钥不进入请求证据或 Git，策略见 [execution_policy.json](configs/execution_policy.json)。
-
-另有一个独立的[检索＋模型生成对照](research/llm_generation_baseline_plan.md)：统一向模型展示冻结检索的前十个父测试，每轮最多提出三个完整测试体。它允许模型自由构造动作与断言，与历史类比候选筛选、当前动作与观察组合具有不同能力和预算，结果单独报告。已有冻结输入时可运行：
-
-```bash
-.venv/bin/python scripts/run_llm_generation_baseline.py prepare \
-  --case P1 --source-prepared results/generic_observation_priority/batch2/pilot/P1 \
-  --output results/my_llm/P1
-
-for round_id in r1 r2; do
-  .venv/bin/python scripts/run_llm_generation_baseline.py generate \
-    --case P1 --output results/my_llm/P1 --rerun-id "$round_id"
-done
-for round_id in r1 r2; do
-  .venv/bin/python scripts/run_llm_generation_baseline.py freeze \
-    --case P1 --output results/my_llm/P1 --rerun-id "$round_id"
-  .venv/bin/python scripts/run_llm_generation_baseline.py run \
-    --case P1 --output results/my_llm/P1 --rerun-id "$round_id"
-done
-```
-
-该对照同样不依据执行结果修正代码或 expected。机械校验通过、测试失败和有效缺陷仍须分别记录；完整断言及输入适用性需要独立审计。
-
-## 代码与边界
-
-| 位置 | 作用 |
-|---|---|
-| `relation_search/`、`experimental/relation_search_*.py` | 新源代码组合构造、局部 oracle、Python 运行关系模块；反馈闭环未接入 |
-| `scripts/run_relation_search.py`、`execute_relation_search.py`、`relation_search_semantics.py` | 新准备、执行、局部断言补全入口 |
-| `relational_gap/` | 旧关系坐标、有限单元、源见证构造、观察选择及恢复消融；新实现复用部分模块 |
-| `scripts/run_relational_gap.py` | 旧方法静态准备入口 |
-| `scripts/execute_relational_gap_v6.py`、`execute_relational_gap_v7.py` | 源假设和模型变体执行、无模型断言恢复消融 |
-| `experimental/semantic_transport/` | 先前动作上下文搜索、小期望表达式及冻结接口；部分工具仍被复用 |
-| `experimental/observation_projection.py` | 源观察切片迁移工具 |
-| `scripts/run_semantic_transport.py` | 先前动作组合方法入口 |
-| `anchor_retrieval/` | 断言识别、定义—使用与可能状态依赖、相关测试排序 |
-| `generic_composition/` | 源码语法项、测试语料、固定候选筛选、物化与执行接口 |
-| `experimental/generic_v2/analogy.py` | 历史源码类比与重构等式 |
-| `experimental/generic_v3/`、`generic_v5/` | 历史语句对齐及组合表示变体 |
-| `experimental/assertion_instances_v2/` | 带词法环境的 helper 断言实例 |
-| `experimental/assertion_windows/` | 断言和依赖定义的连续窗口，以及独立的字符串表示消融 |
-| `experimental/observation_priority/` | 观察对象和程序依赖引导的排序 |
-| `scripts/run_generic_experiment.py` | prepare、admit、freeze、run、summarize |
-
-依赖关系表示可能影响，不证明断言保持。语法来源可重构，也不证明语义有效；别名、状态效应、闭包以及嵌入字符串中的程序仍可能超出分析能力。所有适用性失败、模型失败、编译失败、未知报警和成本均需保留。
-
-Git 管理代码、方法说明与评价脚本；venv、仓库副本、密钥和大日志由 `.gitignore` 排除。完整本地实验产物保存在 `results/`，每批均记录版本、输入、代码快照与执行账本。
+- [2026-09-28五小时结果](research/relational_gap_timebox_20260928.md)：旧最好完整配置4/17。
+- [中断后的历史检查点](research/relation_search_checkpoint_20260929.md)：当时累计见证11/17，非统一运行。
+- [旧关系形状研究假说](research/relation_search_method.md)：保留设计推演及负面消融。
+- [旧动作/观察方法](research/archive/method_design_action_observation_20260929.md)及[实验失败记录](research/semantic_transport_results.md)。
+- [早期七例领域算子原型](research/archive/README_pilot.md)：有已知案例过拟合，不能作当前方法的泛化证据。
