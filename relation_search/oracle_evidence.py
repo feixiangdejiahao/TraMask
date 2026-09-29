@@ -434,6 +434,48 @@ def build_evidence(corpus, frontend, candidate, *, max_bytes=48000, declaration_
     return result
 
 
+def _render_obligations(obligations):
+    """Intern original graph nodes and paths; keep every offered obligation."""
+    if not obligations:
+        return []
+    paths, nodes, observations, source_paths = {}, {}, {}, {}
+    links = []
+
+    def location(span):
+        if not span:
+            return 'unknown'
+        path = span['path']
+        source_paths.setdefault(path, 'S'+str(len(source_paths)))
+        return source_paths[path]+':'+str(span['start_byte'])+'..'+str(span['end_byte'])
+
+    for item in obligations:
+        qid = item['observation_id']
+        observations.setdefault(qid, (item, 'O'+str(len(observations))))
+        sequence = []
+        for node in item.get('path', []):
+            key = (node['path'], node['id'])
+            nodes.setdefault(key, (node, 'N'+str(len(nodes))))
+            sequence.append(nodes[key][1])
+        key = (tuple(sequence), tuple(item.get('edge_kinds', [])))
+        paths.setdefault(key, 'P'+str(len(paths)))
+        links.append('E'+str(item['edit_index'])+' -> '+observations[qid][1]+' via '+paths[key])
+    body = ['Original-source unpaired impacts (may dependence; unchanged expected value is not proof it must change):']
+    for item, alias in observations.values():
+        body.append(alias+' q='+item['observation_id']+' actual='+location(item.get('actual_span'))+
+                    ' expected='+location(item.get('expected_span'))+
+                    ' expected_dependency='+item.get('expected_dependency_basis','unknown'))
+        body.append('  actual: '+str(item.get('observed'))+'; source expected: '+str(item.get('expected')))
+    for node, alias in nodes.values():
+        body.append(alias+' ['+node['kind']+'] '+location(node)+' '+node.get('text',''))
+    for (sequence, kinds), alias in paths.items():
+        route = sequence[0] if sequence else 'unknown'
+        for kind, target in zip(kinds, sequence[1:]):
+            route += ' --'+kind+'--> '+target
+        body.append(alias+' '+route)
+    body.extend(dict.fromkeys(links))
+    return ['ORIGINAL '+alias+'='+path for path,alias in source_paths.items()] + body
+
+
 def render_evidence(evidence):
     """Compact raw-source facts; no generated relationship descriptions."""
     lines = ['Candidate source reanalysed after input edits. Edges are static may dependencies.',
@@ -453,8 +495,7 @@ def render_evidence(evidence):
     for assertion in evidence['assertions']:
         code = assertion['code'] if len(assertion['code']) <= 240 else 'assertion at '+json.dumps(assertion['span'], sort_keys=True)
         lines.append('Q:'+assertion['id']+' OLD EXPECTATION '+code)
-    for obligation in evidence.get('original_observation_obligations', []):
-        lines.append('ORIGINAL-SOURCE OBSERVATION OBLIGATION '+json.dumps(obligation,sort_keys=True,ensure_ascii=False))
+    lines.extend(_render_obligations(evidence.get('original_observation_obligations', [])))
     for edge in evidence['edges']:
         lines.append(json.dumps(edge, sort_keys=True, ensure_ascii=False))
     for callback in evidence.get('function_valued_arguments', []):

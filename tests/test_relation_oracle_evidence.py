@@ -205,3 +205,17 @@ def test_case():
 ''', '1', '3')
     result = build_evidence(c,f,k)
     assert not result['function_valued_arguments']
+
+
+def test_original_impact_graph_render_shares_nodes_and_preserves_obligations():
+    from relation_search.oracle_evidence import _render_obligations
+    span = dict(path='original.py',start_byte=0,end_byte=4)
+    node = dict(span,id=7,kind='read',text='read')
+    first = dict(observation_id='first',edit_index=0,path=[node],edge_kinds=[],
+                 actual_span=span,expected_span=span,observed='read',expected='1')
+    second = dict(first,observation_id='second',edit_index=1)
+    rendered = '\n'.join(_render_obligations([first,second]))
+    assert rendered.count('N0 [read]')==1
+    assert 'E0 -> O0 via P0' in rendered and 'E1 -> O1 via P0' in rendered
+    assert 'first' in rendered and 'second' in rendered
+    assert 'ORIGINAL S0=original.py' in rendered
