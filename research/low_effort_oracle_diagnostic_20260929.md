@@ -32,4 +32,6 @@
 | provider 时间之和（秒） | 31.6 | 418.8 |
 | 输出 token（含推理） | 7,267 | 92,183 |
 
-具体配对证据及响应哈希存放在 `paired_availability.json`。本次向当前私有 provider 发送 `reasoning_effort=low` 没有解决空白或推理预算耗尽问题；服务端没有提供证据证明它是否实际遵从了 effort 设置。此结果不支持修改主实验默认参数。由于预算内没有执行到大部分历史正确 oracle 所在的请求，不能据此报告完整的五条 oracle 保留率，也不能把没有完成的 23 条算作模型语义失败。独立语义复核尚待完成。
+具体配对证据及响应哈希存放在 `paired_availability.json`。本次向当前私有 provider 发送 `reasoning_effort=low` 没有解决空白或推理预算耗尽问题；服务端没有提供证据证明它是否实际遵从了 effort 设置。此结果不支持修改主实验默认参数。五条历史正确 oracle 对应的 indices 12/19/20/29/31 均未启动，保留率没有定义，也不能把没有完成的 23 条算作模型语义失败。
+
+独立审查 `evaluation/low_effort_oracle_independent_review_v1.json` 指出，零结构接受并不代表全部语义错误。request_003 有 7 条静态可成立的完整 N05 预期：部分由于 frontend 把 `verify(t, o, expected)` 整个调用当作 observed 而被挡住，另一些由于模型同时修改 `t.Errorf` 诊断而被拒绝。负宽度/零宽度两条严格输出仍待证明。request_006 的数字树预期本身成立，但还引入新的 identity 观察前提，需要另行核实。这些结论揭示了程序分析和结构检查的限制，尚不构成新缺陷命中。
