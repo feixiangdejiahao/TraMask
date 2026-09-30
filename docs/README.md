@@ -2,7 +2,7 @@
 
 [PDF](combination_testing_research.pdf) · [Beamer source](combination_testing_research.tex)
 
-English, 26 slides, 16:9. The deck covers the problem, observation-production-path research abstraction, implemented workflow, formal definitions, HTTPX and Koota worked examples, all 17 trial results, contribution hypotheses, limitations, and future evaluation.
+English, 27 slides, 16:9. The deck covers the problem, observation-production-path research abstraction, implemented workflow, formal definitions, HTTPX and Koota worked examples, all 17 trial results, contribution hypotheses, limitations, and future evaluation.
 
 ## Build
 
@@ -16,7 +16,7 @@ Required TeX packages: Beamer, TikZ/PGF, FontAwesome5, Latin Modern, AMS math, b
 
 ## Evidence snapshot
 
-The completed fresh v3 experiment is frozen at `7a8ff95`: 16 confirmed defect witnesses across 17 development trials / 14 distinct tasks, with 12 retained and 4 revised oracles. It does not include a patch-repair/hidden-test loop. The later optional strict/may source-priority prototype is presented separately; its ranking census was still incomplete at this report snapshot.
+The completed fresh v3 experiment is frozen at `7a8ff95`: 16 confirmed defect witnesses across 17 development trials / 14 distinct tasks, with 12 retained and 4 revised oracles. It does not include a patch-repair/hidden-test loop. The later optional strict/may source-priority prototype is presented separately; its completed fixed-pool census found no exposure gain (strict unchanged; may worse). No new model or subject execution was performed in that study.
 
 Authoritative local evidence:
 
