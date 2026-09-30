@@ -2,11 +2,12 @@
 
 最新设计见[程序分析辅助的组合测试推理](method_design.md)，最新固定配置见[2026-09-29本轮独立评价](relation_search_v3_evaluation.md)。统一新请求v3完成17例两轮，确认16/17，N05尚未取得合格目标见证；没有实现全部目标或验证issue resolution rate。修改后图、去重等负结果与主实验分开保存，不从不同配置挑选结果拼成17/17。
 
-程序分析恢复测试、绑定、调用与断言依赖，构造候选并为局部预期推理提供源码。当前生成、运行反馈、模型预期修订与独立评价已连接；新writer反馈、参数化oracle模板等方向不能写成已验证能力。此前[关系形状设计](relation_search_method.md)、[旧检查点](relation_search_checkpoint_20260929.md)与[判别上下文方案](distinguishing_context_method.md)保留历史，其旧成绩不能代替当前结果。[17条trajectory重审](trajectory_logic_20260928/README.md)和[STARS阅读](stars_abstraction_review.md)保留研究依据。
+程序分析恢复测试、绑定、调用与断言依赖，构造候选并为局部预期推理提供源码。当前生成、运行反馈、模型预期修订与独立评价已连接；新writer反馈仍未集成在线搜索。2026-09-30已完成独立的有限oracle模板配对实验：相同50成员的完整正确预期为template20/50、expanded24/50，总token略增，没有新增目标检出。局部helper原型恢复8处调用绑定，新增期望参数端口为0。二者不改变冻结16/17主臂结果。此前[关系形状设计](relation_search_method.md)、[旧检查点](relation_search_checkpoint_20260929.md)与[判别上下文方案](distinguishing_context_method.md)保留历史，其旧成绩不能代替当前结果。[17条trajectory重审](trajectory_logic_20260928/README.md)和[STARS阅读](stars_abstraction_review.md)保留研究依据。
 
 - [当前方法与能力边界](method_design.md)
 - [本轮结果与消融](relation_search_v3_evaluation.md)、[oracle探索的实际贡献](oracle_exploration_contributions_20260929.md)
 - [修改后依赖图](modified_observation_impact_v1.md)、[精确材料去重负结果](exact_oracle_material_v1.md)
+- [有限oracle模板与配对评价](finite_oracle_template_critical_review_20260930.md)、[局部helper绑定原型](local_helper_evidence_20260930.md)
 - [本轮五小时报告](relational_gap_timebox_20260928.md)：17 个已见 trial 的进展、逐例缺口、误报与泛化限制。
 - [第六批独立评价](relational_gap_batch6_evaluation.md)：确认 N02、N07、N10，共 3/17。
 - [第七批独立评价](relational_gap_batch7_evaluation.md)：完整源断言恢复消融确认 P2、N02、N07、N10，共 4/17，仍漏检 13/17。
