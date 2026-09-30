@@ -1,6 +1,6 @@
 **2026 年软工研究论文依据与本课题的贡献边界**
 
-方法修订：当前已实现的检索抽象是 [观察前沿](method_design.md)。下文保留此前文献审阅及关系残差假设的历史推论；其现状见 [归档方案](archive/method_design_v2_residual.md)。与观察前沿更直接相关的 SELERTION、Dodona、PSODS 等依据已补充到当前方法文件，不能把断言切片或依赖选择本身宣称为新贡献。
+方法修订：当前实现和证据见[方法说明](method_design.md)，仍未建立一个已验证的统一学术抽象。下文保留此前观察前沿、关系残差等假设的历史推论；其历史版本见[归档方案](archive/method_design_v2_residual.md)。不能把断言切片或依赖选择本身宣称为新贡献。2026-09-30的新核验与候选编辑排序贡献边界见第9项。
 
 核验日期：2026-09-23。以下六篇均在 ICSE、FSE 或 ASE 2026 官方 Research Track / Research Papers 页面中列出。ASE 2026 尚未召开，本文将其表述为已收录、已列入议程，不表述为已经报告。这里只做针对本问题的文献审阅，不是覆盖全年论文的系统综述，也不保证某个设计能够被顶会接收。
 
@@ -75,3 +75,20 @@
 - [Path-directed source test case generation and prioritization in metamorphic testing，JSS 2022](https://doi.org/10.1016/j.jss.2021.111091)：已有按路径约束生成、排序 MR 源输入的工作。新方法需与它以及直接关系符号执行比较，而不能只对比随机测试。
 
 新的贡献检验点由此明确：**关系保持项的配对消去，能否找到比普通输出依赖更小、更有用的组合因素；将这些因素投影回已有测试，是否能以更少搜索得到有效反例。** 这是一个需要实验支持的算法假设，没有把“残差”或蜕变关系本身声明为新理论。
+
+**9. 2026-09-30核验：当前候选编辑排序不能宣称什么**
+
+本次重新访问作者论文及会议官方页面。下表的工作机制来自这些一手材料；最后一列是针对本项目的判断，不是原论文主张。本次不是系统综述，不据此断言全球首创。
+
+| 一手材料 | 可核验机制 | 对当前设计的约束 |
+|---|---|---|
+| [STARS，ISSTA 2026，作者全文](https://software-lab.org/publications/issta2026_STARS.pdf)，§3.1 | 从已有变量出发，依据类型、可调用 observer 和参数可用性构造方法调用链，再让模型具体化断言 | 抽象直接决定能生成哪些新表达式。当前路径优先级只排序已生成候选，尚未给出同样明确的组合扩展运算 |
+| [Change And Cover，ICSE 2026，作者全文](https://software-lab.org/publications/icse2026_ChaCo.pdf)，§2、§3.1–3.2 | 针对PR中未覆盖行，结合静态/动态分析与模型提取已有测试、fixture和辅助工具上下文，再增补测试；明确假设PR无缺陷 | 补丁定位、测试上下文整理、已有测试扩增已有直接先例。我们的候选可能有缺陷，不能以“在候选上通过并增覆盖”为正确oracle准则 |
+| [Testora，ICSE 2026，作者全文](https://software-lab.org/publications/icse2026_Testora.pdf)，§2.4–2.6 | 生成针对修改代码的测试，对比修改前后行为，用PR自然语言意图判断差异是否预期 | issue/变更意图辅助oracle不是新思想。组合后行为变化与真正错误必须分开判断；把状态变化直接当gap证据不足 |
+| [Towards More Realistic Assertion Generation under Mixed-Assertion Scenario，ISSTA 2026官方摘要](https://conf.researchr.org/details/issta-2026/issta-2026-research-papers/123/Towards-More-Realistic-Assertion-Generation-under-Mixed-Assertion-Scenario) | 实证研究多断言测试，以及去掉已知插入位置后生成质量的变化，指出同一测试的多个断言通常协同表达目标 | 判断单个尾断言正确仍不够。当前实验必须评价完整测试和前置断言；只依赖最后一个可编辑位置会遗漏不适用的前提。本项只读官方摘要，不补述未见全文算法 |
+
+代码审查另确认：旧`anchor_retrieval/retrieve.py`已经使用断言切片、具体调用和changed-callee可达性，`frontier.py`也已有actual投影。当前[路径排序](patch_observation_priority_design.md)的实际增量是**候选条件化的查询**：重解析每个编辑后的测试，要求同一调用位置上的输入编辑与补丁返回依赖连接，再连接到实际观察。有限形参投影能够区分`calculate(value, unused)`中改`value`与改`unused`，而不是给同一源测试的全部编辑沿用一个检索分数。保守may模式的增量更小：只有编辑后的同调用位置绑定，不要求完整返回依赖。这是分析精度增量，不是新的切片理论；该谓词也接受单输入改值，尚未定义两操作交互。
+
+最小研究假设因此是：**相同候选池、oracle接口和模型预算下，候选编辑进入补丁相关实际观察路径的判断，能比源测试检索或普通影响排序增加正确完整测试及实际缺陷检出。** 若只增加静态排名曝光、不增加真实检出；或strict相对保守may没有增量；或未支持任务整体退步，应否定相应贡献主张。17个已参与开发的trial只能提供开发集证据，不能代替未见任务评价。
+
+本轮CLI的请求资格扫描、helper端口及恢复运行的SHA核验属于实现正确性工作，均不作为学术抽象。此前残差及关系保持假设留作历史推演，没有因为改名而升级为已实现算法。

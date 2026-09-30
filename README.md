@@ -30,6 +30,7 @@
 | 模型任务粒度、源码上下文与输出接口 | [预期判断实验](research/singleton_expected_slots_20260929.md) |
 | 输入侧程序信息整理 | [调用依赖证据](research/call_dependency_evidence_20260929.md)、[断言到写入路径](research/assertion_path_context_prototype_20260929.md) |
 | 学术证据与最小消融 | [学术审查](research/assertion_writer_academic_review_20260929.md) |
+| 候选编辑、补丁与观察的路径排序 | [源码设计](research/patch_observation_priority_design.md)、[固定候选池协议](research/patch_observation_priority_protocol.md) |
 | STARS及2026论文启发 | [STARS逐节阅读](research/stars_abstraction_review.md)、[文献记录](research/literature_2026.md) |
 | 源测试恢复、候选构造、搜索反馈 | `relation_search/`、`experimental/relation_search_*.py` |
 | 断言与局部对象/字段写入分析 | `experimental/assertion_write_origin.py`、`exception_write_priority.py` |
@@ -61,6 +62,8 @@ Python 关系探针与跨轮搜索已接入主驱动。新的 writer 运行跟�
 ```
 
 主驱动还支持历史缓存 `replay` 与新请求 `fresh`，配置、源码哈希和预算冻结后不能修改并覆盖原实验。模型和生成阶段不读取参考补丁、隐藏 verifier 或封存评价标签。执行失败、合法JSON、结构接收和正确缺陷检出分别记账。
+
+最新可选 `--semantic-policy patch-strict` / `patch-may` 根据一个输入编辑、同一具体调用及断言实际观察的补丁路径安排语义预算。它们保留未服务候选并固定提交补丁 SHA，尚不替换冻结的 16/17 主配置。零模型的三臂排名对照可运行 `scripts/census_patch_observation_priority.py`；静态排名命中不代表生成了正确测试或发现了新缺陷。
 
 ## 历史材料
 

@@ -21,11 +21,14 @@ def algorithm_files():
                        'candidate_scheduling.py', 'go_arity_guard.py', 'oracle_batch_recovery.py', 'owner_prefix_slice.py',
                        'exception_write_priority.py', 'assertion_write_origin.py',
                        'singleton_oracle_slots.py', 'call_dependency_evidence.py')],
+                   *[ROOT/'experimental'/name for name in ('patch_observation_priority.py',
+                       'modified_observation_impact.py', 'local_helper_evidence.py',
+                       'go_assertion_helper.py', 'source_failure_evidence.py')],
                    ROOT/'scripts/analyze_assertion_write_origin_census.py',
                    ROOT/'scripts/run_relation_search.py', ROOT/'scripts/execute_relation_search.py',
                    ROOT/'scripts/relational_go_test_runner.py',
                    ROOT/'scripts/relational_phase_runner.py', ROOT/'generic_composition/emitter.py',
-                   ROOT/'generic_composition/runner.py'})
+                   ROOT/'generic_composition/runner.py', ROOT/'generic_composition/corpus.py'})
 
 
 def prepare(args):

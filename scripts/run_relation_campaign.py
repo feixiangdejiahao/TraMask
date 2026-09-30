@@ -33,10 +33,23 @@ def preserve_configuration(path, value):
     write(path, value)
 
 
+def submitted_patch(prepared):
+    """Read the same submitted patch identified by the source-case snapshot."""
+    case = read(prepared/'case.json')
+    path = Path(case['candidate_patch'])
+    checksum = digest(path)
+    if checksum != case['repository_provenance']['patch_sha256']:
+        raise ValueError('Submitted patch differs from source-case provenance')
+    return path.read_bytes().decode('utf-8'), checksum
+
+
 def semantic_batch(prepared, output, args, previous_selected, previous_semantic=None):
     from relation_search.semantic_cache import apply_cache
     candidates = read(prepared/'candidates.json')['candidates']
     corpus = read(prepared/'corpus.json')
+    patch, patch_sha = None, None
+    if getattr(args, 'semantic_policy', 'shape') in {'patch-strict', 'patch-may'}:
+        patch, patch_sha = submitted_patch(prepared)
     request = dict(stage='semantic', input=str(prepared.resolve()),
                    input_sha256=digest(prepared/'prepare.json'), mode=args.oracle_mode,
                    code_sha256=code_identity(), budget=args.semantic_budget,
@@ -46,6 +59,7 @@ def semantic_batch(prepared, output, args, previous_selected, previous_semantic=
                    previous_semantic_sha256=digest(previous_semantic/'semantic_frontier.json') if previous_semantic else None,
                    cache_sha256=digest(args.oracle_cache) if args.oracle_cache else None,
                    selection_policy=getattr(args, 'semantic_policy', 'shape'),
+                   submitted_patch_sha256=patch_sha,
                    evidence_mode=getattr(args, 'oracle_evidence', 'baseline'),
                    previously_selected=sorted(previous_selected))
     start(output, request)
@@ -72,16 +86,37 @@ def semantic_batch(prepared, output, args, previous_selected, previous_semantic=
             raise ValueError('Semantic backlog belongs to different source or issue')
         frontend = read(prepared/'frontend.json')
         queued = advance(corpus, candidates, prior, budget=args.semantic_budget, selected_ids=previous_selected,
-                         frontend=frontend, selection_policy=getattr(args, 'semantic_policy', 'shape'))
+                         frontend=frontend, selection_policy=getattr(args, 'semantic_policy', 'shape'), patch=patch)
         selection = queued['selection']
         selected = selection['selected']
+        evidence = {row['id']: row['evidence']
+                    for row in selection['ranking'] if 'evidence' in row}
+        if getattr(args, 'semantic_policy', 'shape') in {'patch-strict', 'patch-may'}:
+            # Spend the candidate budget on requests that this existing oracle
+            # interface can actually form. No provider is called by this scan.
+            # Unoffered source programs stay in the catalogue for later rounds.
+            by_id = {row['id']: row for row in queued['frontier']['candidates']}
+            pending = [by_id[row['id']] for row in selection['ranking']
+                       if not row['previously_selected']]
+            probes = (prepare_requests(corpus, frontend, pending,
+                        (prepared/'issue.md').read_text(),
+                        max_requests=args.semantic_budget, per_request=1,
+                        evidence_mode=getattr(args, 'oracle_evidence', 'baseline'),
+                        impact_evidence_by_id=evidence)
+                      if args.semantic_budget > 0 else [])
+            requestable = {item['candidate']['id'] for value in probes
+                           for item in value['offered'].values()}
+            selected = [row for row in pending if row['id'] in requestable]
+            selection.update(selected=selected, selected_count=len(selected),
+                selection_qualification='existing prepare_requests interface before candidate budget')
+            for row in selection['ranking']:
+                row['selected'] = row['id'] in requestable
         selected_ids = [row['id'] for row in selected]
         requests = prepare_requests(corpus, frontend, selected,
                                     (prepared/'issue.md').read_text(),
                                     max_requests=args.semantic_budget, per_request=args.per_request,
                                     evidence_mode=getattr(args, 'oracle_evidence', 'baseline'),
-                                    impact_evidence_by_id={row['id']: row['evidence']
-                                        for row in selection['ranking'] if 'evidence' in row})
+                                    impact_evidence_by_id=evidence)
         offered_ids = [item['candidate']['id'] for request in requests for item in request['offered'].values()]
         # Selection is an opportunity, not evidence that a model received the
         # candidate. Preserve selected-but-unoffered programs in the backlog.
@@ -196,6 +231,9 @@ def campaign(args):
         oracle_cache_sha256=digest(args.oracle_cache) if args.oracle_cache else None,
         source_corpus_sha256={case: digest(args.source/case/'corpus.json') for case in cases},
         algorithm_sha256=code_identity())
+    if configuration['semantic_policy'] in {'patch-strict', 'patch-may'}:
+        configuration['submitted_patch_sha256'] = {
+            case: submitted_patch(args.source/case)[1] for case in cases}
     start(args.output, dict(stage='campaign', **configuration))
     for relative, checksum in configuration['algorithm_sha256'].items():
         target = args.output/'algorithm_snapshot'/relative
@@ -237,6 +275,10 @@ def campaign(args):
             return
         if code_identity() != configuration['algorithm_sha256']:
             raise ValueError('Campaign code changed; completed work is preserved')
+        if configuration.get('submitted_patch_sha256') and any(
+                submitted_patch(args.source/name)[1] != checksum
+                for name, checksum in configuration['submitted_patch_sha256'].items()):
+            raise ValueError('Campaign submitted patch changed; completed work is preserved')
         folder = case_root/f'round_{index:03d}'
         preparation = prepare(SimpleNamespace(source=args.source/case, output=folder/'prepared', previous=state['previous'],
             strategy=args.strategy, limit=args.limit, pool=args.pool, max_edits=args.max_edits,
@@ -322,7 +364,7 @@ if __name__ == '__main__':
     parser.add_argument('--oracle-mode', choices=['none', 'replay', 'fresh'], default='none')
     parser.add_argument('--oracle-cache', type=Path)
     parser.add_argument('--semantic-budget', type=int, default=16)
-    parser.add_argument('--semantic-policy', choices=['shape', 'impact'], default='shape')
+    parser.add_argument('--semantic-policy', choices=['shape', 'impact', 'patch-strict', 'patch-may'], default='shape')
     parser.add_argument('--oracle-evidence', choices=['baseline', 'dependency'], default='baseline')
     parser.add_argument('--per-request', type=int, default=4)
     parser.add_argument('--model-workers', type=int, default=2)
