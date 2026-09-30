@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 
 from anchor_retrieval.syntax import Source, attr_parts, call_parts, child, walk
 from experimental.go_arity_guard import ArityIndex, _names
+from experimental.source_failure_evidence import _writes as local_writes
 
 
 FAILURES = {'Error', 'Errorf', 'Fatal', 'Fatalf', 'Fail', 'FailNow'}
@@ -84,8 +85,8 @@ def pure_call(source, node, shadowed):
     if function.type == 'selector_expression':
         owner, name = attr_parts(function)
         return (source.text(owner) not in shadowed
-                and source.imports.get(source.text(owner)) == ('strings', None)
-                and source.text(name) in PURE_STRING_CALLS)
+                and ((source.imports.get(source.text(owner)) == ('strings', None) and source.text(name) in PURE_STRING_CALLS)
+                     or (source.imports.get(source.text(owner))==('bytes',None) and source.text(name) in {'Replace','ReplaceAll'})))
     return False
 
 
@@ -143,6 +144,11 @@ def summarize_helper(source, function):
     testing_name = params[tests[0]]['name']
     param_names = {item['name'] for item in params}
     body = child(function, 'body')
+    if body is None:
+        return _unknown('helper_body_unavailable', **identity)
+    local_bindings = set().union(*(local_writes(source,node) for node in walk(body)))
+    if testing_name in local_bindings:
+        return _unknown('testing_receiver_reassigned', **identity)
     unsupported = {'for_statement', 'expression_switch_statement', 'type_switch_statement',
                    'select_statement', 'func_literal', 'go_statement', 'defer_statement'}
     if any(item.type in unsupported for item in walk(body)):
@@ -228,7 +234,7 @@ def summarize_helper(source, function):
         if node.type == 'short_var_declaration'
         for item in (child(node, 'left').named_children if child(node, 'left') else [])
         if item.type == 'identifier'}
-    shadowed = set(locals_)
+    shadowed = set(locals_) | local_bindings
     for declaration in source.root.named_children:
         if declaration.type == 'function_declaration':
             shadowed.add(source.text(child(declaration, 'name')))
@@ -271,6 +277,24 @@ def summarize_helper(source, function):
             in_failure = child(guard, 'consequence').start_byte <= node.start_byte < child(guard, 'consequence').end_byte
             if not in_comparison and not in_failure:
                 return _unknown('expected_used_outside_comparison_and_diagnostic', **identity)
+    # Changing the comparison changes whether its failure body executes. An
+    # opaque action there is therefore not made independent by ignoring the
+    # expected value as a call argument. Only local diagnostics are supported.
+    prior_locals=param_names | {name for node in walk(body) if node.start_byte<guard.start_byte for name in local_writes(source,node)}
+    address_taken={source.text(child(node,'operand')) for node in walk(body)
+        if node.type=='unary_expression' and source.text(child(node,'operator'))=='&'
+        and child(node,'operand') is not None and child(node,'operand').type=='identifier'}
+    for node in walk(child(guard,'consequence')):
+        if node.type=='assignment_statement' and any(name!=expected_name and name in prior_locals
+                and (name in address_taken or any(later.type=='identifier' and source.text(later)==name and later.start_byte>=guard.end_byte for later in walk(body)))
+                for name in local_writes(source,node)):
+            return _unknown('failure_branch_reassigns_existing_nonexpected_local',action=span(source,node),**identity)
+        if node.type == 'call_expression':
+            method=testing_call(source,node,testing_name)
+            if method not in FAILURES | {'Log','Logf'} and not pure_call(source,node,shadowed):
+                return _unknown('opaque_action_in_failure_branch',action=span(source,node),**identity)
+        if node.type in {'inc_statement','dec_statement','return_statement','goto_statement','break_statement','continue_statement'}:
+            return _unknown('unsupported_action_in_failure_branch',action=span(source,node),**identity)
     expected_index = next(i for i, item in enumerate(params) if item['name'] == expected_name)
     return dict(status='supported', **identity, parameters=params,
         testing_parameter_index=tests[0], expected_parameter_index=expected_index,
@@ -303,6 +327,11 @@ class HelperIndex:
         identity = dict(call_span=span(source, node), call=source.text(node))
         if function is None or function.type != 'identifier':
             return _unknown('not_direct_same_package_call', **identity)
+        owner=node.parent
+        while owner is not None and owner.type not in {'function_declaration','method_declaration','func_literal'}:
+            owner=owner.parent
+        if owner is not None and child(owner,'body') is not None and any(source.text(function) in local_writes(source,item) for item in walk(child(owner,'body'))):
+            return _unknown('unresolved_local_function_binding', **identity)
         signature, resolution = self.arity.resolve(source, node)
         if signature is None:
             return _unknown(resolution, **identity)

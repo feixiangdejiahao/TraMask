@@ -95,6 +95,53 @@ def test_shadowed_standard_library_alias_is_not_known_pure():
     assert result['reason'] == 'expected_consumed_by_opaque_or_nondiagnostic_call'
 
 
+@pytest.mark.parametrize('body',[
+    'if box.value != desired {var strings=evil; t.Error(strings.ReplaceAll(desired,"a","b"))}',
+    'if box.value != desired {var len=evil; t.Error(len(desired))}',
+])
+def test_local_var_bindings_do_not_inherit_pure_import_or_builtin_roles(body):
+    assert summarize(helper(body,imports='"testing"; "strings"'))['reason']=='expected_consumed_by_opaque_or_nondiagnostic_call'
+
+
+def test_local_testing_receiver_type_alias_is_not_a_standard_testing_failure():
+    result=summarize(helper('if box.value != desired {type t=Evil; t.Errorf(Evil{},desired)}'))
+    assert result['reason']=='testing_receiver_reassigned'
+
+
+def test_subject_action_in_failure_branch_is_not_an_expected_only_diagnostic():
+    result=summarize(helper('if box.value != desired {mutate(box);t.Error(desired)}'))
+    assert result['reason']=='opaque_action_in_failure_branch'
+
+
+def test_failure_branch_does_not_reassign_actual_local_consumed_after_check():
+    result=summarize(helper('got:=box.value;if got!=desired {got="bad";t.Error(desired)};consume(got)'))
+    assert result['reason']=='failure_branch_reassigns_existing_nonexpected_local'
+
+
+def test_failure_branch_pure_local_diagnostic_formatting_without_escape_is_supported():
+    result=summarize(helper('got:=[]byte(box.value); if string(got)!=desired {got=bytes.ReplaceAll(got,[]byte("x"),[]byte("y")); t.Errorf("%s %s",string(got),desired)}',
+        imports='"testing"; "bytes"'))
+    assert result['status']=='supported',result
+    assert result['actual_parameter_dependencies']==['box']
+    wrong=summarize(helper('got:=[]byte(box.value); if string(got)!=desired {got=bytes.ReplaceAll(got,[]byte("x"),[]byte("y")); t.Errorf("%s %s",string(got),desired)}',
+        imports='"testing"; bytes "example.com/bytes"'))
+    assert wrong['reason']=='opaque_action_in_failure_branch'
+
+
+def test_failure_local_address_escape_does_not_need_a_direct_later_read_to_be_unknown():
+    result=summarize(helper('got:=box.value;record(&got);if got!=desired {got="bad";t.Error(desired)};consumeStoredPointer()'))
+    assert result['reason']=='failure_branch_reassigns_existing_nonexpected_local'
+
+
+def test_local_type_conversion_does_not_resolve_same_named_package_helper():
+    code=helper('if box.value != desired {t.Error("bad")}')
+    code+='func TestExample(t *testing.T){type check=Box;_=check(t)}'
+    data={'language':'go','sources':{'pkg/a_test.go':{'code':code,'language':'go'}}}
+    index=HelperIndex(data);source=index.arity.sources['pkg/a_test.go']
+    call=next(node for node in walk(source.root) if node.type=='call_expression' and source.text(child(node,'function'))=='check')
+    assert index.call(source,call)['reason']=='unresolved_local_function_binding'
+
+
 def test_package_variable_shadowing_builtin_is_not_known_pure():
     code = helper('if box.value != desired { t.Error(len(desired)) }')
     code += 'var len = func(s string) int { return consume(s) }'
