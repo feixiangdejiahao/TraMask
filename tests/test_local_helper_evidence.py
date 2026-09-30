@@ -3,7 +3,8 @@ import copy
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.local_helper_evidence import analyze
+from experimental.local_helper_evidence import _writes, analyze
+from anchor_retrieval.syntax import walk
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search.oracle_evidence import _modified_sources
 
@@ -180,6 +181,26 @@ def test_outer_framework_receiver_shadow_or_write_denies_expected_port(language,
     assert result['counts']['expected_argument_ports'] == 0
     assert all(row['assertions'][0]['expected_port_reason'] == 'assertion_adapter_rebound'
                for row in result['calls'])
+
+
+@pytest.mark.parametrize('declaration',[
+    'var a, require = 1, custom',
+    'for _, require := range custom { _=require }',
+    'type require = Custom',
+    'const require = 1',
+])
+def test_go_all_declaration_names_conservatively_deny_framework_receiver_port(declaration):
+    corpus,candidate=fixture('go',[('    check := func','    '+declaration+'\n    check := func')])
+    result=analyze(corpus,candidate)
+    assert result['counts']['resolved_calls']==2
+    assert result['counts']['expected_argument_ports']==0
+    assert all(row['assertions'][0]['expected_port_reason']=='assertion_adapter_rebound' for row in result['calls'])
+
+
+def test_go_grouped_const_and_var_declared_names_do_not_drop_second_binding():
+    source=Source('names.go','package p\nfunc f(){var a,b=1,2;const c,d=3,4}\n','go')
+    rows=[_writes(source,node) for node in walk(source.root) if node.type in {'var_spec','const_spec'}]
+    assert rows==[['a','b'],['c','d']]
 
 
 @pytest.mark.parametrize('language,replace', [

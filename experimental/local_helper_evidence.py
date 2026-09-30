@@ -18,7 +18,7 @@ from experimental.go_assertion_helper import parameters as go_parameters
 from generic_composition.corpus import _assertion_nodes, span
 from relation_search.oracle_evidence import _modified_sources
 
-VERSION = 'local-helper-evidence-v2'
+VERSION = 'local-helper-evidence-v3'
 FUNCTION_NODES = FUNCTIONS | {'func_literal', 'arrow_function', 'function_expression', 'lambda'}
 CONTROL_NODES = {'if_statement', 'elif_clause', 'else_clause', 'for_statement', 'for_in_statement',
     'while_statement', 'switch_statement', 'expression_switch_statement', 'try_statement',
@@ -64,6 +64,16 @@ def _single(node):
 
 
 def _writes(source, node):
+    if source.language == 'go':
+        if node.type in {'var_spec','const_spec'}:
+            return [source.text(item) for i,item in enumerate(node.named_children)
+                    if node.field_name_for_named_child(i)=='name' and item.type=='identifier']
+        if node.type in {'type_spec','type_alias'}:
+            return [source.text(child(node,'name'))]
+        if node.type == 'range_clause':
+            target=child(node,'left')
+            targets=target.named_children if target is not None and target.type=='expression_list' else [target] if target is not None else []
+            return [source.text(item) for item in targets if item.type=='identifier']
     if node.type in FUNCTIONS:
         name = child(node, 'name')
         return [source.text(name)] if name is not None else []

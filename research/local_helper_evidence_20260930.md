@@ -76,3 +76,12 @@ registration is a separate unresolved step.
 
 No new expected value, combination test, detection improvement, or issue
 resolution improvement is claimed by this module or census.
+
+The live module is now version v3. Independent source-failure review found that
+the earlier Go declaration-name collector missed range binders, second names in
+grouped var/const declarations, and local type declarations. Those forms can
+shadow an assertion import or helper name. The shared collector now covers them;
+five new counterexample tests bring the local-helper suite to 38 tests (63 with
+the older Go-helper suite). The v2 census and its source snapshots remain
+immutable; the new source-failure census freezes the v3 implementation. This is
+a binding reliability correction, not a retroactive improvement to old results.

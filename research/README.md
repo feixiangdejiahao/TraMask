@@ -8,6 +8,7 @@
 - [本轮结果与消融](relation_search_v3_evaluation.md)、[oracle探索的实际贡献](oracle_exploration_contributions_20260929.md)
 - [修改后依赖图](modified_observation_impact_v1.md)、[精确材料去重负结果](exact_oracle_material_v1.md)
 - [有限oracle模板与配对评价](finite_oracle_template_critical_review_20260930.md)、[局部helper绑定原型](local_helper_evidence_20260930.md)
+- [自定义Go断言的失败源码分析](source_failure_evidence_20260930.md)、[独立反例审查](source_failure_evidence_review_20260930.md)：新增确定性源码证据，尚无语义或检出增益。
 - [本轮五小时报告](relational_gap_timebox_20260928.md)：17 个已见 trial 的进展、逐例缺口、误报与泛化限制。
 - [第六批独立评价](relational_gap_batch6_evaluation.md)：确认 N02、N07、N10，共 3/17。
 - [第七批独立评价](relational_gap_batch7_evaluation.md)：完整源断言恢复消融确认 P2、N02、N07、N10，共 4/17，仍漏检 13/17。

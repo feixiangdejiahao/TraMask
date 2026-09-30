@@ -46,3 +46,5 @@ expected 的用途也受到检查：如果它流入其他不透明调用、比�
 实现：`experimental/go_assertion_helper.py`。25 个单元测试覆盖 helper 改名、参数置换、import 别名、对称参数、共享依赖、不透明调用、多断言、遮蔽、声明歧义及 UTF-8 字节范围。`scripts/analyze_go_assertion_helpers.py` 可重跑 census。
 
 本次没有接入 production frontend/oracle，没有增加模型调用或执行组合测试。它为已有 N05 helper 提供了可编辑边界，尚未证明新增了缺陷命中，也没有解决其他 Go 任务的复杂 helper。
+
+2026-09-30进一步只读检查有限模板研究的固定原始候选池（`paired_inputs_v3/protocol.json`所指inventory）。将程序编辑范围与上述已支持helper的原expected实参范围匹配，六个Go池分别有175、174、335、506、370、382个候选；只有N05存在45处可支持的原helper调用，其175个候选均没有编辑这些expected实参，其他五池没有可支持槽。因此，在当前材料上“优先排除只改helper期望的候选”不能释放任何预算，没有实现或接入这种排序。范围匹配仅检查已有支持边界，未匹配不证明任意动态helper编辑不涉及期望；此次没有读取模型回答、执行结果或目标标签，也没有新增模型或仓库执行。
