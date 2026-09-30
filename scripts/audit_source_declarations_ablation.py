@@ -68,7 +68,27 @@ def audit(root):
         rows.append(dict(case=case,candidate_id=record['candidate_id'],declarations=declarations,emitted=emitted,original_prompt_bytes=len(old['prompt'].encode()),source_only_prompt_bytes=len(new['prompt'].encode())))
     return dict(role='independent_evaluation_only',audit_code_sha256=sha(__file__),ready_sha256=sha(root/'ready.json'),stage_sha256=sha(root/'stage.json'),cases=rows,total_declarations=sum(r['declarations'] for r in rows),checks=['same SHA-first candidate per case','same complete test/assertions/edits/offered/system and local facts','only rendered source evidence and derived fields changed in prompt','same model settings in prepared wire','independent reconstruction of original and edited source SHA/spans','all complete declarations represented without truncation'],limits=['Prepared inputs only; no completion or semantic outcome was used.','This removes binding, dependence, observation and unknown annotations together; not a graph-edge-only causal intervention.'])
 
+def audit_completions(root):
+    root=Path(root);ready=read(root/'ready.json');stage=read(root/'stage.json');rows=[]
+    for record in ready['records']:
+        folder=root/record['case']/'completion'
+        if not (folder/'validation.json').exists():continue
+        manifest=read(folder/'manifest.json');wire=read(folder/'request.json')
+        assert sha(folder/'request.json')==manifest['request_sha256']
+        assert sha(folder/'response.body')==manifest['response_sha256']
+        assert wire==read(root/record['case']/'wire_preview.json')
+        assert manifest['external_model_calls']==1
+        response=read(folder/'response.json');assert response==read(folder/'response.body')
+        validation=read(folder/'validation.json')
+        paired=read(Path(stage['ablation'])/record['case']/'result.json')['pairs'][0]
+        assert paired['candidate_id']==record['candidate_id']
+        assert sha(paired['treatment_request'])==record['treatment_request_sha256']
+        treatment_manifest=read(Path(paired['treatment_completion'])/'manifest.json')
+        assert treatment_manifest['endpoint_sha256']==manifest['endpoint_sha256']
+        rows.append(dict(case=record['case'],candidate_id=record['candidate_id'],finish_reason=manifest.get('finish_reason'),seconds=manifest.get('seconds'),usage=manifest.get('usage'),revised_count=len(validation['revisions']),decisions=validation['decisions'],answer=response['choices'][0]['message'].get('content'),request_sha256=sha(folder/'request.json'),response_sha256=sha(folder/'response.body'),manifest_sha256=sha(folder/'manifest.json'),paired_result_sha256=sha(Path(stage['ablation'])/record['case']/'result.json')))
+    return dict(role='independent_evaluation_only',audit_code_sha256=sha(__file__),ready_sha256=sha(root/'ready.json'),stage_sha256=sha(root/'stage.json'),completed=len(rows),expected=17,rows=rows,limitations=['Actual wire/response attribution only; complete semantic oracle review is separate.','No target-detection credit or feedback into main campaign.'])
+
 if __name__=='__main__':
-    p=argparse.ArgumentParser(__doc__);p.add_argument('--input',required=True,type=Path);p.add_argument('--output',required=True,type=Path);a=p.parse_args();out=audit(a.input)
+    p=argparse.ArgumentParser(__doc__);p.add_argument('--input',required=True,type=Path);p.add_argument('--output',required=True,type=Path);p.add_argument('--completions',action='store_true');a=p.parse_args();out=audit_completions(a.input) if a.completions else audit(a.input)
     with a.output.open('x') as f:json.dump(out,f,indent=2)
-    print(json.dumps({k:v for k,v in out.items() if k!='cases'}))
+    print(json.dumps({k:v for k,v in out.items() if k not in ('cases','rows')}))

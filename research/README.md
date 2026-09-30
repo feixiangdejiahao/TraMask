@@ -1,10 +1,12 @@
 # 组合测试研究与实验记录
 
-最新设计见 [用关系形状指导测试搜索](relation_search_method.md)：以观察和构造来源选取局部参与值，按联合相对关系给测试分组，用实际执行的新形状指导下一步输入编辑。新方向不要求竞争实现；此前[判别上下文方案](distinguishing_context_method.md)已被否决，保留设计历史。新代码和实际见证保存在[本轮检查点](relation_search_checkpoint_20260929.md)：累计正确见证 11/17，本轮生成来源 9/17，均不是统一预算的端到端检测率；运行反馈闭环仍未接入主驱动。[独立评价](relation_search_evaluation_20260928.md)、[17 条 trajectory 重审](trajectory_logic_20260928/README.md)和 [STARS 阅读](stars_abstraction_review.md)保留证据与依据。
+最新设计见[程序分析辅助的组合测试推理](method_design.md)，最新固定配置见[2026-09-29本轮独立评价](relation_search_v3_evaluation.md)。统一新请求v3完成17例两轮，确认16/17，N05尚未取得合格目标见证；没有实现全部目标或验证issue resolution rate。修改后图、去重等负结果与主实验分开保存，不从不同配置挑选结果拼成17/17。
 
-当前研究单位是带观察的关系 `(q, ρ)`：程序从已有验证恢复输入、对象和操作关系，构造新见证，并检查已有或受限修订的观察。实际实现仍有多个有界关系域，尚未实现统一完备的关系求解。
+程序分析恢复测试、绑定、调用与断言依赖，构造候选并为局部预期推理提供源码。当前生成、运行反馈、模型预期修订与独立评价已连接；新writer反馈、参数化oracle模板等方向不能写成已验证能力。此前[关系形状设计](relation_search_method.md)、[旧检查点](relation_search_checkpoint_20260929.md)与[判别上下文方案](distinguishing_context_method.md)保留历史，其旧成绩不能代替当前结果。[17条trajectory重审](trajectory_logic_20260928/README.md)和[STARS阅读](stars_abstraction_review.md)保留研究依据。
 
-- [当前方法与能力边界](relational_gap_method_v2.md)
+- [当前方法与能力边界](method_design.md)
+- [本轮结果与消融](relation_search_v3_evaluation.md)、[oracle探索的实际贡献](oracle_exploration_contributions_20260929.md)
+- [修改后依赖图](modified_observation_impact_v1.md)、[精确材料去重负结果](exact_oracle_material_v1.md)
 - [本轮五小时报告](relational_gap_timebox_20260928.md)：17 个已见 trial 的进展、逐例缺口、误报与泛化限制。
 - [第六批独立评价](relational_gap_batch6_evaluation.md)：确认 N02、N07、N10，共 3/17。
 - [第七批独立评价](relational_gap_batch7_evaluation.md)：完整源断言恢复消融确认 P2、N02、N07、N10，共 4/17，仍漏检 13/17。
@@ -17,7 +19,7 @@
 
 历史方法与负结果保留如下，不能与当前指标混用：
 
-- [动作、观察与小期望变换](method_design.md)及[实验结果](semantic_transport_results.md)。
+- [动作、观察与小期望变换](archive/method_design_action_observation_20260929.md)及[实验结果](semantic_transport_results.md)。
 - [观察前沿检索](observation_frontier_method.md)、[检索实验](observation_frontier_experiment.md)及[事前约定](observation_frontier_plan.md)；检索命中不等于正确组合。
 - [历史检索实验](anchor_retrieval_experiment.md)：旧完整方法双 Hit@10 为 0/7。
 - [A 的适用性审查](anchor_applicability_audit.md)。

@@ -18,3 +18,5 @@
 77 个恢复执行中有 5 个的对照未全部通过，不能当成有合格对照的缺陷见证。即使对照通过，断言失败也不证明 oracle 正确，因此这里不报告新增有效 combination test、缺陷检出率或 issue resolution rate，原冻结主臂的计量不回填。
 
 阶段性快照为 `results/relation_search_20260929_v3/go_compile_failure_supplement_v1/audit_01.json` 和 `audit_02.json`。后续统计应使用新的输出文件，保留旧快照，不能把当前 136 个已记录候选误写成全部 208 个执行完成。
+
+2026-09-30中断后只读核验：35组全部有组级checkpoint，208候选全部记录；134恢复命名执行（86失败、48通过），其中117条的原控制全部通过；73仍编译失败、1超时。新快照为 `audit_after_interruption_20260930.json`。没有新增执行，也没有据此补记主臂目标分数。顶层supervisor未写终态，但旧handle和宿主记录PID均不存在，未发现运行中的relation容器；不能据组级产物完整推断监督器正常收尾。
