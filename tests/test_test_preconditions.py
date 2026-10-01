@@ -6,7 +6,7 @@ import pytest
 
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
-from relation_search.test_preconditions import analyze
+from relation_search.test_preconditions import analyze, contract_contexts
 
 
 def setup(language, code, before, after, extra=None, imports=None):
@@ -197,3 +197,25 @@ def test_explicit_rebinding_and_decorators_block_signature_proof(binding):
 def test_go_single_call_can_expand_multiple_results():
     code='package demo\nimport "testing"\nfunc combine(a,b int)int{return a+b}\nfunc pair()(int,int){return 1,2}\nfunc TestCase(t *testing.T){if combine(1,2)!=3{t.Fatal("bad")}}'
     assert analyze(*setup('go',code,'combine(1,2)','combine(pair())'))['status']!='invalid'
+
+
+def test_contract_contexts_exclude_candidate_implementation_output():
+    code='''interface A {ready:false} interface B {ready:true}
+function assemble(value:A){return value}
+function producer():B{return dangerous_buggy_output()}
+function original():A{return {ready:false}}
+test('case',()=>{expect(assemble(original())).toBe(1)});
+'''
+    c,f,k=setup('typescript',code,'original()','producer()')
+    evidence=analyze(c,f,k)
+    contexts=contract_contexts(c,evidence)
+    code_text='\n'.join(row['code'] for row in contexts['contexts'])
+    assert 'function producer():B' in code_text
+    assert 'dangerous_buggy_output' not in code_text
+    assert 'ready:false' in code_text and 'ready:true' in code_text
+    assert contexts['body_code_included'] is False
+    assert contexts['complete'] is True
+    limited=contract_contexts(c,evidence,max_bytes=1)
+    assert limited['contexts']==[]
+    assert limited['complete'] is False
+    assert all(row['reason']=='contract_context_budget' for row in limited['unknowns'])

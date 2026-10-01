@@ -118,7 +118,7 @@ def test_expected_constructor_callback_is_reviewed_without_assuming_call_purity(
     code = "def compare(a, b):\n    assert subject(a) == b()\ndef test_example():\n    compare(1, lambda: build(7))\n"
     result = fixture(code, edits=[("7", "8", "input")])
     assert result["status"] == "review"
-    assert "expected_construction_edited" in codes(result)
+    assert "ambiguous_oracle_role" in codes(result)
     assert any(row["code"] == "opaque_value_call" for row in result["unknowns"])
 
 
@@ -126,7 +126,7 @@ def test_shared_actual_expected_definition_requires_review():
     code = "def test_example():\n    x = 1\n    assert x == x\n"
     result = fixture(code, edits=[("1", "2", "input")])
     assert result["status"] == "review"
-    assert codes(result) == {"shared_actual_expected_dependency_edited"}
+    assert codes(result) == {"ambiguous_oracle_role"}
 
 
 def test_input_to_opaque_actual_call_also_used_as_expected_is_not_oracle_only():
@@ -140,7 +140,7 @@ def test_opaque_expected_call_argument_does_not_inherit_proved_purity():
     code = "def test_example():\n    assert subject() == compute(7)\n"
     result = fixture(code, edits=[("7", "8", "input")])
     assert result["status"] == "review"
-    assert "expected_construction_edited" in codes(result)
+    assert "ambiguous_oracle_role" in codes(result)
 
 
 @pytest.mark.parametrize("action", ["consume(x)", "resource.update(x)"])
@@ -302,3 +302,61 @@ def test_candidate_parse_error_retains_unknown_and_source_unchanged():
     result = fixture("def test_example():\n    assert subject() == 1\n", edits=[("1", "[", "input")])
     assert result["status"] == "unknown"
     assert result["unknowns"][0]["code"] == "modified_source_parse_error"
+
+
+def test_source_variadic_failure_wrapper_traces_callback_without_assuming_operand_direction():
+    code = '''package p
+import "testing"
+type Pair struct { X int }
+func halt(z *testing.T, details ...interface{}) { trace(details); z.FailNow() }
+func compare(t *testing.T, a, b interface{}, notes ...interface{}) {
+  if a != b { halt(t, a, b, notes...) }
+}
+func run(t *testing.T, input string, f func() Pair) {
+  observed := produce(input)
+  desired := f()
+  compare(t, observed, desired)
+}
+func TestExample(t *testing.T) { run(t, "input", func() Pair { return Pair{X:7} }) }
+'''
+    result = fixture(code, "go", [("7", "8", "input")])
+    assert result["status"] == "review", result
+    assert "ambiguous_oracle_role" in codes(result)
+    assert result["guard_constraints"]
+    assert result["argument_bindings"]
+    assert any(row["basis"] == "symmetric_failure_operand_may" for row in result["roles"])
+
+
+@pytest.mark.parametrize("prefix,suffix,kind", [
+    ("if flag:\n        ", "", "if_statement"),
+    ("with expecting_error():\n        trigger()\n        ", "", "with_statement"),
+    ("try:\n        ", "\n    except ValueError:\n        pass", "try_statement"),
+])
+def test_guarded_or_exception_phase_contradiction_requires_applicability_review(prefix, suffix, kind):
+    code = "def test_example():\n    " + prefix + "assert len(subject()) == []" + suffix + "\n"
+    result = fixture(code)
+    assert result["status"] == "review"
+    row = result["assertions"][0]
+    assert any(context["kind"] == kind for context in row["guard_contexts"])
+    assert result["findings"][0]["applicability"] == "only_if_assertion_executes_normally"
+
+
+def test_caller_expected_exception_context_reaches_helper_assertion():
+    code = "def helper():\n    assert len(subject()) == []\ndef test_example():\n    with expecting_error():\n        helper()\n"
+    result = fixture(code)
+    assert result["status"] == "review"
+    path = result["assertions"][0]["call_path"]
+    assert path[0]["guard_contexts"][0]["kind"] == "with_statement"
+
+
+def test_typescript_callback_selects_literal_fixture_without_subject_return_specification():
+    code = '''import { expect, test } from "vitest";
+function run(input: string, wanted: () => object, ...notes: unknown[]) {
+  expect(produce(input)).toEqual(wanted());
+}
+test("example", () => { run("input", () => ({value: 7}), "diagnostic"); });
+'''
+    result = fixture(code, "typescript", [("7", "8", "input")])
+    assert result["status"] == "review"
+    assert "expected_only_program_edit" in codes(result)
+    assert result["argument_bindings"]

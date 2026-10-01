@@ -43,6 +43,25 @@ def frozen(path):
     return {"path": str(Path(path).resolve()), "sha256": digest(path)}
 
 
+def loaded_local_sources():
+    """Seal imported repository helpers as well as analyzer entry points."""
+    result = {}
+    for name, module in tuple(sys.modules.items()):
+        value = getattr(module, "__file__", None)
+        if not value:
+            continue
+        path = Path(value).resolve()
+        if path.suffix == ".py" and path.is_relative_to(ROOT) and path.is_file():
+            result[name] = frozen(path)
+    return result
+
+
+def verify_seal(records):
+    for record in records.values():
+        if digest(record["path"]) != record["sha256"]:
+            raise ValueError("Analyzer or imported source changed during evaluation: " + record["path"])
+
+
 def write_new(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -182,7 +201,7 @@ def combine(results):
         row["status"] == "review" for row in results) else "unknown"
 
 
-def summarize(baseline, predictions):
+def summarize(baseline, predictions, heldout_reviews=None):
     by_key = {row["key"]: row for row in predictions}
     def decision(keys):
         # A witness is retained if at least one occurrence was analyzed without
@@ -194,7 +213,7 @@ def summarize(baseline, predictions):
     strata = defaultdict(Counter)
     for row in reviewed:
         strata[row["classification"]][row["screening"]] += 1
-    return {"prediction_status_counts": dict(Counter(row["status"] for row in predictions)),
+    report = {"prediction_status_counts": dict(Counter(row["status"] for row in predictions)),
             "finding_code_counts": dict(Counter(finding.get("code", "unspecified") for row in predictions
                 for analysis in row["analyses"].values() for finding in analysis.get("findings", []))),
             "independent_positive_retention": dict(Counter(row["screening"] for row in positives)),
@@ -202,19 +221,98 @@ def summarize(baseline, predictions):
             "positive_details": positives, "review_details": reviewed,
             "strict_false_positive_total": None,
             "interpretation": "rejection is a deterministic contradiction claim; retaining unknown/review is not semantic validation; sample filtering is not full-population precision"}
+    if heldout_reviews is not None:
+        expected = set(baseline["additional_candidate_holdout"]["selected_keys"])
+        reviewed_keys = [row["key"] for row in heldout_reviews["reviews"]]
+        if len(set(reviewed_keys)) != len(reviewed_keys) or set(reviewed_keys) != expected:
+            raise ValueError("Heldout reviews must label exactly the previously frozen candidate selection")
+        rows = [{**row, "screening": decision([row["key"]])} for row in heldout_reviews["reviews"]]
+        complete, initial = defaultdict(Counter), defaultdict(Counter)
+        for row in rows:
+            complete[row["classification"]][row["screening"]] += 1
+            initial[row["initial_failure_classification"]][row["screening"]] += 1
+        report["heldout_complete_test_filtering"] = {label: dict(counts) for label, counts in complete.items()}
+        report["heldout_initial_alarm_filtering"] = {label: dict(counts) for label, counts in initial.items()}
+        report["heldout_review_details"] = rows
+        report["heldout_scope"] = baseline["additional_candidate_holdout"]["scope"]
+        report["heldout_truth_protocol"] = heldout_reviews["review_protocol"]
+    return report
 
 
 def selected_records(baseline, scope="all"):
     if scope == "all":
         return baseline["controlled_failures"]
     groups = {"positive": "positive_witnesses", "development": "development_reviews"}
-    if scope == "holdout":
+    if scope == "audited":
+        keys = {key for group in groups.values() for row in baseline[group] for key in row["occurrence_keys"]}
+        keys.update(baseline["additional_candidate_holdout"]["selected_keys"])
+    elif scope == "holdout":
         keys = set(baseline["additional_candidate_holdout"]["selected_keys"])
     elif scope in groups:
         keys = {key for row in baseline[groups[scope]] for key in row["occurrence_keys"]}
     else:
         raise ValueError("Unknown evaluation scope: " + scope)
     return [row for row in baseline["controlled_failures"] if row["key"] in keys]
+
+
+def summarize_admission(baseline, completed, prepared, heldout_reviews=None):
+    """Join independent truth to already completed model decisions, offline."""
+    frozen_keys = {row["key"] for row in selected_records(baseline, prepared["scope"])}
+    prepared_keys = [row["key"] for row in prepared["items"]]
+    decisions = completed["decisions"]
+    keys = [row["key"] for row in decisions]
+    if (len(set(prepared_keys)) != len(prepared_keys) or set(prepared_keys) - frozen_keys
+            or len(set(keys)) != len(keys) or set(keys) != set(prepared_keys)):
+        raise ValueError("Admission decisions must match the frozen prepared evaluation candidates")
+    by_key, status_counts = {}, Counter()
+    for row in decisions:
+        decision = row["decision"]
+        status = decision["status"]
+        status_counts[status] += 1
+        if decision.get("alarm_eligible"):
+            if status != "semantic_supported":
+                raise ValueError("Only a semantic-supported hypothesis may request an alarm")
+            value = "admitted_model_hypothesis"
+        elif status in {"semantic_rejected", "static_invalid"}:
+            value = "rejected"
+        elif status.startswith("unknown"):
+            value = "not_admitted_unknown"
+        else:
+            raise ValueError("Unexpected completed admission status: " + status)
+        by_key[row["key"]] = value
+    def verdict(keys):
+        observed = [by_key[key] for key in keys if key in by_key]
+        if not observed:
+            return "not_analyzed"
+        if "admitted_model_hypothesis" in observed:
+            return "admitted_model_hypothesis"
+        return "not_admitted_unknown" if "not_admitted_unknown" in observed else "rejected"
+    positives = [{**row, "admission": verdict(row["occurrence_keys"])} for row in baseline["positive_witnesses"]]
+    reviewed = [{**row, "admission": verdict(row["occurrence_keys"])} for row in baseline["development_reviews"]]
+    def strata(rows, field):
+        result = defaultdict(Counter)
+        for row in rows:
+            result[row[field]][row["admission"]] += 1
+        return {label: dict(counts) for label, counts in result.items()}
+    report = {"status_counts": dict(status_counts),
+              "independent_positive_admission": dict(Counter(row["admission"] for row in positives)),
+              "development_complete_test_admission": strata(reviewed, "classification"),
+              "development_initial_alarm_admission": strata(reviewed, "initial_failure_classification"),
+              "positive_details": positives, "review_details": reviewed,
+              "measured_provider_calls": completed["provider_calls"],
+              "accounted_tokens": completed["accounted_tokens"], "usage_missing": completed["usage_missing"],
+              "interpretation": "semantic support is a model hypothesis; validity comes only from independent labels; unknown suppression is not successful rejection; no population precision or resolution claim"}
+    if heldout_reviews is not None:
+        expected = set(baseline["additional_candidate_holdout"]["selected_keys"])
+        reviewed_keys = [row["key"] for row in heldout_reviews["reviews"]]
+        if len(set(reviewed_keys)) != len(reviewed_keys) or set(reviewed_keys) != expected:
+            raise ValueError("Heldout reviews must label exactly the previously frozen candidate selection")
+        rows = [{**row, "admission": verdict([row["key"]])} for row in heldout_reviews["reviews"]]
+        report["heldout_complete_test_admission"] = strata(rows, "classification")
+        report["heldout_initial_alarm_admission"] = strata(rows, "initial_failure_classification")
+        report["heldout_review_details"] = rows
+        report["heldout_scope"] = baseline["additional_candidate_holdout"]["scope"]
+    return report
 
 
 def programs_for_record(row):
@@ -258,7 +356,11 @@ def programs_for_record(row):
 
 def evaluate(baseline, module_names, *, scope="all", progress=None):
     modules = {name: importlib.import_module(name) for name in module_names}
+    # extract_frontend imports this repository helper lazily. Preload its source
+    # before the seal instead of accepting unsealed code after the first call.
+    importlib.import_module("relational_gap.balanced_reachability")
     module_identity = {name: frozen(module.__file__) for name, module in modules.items()}
+    source_modules = loaded_local_sources()
     cache, predictions = {}, []
     records = selected_records(baseline, scope)
     previous_round = None
@@ -286,11 +388,14 @@ def evaluate(baseline, module_names, *, scope="all", progress=None):
             timings[name] = time.perf_counter() - started
         predictions.append({"key": row["key"], "status": combine(list(results.values())), "analyses": results,
                             "analysis_seconds": timings})
-    for record in module_identity.values():
-        if digest(record["path"]) != record["sha256"]:
-            raise ValueError("Analyzer source changed during evaluation: " + record["path"])
+    verify_seal(module_identity)
+    verify_seal(source_modules)
+    newly_imported = set(loaded_local_sources()) - set(source_modules)
+    if newly_imported:
+        raise ValueError("Source helper imported after the seal; preload it before evaluation: " +
+                         ", ".join(sorted(newly_imported)))
     return {"version": VERSION, "scope": scope,
-            "modules": module_identity,
+            "modules": module_identity, "imported_source_modules": source_modules,
             "analysis_seconds": {name: sum(row["analysis_seconds"][name] for row in predictions) for name in modules},
             "predictions": predictions, "summary": summarize(baseline, predictions),
             "provider_calls": 0, "subject_executions": 0, "truth_joined_only_after_analysis": True}
@@ -307,24 +412,61 @@ def main():
     check = commands.add_parser("evaluate")
     check.add_argument("--baseline", type=Path, required=True)
     check.add_argument("--modules", nargs="+", default=["relation_search.test_roles", "relation_search.test_preconditions"])
-    check.add_argument("--scope", choices=["all", "positive", "development", "holdout"], default="all")
+    check.add_argument("--scope", choices=["all", "audited", "positive", "development", "holdout"], default="all")
     check.add_argument("--output", type=Path, required=True)
     programs = commands.add_parser("programs")
     programs.add_argument("--baseline", type=Path, required=True)
-    programs.add_argument("--scope", choices=["all", "positive", "development", "holdout"], default="holdout")
+    programs.add_argument("--scope", choices=["all", "audited", "positive", "development", "holdout"], default="holdout")
     programs.add_argument("--output", type=Path, required=True)
+    report = commands.add_parser("report")
+    report.add_argument("--baseline", type=Path, required=True)
+    report.add_argument("--predictions", type=Path, required=True)
+    report.add_argument("--heldout-reviews", type=Path)
+    report.add_argument("--output", type=Path, required=True)
+    admission_report = commands.add_parser("admission-report")
+    admission_report.add_argument("--baseline", type=Path, required=True)
+    admission_report.add_argument("--run", type=Path, required=True)
+    admission_report.add_argument("--heldout-reviews", type=Path)
+    admission_report.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "inventory":
         result = inventory(args.campaign, args.evaluation, args.heldout_per_case)
     elif args.command == "programs":
         result = {"version": VERSION, "baseline": frozen(args.baseline), "scope": args.scope,
                   "records": [programs_for_record(row) for row in selected_records(read(args.baseline), args.scope)]}
+    elif args.command == "report":
+        saved = read(args.predictions)
+        result = {"version": VERSION, "baseline": frozen(args.baseline),
+                  "predictions": frozen(args.predictions), "modules": saved["modules"],
+                  "summary": summarize(read(args.baseline), saved["predictions"],
+                      read(args.heldout_reviews) if args.heldout_reviews else None),
+                  "provider_calls": 0, "subject_executions": 0,
+                  "truth_joined_only_after_analysis": True}
+        if "imported_source_modules" in saved:
+            result["imported_source_modules"] = saved["imported_source_modules"]
+        if args.heldout_reviews:
+            result["heldout_reviews"] = frozen(args.heldout_reviews)
+    elif args.command == "admission-report":
+        prepared_path, completed_path = args.run / "prepared.json", args.run / "summary.json"
+        prepared, completed = read(prepared_path), read(completed_path)
+        if prepared["baseline"]["sha256"] != digest(args.baseline):
+            raise ValueError("Admission run refers to a different baseline")
+        if completed["prepared"]["sha256"] != digest(prepared_path):
+            raise ValueError("Completed admission refers to changed prepared questions")
+        result = {"version": VERSION, "baseline": frozen(args.baseline),
+                  "prepared": frozen(prepared_path), "completed": frozen(completed_path),
+                  "summary": summarize_admission(read(args.baseline), completed, prepared,
+                      read(args.heldout_reviews) if args.heldout_reviews else None),
+                  "provider_calls_by_evaluator": 0, "subject_executions_by_evaluator": 0,
+                  "truth_joined_only_after_decisions": True}
+        if args.heldout_reviews:
+            result["heldout_reviews"] = frozen(args.heldout_reviews)
     else:
         result = evaluate(read(args.baseline), args.modules, scope=args.scope,
                           progress=lambda row: print(json.dumps(row, ensure_ascii=False), flush=True))
     write_new(args.output, result)
     printable = result.get("counts", {key: value for key, value in result.get("summary", {}).items()
-                                     if key not in {"positive_details", "review_details"}})
+                                     if key not in {"positive_details", "review_details", "heldout_review_details"}})
     print(json.dumps(printable, ensure_ascii=False))
 
 

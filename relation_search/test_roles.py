@@ -26,16 +26,20 @@ from anchor_retrieval.syntax import (
 )
 from generic_composition.corpus import ASSIGNMENTS, _assertion_nodes, span
 from relation_search.oracle_evidence import _modified_sources
+from relation_search.test_role_summaries import (
+    bind_fixed_prefix, failure_guard_constraints, summarize_failure_wrappers,
+)
 from relational_gap.frontend import _parameters
 
 
-VERSION = "test_value_roles.v2"
+VERSION = "test_value_roles.v3"
 NESTED = FUNCTIONS | {"arrow_function", "function_expression", "func_literal", "lambda"}
 TRUSTED = {"local_symbol", "package_symbol", "import_symbol"}
 WRAPPERS = {"parenthesized_expression", "expression_list", "type_assertion", "as_expression"}
 CONTAINERS = {"list", "tuple", "set", "dictionary", "array", "object", "composite_literal", "literal_value"}
 EQUALITY = {"==", "===", "Equal", "Same", "toBe", "toEqual", "toStrictEqual", "strictEqual", "deepEqual", "deepStrictEqual", "assertEqual"}
 CONTROL = {"if_statement", "for_statement", "for_in_statement", "while_statement", "try_statement", "with_statement", "switch_statement", "expression_switch_statement", "case_statement", "conditional_expression", "ternary_expression"}
+GUARD_CONTEXTS = CONTROL | {"type_switch_statement", "type_case", "select_statement", "communication_case", "expression_case", "default_case", "except_clause", "catch_clause", "finally_clause", "else_clause", "elif_clause", "for_clause"}
 
 
 def _inside(inner, outer):
@@ -57,6 +61,21 @@ def _unwrap(node):
     while node is not None and node.type in WRAPPERS and len(node.named_children) == 1:
         node = node.named_children[0]
     return node
+
+
+def _guard_contexts(source, node, boundary):
+    """Retain conditions and exceptional phases without assuming execution."""
+    result = []
+    current = node.parent
+    while current is not None and current != boundary:
+        if current.type in GUARD_CONTEXTS | NESTED:
+            branch = next((current.field_name_for_child(index) or part.type for index, part in enumerate(current.children) if part.start_byte <= node.start_byte and node.end_byte <= part.end_byte), None)
+            condition = child(current, "condition")
+            body = child(current, "body", "consequence")
+            header = source.data[current.start_byte:body.start_byte].decode() if body is not None else None
+            result.append({"kind": current.type, "span": span(source, current), "branch": branch, "condition_span": span(source, condition) if condition is not None else None, "condition_text": source.text(condition) if condition is not None else None, "header": header, "execution_precision": "lexical_context_not_proved_executed"})
+        current = current.parent
+    return list(reversed(result))
 
 
 @dataclass
@@ -86,6 +105,10 @@ class _Analysis:
         self.contexts = 0
         self.node_maps = {}
         self.module_conflicts = {}
+        self.failure_wrappers = summarize_failure_wrappers(self.index)
+        self.assertion_records = []
+        self.guard_constraints = []
+        self.binding_records = []
 
     def nodes(self, source):
         if source.path not in self.node_maps:
@@ -108,6 +131,8 @@ class _Analysis:
     def role(self, ref, role, basis, path):
         if any(step["kind"] == "opaque_argument_may_use" for step in path):
             basis = "opaque_argument_may_use"
+        if any(step["kind"] == "symmetric_failure_operand_may" for step in path):
+            basis = "symmetric_failure_operand_may"
         self.roles.append({"role": role, "span": span(ref.context.unit.source, ref.node), "basis": basis, "provenance": path})
 
     def definition(self, ref):
@@ -174,33 +199,15 @@ class _Analysis:
         return ref
 
     def bind(self, unit, args, context, call):
-        rows = _parameters(unit)
-        if any(row["variadic"] or row["name"] is None for row in rows) or any(arg.type in {"list_splat", "dictionary_splat", "spread_element", "variadic_argument"} for arg in args):
-            self.unknown("dynamic_argument_binding", context, call)
+        bindings = bind_fixed_prefix(unit, args, context.unit.source)
+        if bindings["status"] == "unknown":
+            self.unknown(bindings["reason"], context, call)
             return None
-        bound, position = {}, 0
-        for argument in args:
-            if argument.type == "keyword_argument":
-                name = context.unit.source.text(child(argument, "name"))
-                value = child(argument, "value")
-            else:
-                positional = [row for row in rows if not row["keyword_only"]]
-                if position >= len(positional):
-                    return None
-                name, value = positional[position]["name"], argument
-                position += 1
-            if name not in {row["name"] for row in rows} or name in bound or value is None:
-                return None
-            bound[name] = _Ref(value, context)
-        for row in rows:
-            if row["name"] not in bound:
-                if row["default"] is None:
-                    return None
-                default = next((node for node in walk(unit.node) if node.start_byte == row["default"]["span"]["start_byte"] and node.end_byte == row["default"]["span"]["end_byte"]), None)
-                if default is None:
-                    return None
-                bound[row["name"]] = _Ref(default, _Context(unit))
-        return _Context(unit, bound, context.path + (span(context.unit.source, call),))
+        bound = {row["parameter"]: _Ref(row["value_node"], context if row["origin"] == "caller" else _Context(unit)) for row in bindings["bindings"]}
+        site = {"call_span": span(context.unit.source, call), "caller_unit": context.unit.id, "guard_contexts": _guard_contexts(context.unit.source, call, context.unit.body)}
+        if bindings["status"] == "fixed_prefix":
+            self.binding_records.append({"call_span": span(context.unit.source, call), "callee_id": unit.id, "status": "fixed_prefix_variadic_tail_uninterpreted", "fixed_bindings": [{key: value for key, value in row.items() if key != "value_node"} for row in bindings["bindings"]], "variadic_tail": bindings["variadic_tail"]})
+        return _Context(unit, bound, context.path + (site,))
 
     def callee(self, ref):
         node, context = ref.node, ref.context
@@ -376,7 +383,9 @@ class _Analysis:
             return
         if context.unit.source.language == "typescript" and predicate in {"deepEqual"}:
             return
-        self.findings.append({"code": "equality_type_contradiction", "severity": "invalid", "span": span(context.unit.source, statement), "predicate": predicate, "actual_type": left["type"], "expected_type": right["type"], "provenance": left["provenance"] + right["provenance"], "edit_ids": []})
+        guards = _guard_contexts(context.unit.source, statement, context.unit.body)
+        guarded = bool(guards) or any(site.get("guard_contexts") for site in context.path)
+        self.findings.append({"code": "equality_type_contradiction", "severity": "review" if guarded else "invalid", "span": span(context.unit.source, statement), "predicate": predicate, "actual_type": left["type"], "expected_type": right["type"], "provenance": left["provenance"] + right["provenance"], "edit_ids": [], "guard_contexts": guards, "call_path": list(context.path), "applicability": "only_if_assertion_executes_normally"})
 
     def imported_assertions(self, context):
         """Primitive assertion positions follow imported identity, not alias.
@@ -416,6 +425,51 @@ class _Analysis:
                     negated = any(part.type == "member_expression" and source.text(child(part, "property")) == "not" for part in walk(fn))
                     yield node, values[0], args[0], "not:" + method if negated else method
 
+    def closed_operand(self, ref):
+        """Orient a symmetric comparison only from a closed test value.
+
+        Production return bodies do not orient an oracle. A literal anonymous
+        callback with a single closed return is a test value construction,
+        however, and can be followed without treating subject behavior as a
+        specification. Effectful/conditional callbacks remain unoriented.
+        """
+        resolved = self.resolve_ref(ref)
+        if self.closed(resolved.node):
+            return True
+        if resolved.node.type not in CALLS:
+            return False
+        callee = self.callee(resolved)
+        if callee is None or callee.unit.node.type not in {"lambda", "arrow_function", "function_expression", "func_literal"}:
+            return False
+        body = callee.unit.body
+        if body.type in {"block", "statement_block", "statement_list"}:
+            statements = [part for part in body.named_children if part.type != "comment"]
+            if len(statements) == 1 and statements[0].type == "statement_list":
+                statements = [part for part in statements[0].named_children if part.type != "comment"]
+            if len(statements) != 1 or statements[0].type != "return_statement":
+                return False
+        returns = self.returns(callee)
+        return len(returns) == 1 and self.closed(self.resolve_ref(_Ref(returns[0], callee)).node)
+
+    def trace_pair(self, context, operands, path, *, directed):
+        if directed:
+            actual, expected = operands
+            if actual is not None:
+                self.trace(_Ref(actual, context), "actual", path)
+            if expected is not None:
+                self.trace(_Ref(expected, context), "expected", path)
+            return "framework_argument_direction"
+        closed = [self.closed_operand(_Ref(node, context)) for node in operands]
+        if len(operands) == 2 and closed.count(True) == 1:
+            for node, is_closed in zip(operands, closed):
+                self.trace(_Ref(node, context), "expected" if is_closed else "actual", path)
+            return "one_closed_operand_direction"
+        symmetric = path + [{"kind": "symmetric_failure_operand_may", "basis": "no_source_proved_oracle_direction"}]
+        for node in operands:
+            self.trace(_Ref(node, context), "actual", symmetric)
+            self.trace(_Ref(node, context), "expected", symmetric)
+        return "symmetric_operands_both_may_roles"
+
     def visit(self, context, depth=0, ancestry=()):
         key = context.unit.id
         if depth > self.max_depth or self.contexts >= self.max_contexts or key in ancestry:
@@ -423,22 +477,29 @@ class _Analysis:
             return
         self.contexts += 1
         flow = self.index.flow(context.unit.id) if context.unit.id in self.index.units else None
-        assertions = list(self.imported_assertions(context))
+        assertions = [(*row, True) for row in self.imported_assertions(context)]
         if flow is not None:
             for assertion in flow.assertions:
                 statement, actual, expected, predicate = _assertion_nodes(context.unit.source, assertion, context.unit)
                 if not self.assertion_supported(context, statement, assertion):
                     continue
                 if not any(row[0].start_byte == statement.start_byte and row[0].end_byte == statement.end_byte for row in assertions):
-                    assertions.append((statement, actual, expected, predicate))
-        for statement, actual, expected, predicate in assertions:
+                    directed = assertion.assertion_adapter == "node_assert_import" or context.unit.source.language == "typescript"
+                    assertions.append((statement, actual, expected, predicate, directed))
+        for statement, actual, expected, predicate, directed in assertions:
             self.assertions.append(span(context.unit.source, statement))
-            path = [{"kind": "assertion_boundary", "span": span(context.unit.source, statement), "call_path": list(context.path)}]
-            if actual is not None:
-                self.trace(_Ref(actual, context), "actual", path)
-            if expected is not None:
-                self.trace(_Ref(expected, context), "expected", path)
+            guards = _guard_contexts(context.unit.source, statement, context.unit.body)
+            path = [{"kind": "assertion_boundary", "span": span(context.unit.source, statement), "call_path": list(context.path), "guard_contexts": guards}]
+            precision = self.trace_pair(context, [actual, expected], path, directed=True) if expected is None or directed else self.trace_pair(context, [actual, expected], path, directed=False)
+            self.assertion_records.append({"span": span(context.unit.source, statement), "predicate": predicate, "actual_span": span(context.unit.source, actual) if actual is not None else None, "expected_span": span(context.unit.source, expected) if expected is not None else None, "role_precision": precision, "guard_contexts": guards, "call_path": list(context.path), "execution_precision": "lexical_assertion_not_proved_executed"})
             self.contradiction(context, statement, actual, expected, predicate)
+        for constraint in failure_guard_constraints(self.index, context.unit, self.failure_wrappers):
+            if any(row["start_byte"] == constraint["statement_span"]["start_byte"] and row["end_byte"] == constraint["statement_span"]["end_byte"] and row["path"] == constraint["statement_span"]["path"] for row in self.assertions):
+                continue
+            guards = _guard_contexts(context.unit.source, constraint["guard_node"], context.unit.body)
+            path = [{"kind": "source_failure_guard", "span": constraint["statement_span"], "call_path": list(context.path), "guard_contexts": guards, "failure_proof": constraint["sink"]}]
+            precision = self.trace_pair(context, constraint["operand_nodes"], path, directed=False)
+            self.guard_constraints.append({key: value for key, value in constraint.items() if key not in {"guard_node", "operand_nodes"}} | {"role_precision": precision, "guard_contexts": guards, "call_path": list(context.path)})
         for node in _owned(context.unit.body):
             if node.type in CALLS:
                 callee = self.callee(_Ref(node, context))
@@ -471,7 +532,8 @@ class _Analysis:
                 closed = expected_only and not escapes and any(role["basis"] != "opaque_argument_may_use" and self.closed(nodes[(role["span"]["start_byte"], role["span"]["end_byte"])]) for role in expected if (role["span"]["start_byte"], role["span"]["end_byte"]) in nodes)
                 self.findings.append({"code": "expected_only_program_edit" if closed else "expected_construction_edited", "severity": "review", "span": change["span"], "edit_ids": [change["id"]], "provenance": expected})
             elif expected and actual:
-                self.findings.append({"code": "shared_actual_expected_dependency_edited", "severity": "review", "span": change["span"], "edit_ids": [change["id"]], "provenance": matching})
+                code = "ambiguous_oracle_role" if any(role["basis"] == "symmetric_failure_operand_may" for role in matching) else "shared_actual_expected_dependency_edited"
+                self.findings.append({"code": code, "severity": "review", "span": change["span"], "edit_ids": [change["id"]], "provenance": matching})
 
     def expected_values_escape(self):
         """A value used as expected may also be an input to an earlier action.
@@ -557,7 +619,7 @@ def analyze(corpus, frontend, candidate, *, max_depth=8, max_contexts=160):
         analysis.root = roots[0]
         analysis.visit(_Context(roots[0]))
         analysis.expected_edits()
-        result.update(roles=_dedup(analysis.roles), findings=_dedup(analysis.findings), unknowns=_dedup(analysis.unknowns + unknowns), changes=changes, assertion_count=len(analysis.assertions), contexts=analysis.contexts)
+        result.update(roles=_dedup(analysis.roles), findings=_dedup(analysis.findings), unknowns=_dedup(analysis.unknowns + unknowns), changes=changes, assertion_count=len(analysis.assertions), contexts=analysis.contexts, assertions=_dedup(analysis.assertion_records), guard_constraints=_dedup(analysis.guard_constraints), argument_bindings=_dedup(analysis.binding_records))
         result["status"] = "invalid" if any(row["severity"] == "invalid" for row in result["findings"]) else "review" if result["findings"] else "unknown"
     except (KeyError, ValueError, TypeError, AttributeError, RecursionError) as error:
         result["unknowns"] = [{"code": "source_role_analysis_unavailable", "detail": str(error)}]

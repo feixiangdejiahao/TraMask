@@ -8,6 +8,7 @@ are checked by their declarations, irrespective of API or property spelling.
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import posixpath
 import textwrap
@@ -396,3 +397,64 @@ def analyze(corpus, frontend, candidate):
         findings.append(dict(code=record['reason'], severity='review', evidence=record))
     status = 'invalid' if any(f.get('severity') == 'invalid' for f in findings) else 'review' if findings else 'unknown'
     return dict(version=VERSION, status=status, findings=findings, changes=changes, limits=LIMITS)
+
+
+def contract_contexts(corpus, analysis, *, max_contexts=12, max_bytes=12000):
+    """Render exact declaration headers/property contracts, excluding bodies.
+
+    This supplies compact source facts for an issue-grounded semantic question.
+    A declared contract can be wrong. Nothing here treats candidate behavior as
+    the expected output. Budget limits are explicit; snippets are never cut.
+    """
+    if type(max_contexts) is not int or type(max_bytes) is not int or min(max_contexts,max_bytes) < 0:
+        raise ValueError('contract context limits must be nonnegative integers')
+    sources, node_maps, requested = {}, {}, []
+    for finding in analysis.get('findings',[]):
+        evidence = finding.get('evidence')
+        rows = evidence if isinstance(evidence,list) else [evidence] if isinstance(evidence,dict) else []
+        for row in rows:
+            for role in ['declaration','caller_declaration','producer_declaration','required_declaration','returned_declaration']:
+                if isinstance(row.get(role),dict) and 'path' in row[role]:
+                    requested.append((role,row[role]))
+    contexts, seen, used, missing = [],set(),0,[]
+    for role,span in requested:
+        path = span['path']
+        if path not in corpus['sources']:
+            missing.append(dict(role=role,span=span,reason='contract_source_missing'))
+            continue
+        if path not in sources:
+            row = corpus['sources'][path]
+            source = Source(path,row['code'],row.get('language',corpus['language']))
+            sources[path] = source
+            node_maps[path] = {(n.start_byte,n.end_byte):n for n in walk(source.root)}
+        source = sources[path]
+        node = node_maps[path].get((span['start_byte'],span['end_byte']))
+        if node is None:
+            missing.append(dict(role=role,span=span,reason='contract_span_not_recovered'))
+            continue
+        body = child(node,'body')
+        end = body.start_byte if body is not None else node.end_byte
+        snippets = [(role,dict(path=path,start_byte=node.start_byte,end_byte=end))]
+        if node.type == 'property_signature':
+            parent = node.parent
+            while parent is not None and parent.type not in {'interface_declaration','type_alias_declaration'}:
+                parent = parent.parent
+            if parent is not None:
+                body = child(parent,'body','value')
+                if body is not None:
+                    snippets.insert(0,('enclosing_type_header',dict(path=path,start_byte=parent.start_byte,end_byte=body.start_byte)))
+        for snippet_role,location in snippets:
+            key = snippet_role,path,location['start_byte'],location['end_byte']
+            if key in seen:
+                continue
+            seen.add(key)
+            code = source.data[location['start_byte']:location['end_byte']].decode()
+            if len(contexts) >= max_contexts or used+len(code.encode()) > max_bytes:
+                missing.append(dict(role=snippet_role,span=location,reason='contract_context_budget'))
+                continue
+            used += len(code.encode())
+            contexts.append(dict(role=snippet_role,span=location,code=code,
+                                 source_sha256=hashlib.sha256(source.data).hexdigest(),
+                                 interpretation='declared_candidate_contract_not_expected_output'))
+    return dict(contexts=contexts,unknowns=missing,complete=not missing,
+                bytes=used,body_code_included=False)

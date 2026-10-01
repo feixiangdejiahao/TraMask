@@ -1,9 +1,23 @@
 """Evaluation accounting must not turn unknown candidates into valid alarms."""
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 
 from scripts import evaluate_test_validity as audit
+
+
+def test_imported_helper_seal_detects_changes_not_just_entry_modules(tmp_path, monkeypatch):
+    path = tmp_path / "helper.py"
+    path.write_text("value = 1\n")
+    monkeypatch.setattr(audit, "ROOT", tmp_path)
+    monkeypatch.setitem(audit.sys.modules, "validity_evaluation_fixture", SimpleNamespace(__file__=str(path)))
+    sources = audit.loaded_local_sources()
+    assert sources["validity_evaluation_fixture"] == audit.frozen(path)
+    audit.verify_seal(sources)
+    path.write_text("value = 2\n")
+    with pytest.raises(ValueError, match="imported source changed"):
+        audit.verify_seal(sources)
 
 
 def test_named_failure_requires_every_selected_name_and_only_native_outcomes(tmp_path, monkeypatch):
@@ -75,6 +89,53 @@ def test_incorrect_rejection_of_positive_is_reported():
     assert report["independent_positive_retention"] == {"rejected": 1}
 
 
+def test_heldout_initial_alarm_and_complete_oracle_are_reported_separately():
+    value = baseline()
+    value["additional_candidate_holdout"] = dict(selected_keys=["h"], scope="candidate holdout")
+    reviews = dict(review_protocol="full test", reviews=[dict(key="h",
+        classification="invalid_oracle_or_setup",
+        initial_failure_classification="mixed_valid_early_signal_invalid_complete_oracle")])
+    report = audit.summarize(value, [prediction("h", "review")], reviews)
+    assert report["heldout_complete_test_filtering"]["invalid_oracle_or_setup"] == {"retained_unknown_or_review": 1}
+    assert report["heldout_initial_alarm_filtering"]["mixed_valid_early_signal_invalid_complete_oracle"] == {"retained_unknown_or_review": 1}
+    assert report["strict_false_positive_total"] is None
+
+
+@pytest.mark.parametrize("keys", [["different"], ["h", "h"], []])
+def test_posthoc_labels_cannot_change_or_duplicate_frozen_holdout(keys):
+    value = baseline()
+    value["additional_candidate_holdout"] = dict(selected_keys=["h"], scope="candidate holdout")
+    reviews = dict(review_protocol="full test", reviews=[dict(key=key) for key in keys])
+    with pytest.raises(ValueError, match="exactly the previously frozen"):
+        audit.summarize(value, [], reviews)
+
+
+def test_model_support_is_hypothesis_and_unknown_suppression_is_separate():
+    value = baseline()
+    value["controlled_failures"] = [dict(key="p"), dict(key="n")]
+    prepared = dict(scope="all", items=[dict(key="p"), dict(key="n")])
+    completed = dict(provider_calls=2, accounted_tokens=100, usage_missing=0, decisions=[
+        dict(key="p", decision=dict(status="semantic_supported", alarm_eligible=True)),
+        dict(key="n", decision=dict(status="unknown", alarm_eligible=False))])
+    report = audit.summarize_admission(value, completed, prepared)
+    assert report["independent_positive_admission"] == {"admitted_model_hypothesis": 1}
+    assert report["development_complete_test_admission"] == {"invalid_oracle_or_setup": {"not_admitted_unknown": 1}}
+    assert "model hypothesis" in report["interpretation"]
+
+
+def test_semantic_report_rejects_unprepared_decisions_and_invalid_alarm_flags():
+    value = baseline()
+    value["controlled_failures"] = [dict(key="p")]
+    prepared = dict(scope="all", items=[dict(key="p")])
+    completed = dict(provider_calls=0, accounted_tokens=0, usage_missing=0, decisions=[
+        dict(key="p", decision=dict(status="static_invalid", alarm_eligible=True))])
+    with pytest.raises(ValueError, match="Only a semantic-supported"):
+        audit.summarize_admission(value, completed, prepared)
+    completed["decisions"][0]["key"] = "unprepared"
+    with pytest.raises(ValueError, match="frozen prepared"):
+        audit.summarize_admission(value, completed, prepared)
+
+
 def test_scoped_analysis_never_expands_holdout_from_predictions():
     value = baseline()
     value["controlled_failures"] = [dict(key="p"), dict(key="n"), dict(key="h")]
@@ -82,6 +143,7 @@ def test_scoped_analysis_never_expands_holdout_from_predictions():
     assert audit.selected_records(value, "positive") == [dict(key="p")]
     assert audit.selected_records(value, "development") == [dict(key="n")]
     assert audit.selected_records(value, "holdout") == [dict(key="h")]
+    assert audit.selected_records(value, "audited") == value["controlled_failures"]
     with pytest.raises(ValueError, match="Unknown evaluation scope"):
         audit.selected_records(value, "easiest")
 
