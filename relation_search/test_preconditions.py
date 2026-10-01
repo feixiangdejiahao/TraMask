@@ -10,16 +10,16 @@ from __future__ import annotations
 import ast
 import inspect
 import posixpath
-import re
 import textwrap
 
 from anchor_retrieval.index import Index
-from anchor_retrieval.syntax import CALLS, FUNCTIONS, Source, child, literal, units, walk
+from anchor_retrieval.graph import _locally_rebound
+from anchor_retrieval.syntax import CALLS, FUNCTIONS, Source, child, is_test_path, literal, units, walk
 from relational_gap.frontend import extract_frontend
 from relation_search.oracle_evidence import _modified_sources, _overlap, _resolved_targets
 
 
-VERSION = 'test_preconditions.v1'
+VERSION = 'test_preconditions.v2'
 LIMITS = ['Partial source contracts, not a proof that a test is valid.',
           'Dynamic dispatch, spread values, heap/resource setup and embedded languages remain unknown.',
           'Literal structural constraints only; no general TypeScript subtype solver.']
@@ -38,12 +38,16 @@ def _handled(call, current):
     if any(q.get('observation_type') == 'exception' and _contained(call['span'], q['span'])
            for q in current['observations']):
         return True
-    return any(c.get('kind') in {'try_statement', 'catch_clause', 'except_clause'}
+    return any(c.get('kind') in {'try_statement', 'catch_clause', 'except_clause',
+                               'arrow_function', 'function_expression', 'lambda', 'func_literal',
+                               'function_definition', 'function_declaration'}
                for c in call.get('contexts', []))
 
 
 def _python_arity(source, declaration, call):
     try:
+        if declaration.parent is not None and declaration.parent.type == 'decorated_definition':
+            return None, 'decorated_signature'
         function = ast.parse(textwrap.dedent(source.text(declaration))).body[0]
         # Decorators may replace the callable and thereby replace its signature.
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) or function.decorator_list:
@@ -114,7 +118,7 @@ def _arity(source, declaration, call):
         # JavaScript may intentionally accept extra arguments; only missing
         # declared required inputs are an applicability counterexample here.
         maximum = None
-    if source.language == 'go' and count == 1 and call['arguments'][0].get('node_type') in CALLS and minimum > count:
+    if source.language == 'go' and count == 1 and call['arguments'][0].get('kind') in CALLS and minimum > count:
         return None, 'possible_go_multi_value_argument'
     okay = count >= minimum and (maximum is None or count <= maximum)
     return okay, None if okay else dict(required_minimum=minimum, accepted_maximum=maximum, actual=count)
@@ -239,36 +243,6 @@ def _literal_properties(sources, source, node, declaration, resolution, seen=Non
     return result
 
 
-def _return_properties(source, declaration):
-    """Literal fields common to every direct returned object; no execution."""
-    returns = [n for n in walk(child(declaration, 'body'), stop_functions=True) if n.type == 'return_statement']
-    if not returns:
-        return {}
-    common = None
-    for returned in returns:
-        value = next(iter(returned.named_children), None)
-        if value is None or value.type != 'object':
-            return {}
-        props = {}
-        for pair in value.named_children:
-            if pair.type != 'pair':
-                # A spread can overwrite a previous literal field.
-                if pair.type == 'spread_element':
-                    props.clear()
-                continue
-            name, expression = child(pair, 'key'), child(pair, 'value')
-            if name is None or name.type not in {'property_identifier', 'string'}:
-                continue
-            field = source.text(name).strip('"\'')
-            props.pop(field, None)
-            try:
-                props[field] = (literal(source.text(expression)), _span(source, pair))
-            except ValueError:
-                pass
-        common = props if common is None else {k:v for k,v in common.items() if k in props and v[0] == props[k][0]}
-    return common or {}
-
-
 def _signatures(source, declaration):
     # Overloads establish caller contracts, while the implementation signature
     # often uses a wider rest tuple. Do not confuse the two.
@@ -284,16 +258,36 @@ def _signatures(source, declaration):
     return overloads or [declaration]
 
 
-def _node_map(source):
-    return {(n.start_byte, n.end_byte): n for n in walk(source.root)}
+def _rebound_symbol(unit, caller, callee):
+    """An explicit assignment invalidates a source declaration's call binding."""
+    name = callee.split('.')[0]
+    if not name.isidentifier():
+        return False
+    if caller is not None and (name in caller.params or _locally_rebound(caller, name)):
+        return True
+    def owned(node):
+        yield node
+        for part in node.named_children:
+            if part.type not in FUNCTIONS | {'arrow_function', 'function_expression', 'lambda', 'func_literal', 'class_definition', 'class_declaration'}:
+                yield from owned(part)
+    for source in [unit.source, *([caller.source] if caller is not None and caller.source.path != unit.source.path else [])]:
+        for item in owned(source.root):
+            if item.type in {'assignment', 'augmented_assignment', 'assignment_expression',
+                             'variable_declarator', 'var_spec', 'const_spec', 'assignment_statement'}:
+                target = child(item, 'left', 'name')
+                if target is not None and any(source.text(n) == name for n in walk(target)
+                                               if n.type == 'identifier'):
+                    return True
+    return False
 
 
 def analyze(corpus, frontend, candidate):
     """Return deterministic applicability counterexamples/review obligations.
 
-    ``invalid`` requires a source-proved call contradiction outside an existing
-    error observation. ``review`` and ``unknown`` must remain in the search;
-    neither constitutes permission to report a defect.
+    ``invalid`` requires a fixed test-helper language-level contradiction outside
+    an existing error observation. Production declarations may themselves be
+    buggy, so their mismatches are review obligations. ``review`` and ``unknown``
+    must remain in the search; neither permits reporting a defect.
     """
     findings = []
     try:
@@ -316,7 +310,6 @@ def analyze(corpus, frontend, candidate):
         for method in (Index.module_paths, Index.reach, Index.field_factors):
             method.cache_clear()
     functions = {f['id']:f for f in current['functions']}
-    nodes = {owner.path:_node_map(owner)}
     calls = {(c['span']['path'], c['span']['start_byte'], c['span']['end_byte']):c for c in current['calls']}
     all_units = {}
     for source in sources:
@@ -331,6 +324,11 @@ def analyze(corpus, frontend, candidate):
             findings.append(dict(code='edited_call_contract_unresolved', severity='review', span=call['span'], callee=call['callee']))
             continue
         unit = all_units[targets[0]['function_id']]
+        caller = all_units.get(call['test_id'])
+        if _rebound_symbol(unit, caller, call['callee']):
+            findings.append(dict(code='explicit_callable_rebinding', severity='review',
+                                 span=call['span'], callee=call['callee']))
+            continue
         declared = _signatures(unit.source, unit.node) if owner.language == 'typescript' else [unit.node]
         valid_signatures, unknown_signatures, arity_errors = [], [], []
         for declaration in declared:
@@ -341,11 +339,16 @@ def analyze(corpus, frontend, candidate):
                 unknown_signatures.append(declaration)
             else:
                 arity_errors.append(reason)
-        severity = 'review' if _handled(call, current) else 'invalid'
+        handled = _handled(call, current)
+        # Python/Go fixed test-helper signatures determine language-level call
+        # validity. A production signature can itself be the issue defect;
+        # a TypeScript annotation does not enforce runtime argument presence.
+        severity = 'invalid' if is_test_path(unit.source.path) and unit.source.language in {'python', 'go'} and not handled else 'review'
         if not valid_signatures and not unknown_signatures:
             findings.append(dict(code='call_signature_contradiction', severity=severity, span=call['span'],
                 callee=call['callee'], evidence=dict(declaration=_span(unit.source, unit.node), failures=arity_errors,
-                                                  error_observation_or_handler=severity == 'review')))
+                                                  error_observation_or_handler=handled,
+                                                  declaration_is_test_helper=is_test_path(unit.source.path))))
             continue
         if unknown_signatures:
             findings.append(dict(code='call_signature_not_proved', severity='review', span=call['span'], callee=call['callee']))
@@ -371,20 +374,23 @@ def analyze(corpus, frontend, candidate):
                 producer = all_units.get(nested_targets[0]['function_id'])
                 if producer is None:
                     continue
-                returned = _return_properties(producer.source, producer.node)
+                returned = _literal_properties(source_map, producer.source, child(producer.node, 'return_type'), producer.node, resolution)
                 for field in sorted(required.keys() & returned.keys()):
                     expected, contract_span = required[field]
                     actual, return_span = returned[field]
                     if type(expected) is type(actual) and expected != actual:
                         contradiction = dict(argument=index, property=field, required=expected, returned=actual,
                             required_declaration=contract_span, returned_declaration=return_span,
-                            caller_declaration=_span(unit.source, declaration), producer_declaration=_span(producer.source, producer.node))
+                            caller_declaration=_span(unit.source, declaration), producer_declaration=_span(producer.source, producer.node),
+                            basis='declared_return_type_not_implementation_output')
                         break
                 if contradiction:
                     break
             contradictions.append(contradiction)
         if contradictions and all(contradictions):
-            findings.append(dict(code='declared_literal_property_contradiction', severity=severity,
+            # Even a public type annotation may be the incomplete patch. It
+            # supplies a precise semantic review question, never a hidden oracle.
+            findings.append(dict(code='declared_literal_property_contradiction', severity='review',
                 span=call['span'], callee=call['callee'], evidence=contradictions))
     for record in unknowns:
         findings.append(dict(code=record['reason'], severity='review', evidence=record))

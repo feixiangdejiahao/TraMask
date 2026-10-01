@@ -107,3 +107,12 @@ def test_static_contradiction_prevents_any_semantic_query():
     result = admission.prepare(corpus, frontend, candidate, 'Return sum.',
         checks=dict(status='invalid', components={'roles': {'findings': ['type contradiction']}}))
     assert result['request'] is None and result['status'] == 'static_invalid'
+
+
+def test_non_string_provider_decisions_remain_unknown():
+    _, _, req = request()
+    for value in [[], {}, True, 1, None]:
+        response = {key: 'supported' for key in req['check_ids']}
+        response['P'] = value
+        decision = admission.decide(req, response)
+        assert decision['status'] == 'unknown' and not decision['alarm_eligible']

@@ -31,7 +31,7 @@ def setup(language, code, before, after, extra=None, imports=None):
 ])
 def test_exact_missing_required_argument_is_rejected(language,code,before,after):
     result=analyze(*setup(language,code,before,after))
-    assert result['status']=='invalid'
+    assert result['status']==('review' if language=='typescript' else 'invalid')
     assert any(f['code']=='call_signature_contradiction' for f in result['findings'])
 
 
@@ -74,12 +74,12 @@ def test_try_handler_does_not_turn_negative_call_into_proved_invalid_test():
 def test_type_discriminant_is_independent_of_api_and_property_names():
     result=analyze(*setup('typescript', '''interface Accepts {readonly phase:'immediate'}
 function assemble<T extends Accepts>(value:T,step:unknown):unknown{return value}
-function producer(){return {phase:'deferred'}}
+function producer():{phase:'deferred'}{return {phase:'deferred'}}
 function original(){return {phase:'immediate'}}
 test('case',()=>{expect(assemble(original(), 1)).toBe(1)});
 ''','original()','producer()'))
     findings=[f for f in result['findings'] if f['code']=='declared_literal_property_contradiction']
-    assert result['status']=='invalid'
+    assert result['status']=='review'
     assert findings[0]['evidence'][0]['property']=='phase'
     assert findings[0]['evidence'][0]['required']=='immediate'
     assert findings[0]['evidence'][0]['returned']=='deferred'
@@ -93,13 +93,13 @@ def test_overloaded_formal_contract_follows_import_and_inheritance():
 export function assemble<T extends Derived>(schema:T,step:number):unknown;
 export function assemble<T extends Derived>(schema:T,a:number,b:number):unknown;
 export function assemble(...parts:unknown[]):unknown{return parts[0]}
-export function producer(){return {completed:true}}
+export function producer():{completed:true}{return {completed:true}}
 """,
     }
     result=analyze(*setup('typescript', "import {producer} from '../lib';\nfunction original(){return {completed:false}}\ntest('case',()=>{expect(unknown(original(),1)).toBe(1)});",
         'unknown(original(),1)','generated(producer(),1)',extra,
         [dict(name='generated',module='../lib',imported_name='assemble',source_path='tests/applicability.test.ts')]))
-    assert result['status']=='invalid'
+    assert result['status']=='review'
     assert any(f['code']=='declared_literal_property_contradiction' for f in result['findings'])
 
 
@@ -160,3 +160,40 @@ def test_probe_only_edit_does_not_affect_source_applicability():
     k['instrumentation']=dict(status='instrumented')
     k['edits'][0]['after']='unbound_probe(combine(1))'
     assert analyze(c,f,k)==original
+
+
+def test_production_signature_can_itself_be_the_incomplete_patch():
+    c,f,k=setup('python','from package import combine\ndef test_case():\n    assert combine(1,2)==3\n',
+                'combine(1,2)','combine(1)', {'package.py':'def combine(a,b):return a+b\n'})
+    result=analyze(c,f,k)
+    assert result['status']=='review'
+    assert next(x for x in result['findings'] if x['code']=='call_signature_contradiction')['severity']=='review'
+
+
+def test_buggy_producer_return_does_not_define_applicability():
+    code='''interface A {ready:false}
+function assemble(value:A){return value}
+function producer():A{return {ready:true} as A}
+function original():A{return {ready:false}}
+test('case',()=>{expect(assemble(original())).toBe(1)});
+'''
+    result=analyze(*setup('typescript',code,'original()','producer()'))
+    assert result['status']!='invalid'
+    assert not any(x['code']=='declared_literal_property_contradiction' for x in result['findings'])
+
+
+def test_negative_exception_callback_is_a_review_obligation():
+    code="function combine(a:number,b:number){return a+b;} test('x',()=>{expect(()=>combine(1,2)).toThrow();});"
+    result=analyze(*setup('typescript',code,'combine(1,2)','combine(1)'))
+    assert result['status']=='review'
+
+
+@pytest.mark.parametrize('binding',['combine = replacement','def decorator(f):return replacement\n@decorator\ndef combine(a,b):return a+b'])
+def test_explicit_rebinding_and_decorators_block_signature_proof(binding):
+    code=f'def combine(a,b):return a+b\n{binding}\ndef test_case():\n    assert combine(1,2)==3\n'
+    assert analyze(*setup('python',code,'combine(1,2)','combine(1)'))['status']!='invalid'
+
+
+def test_go_single_call_can_expand_multiple_results():
+    code='package demo\nimport "testing"\nfunc combine(a,b int)int{return a+b}\nfunc pair()(int,int){return 1,2}\nfunc TestCase(t *testing.T){if combine(1,2)!=3{t.Fatal("bad")}}'
+    assert analyze(*setup('go',code,'combine(1,2)','combine(pair())'))['status']!='invalid'

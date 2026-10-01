@@ -7,9 +7,10 @@ is a value-use fact, not a specification: opaque calls, control-dependent
 definitions, mutation, and callback scheduling remain explicit uncertainties.
 
 ``analyze(corpus, frontend, candidate)`` reparses the complete candidate.  It
-returns ``invalid`` only for a closed, built-in equality contradiction or an
-input-labelled edit confined to a side-effect-free expected value.  Other
-changes to expected construction are review obligations.  In particular an
+returns ``invalid`` only for a closed, built-in equality contradiction.  An
+input-labelled edit confined to expected construction is a review obligation:
+it could be an incorrect mutation or a legitimate strengthening of the oracle.
+In particular an
 empty finding list is never a proof that the test is valid.  No target code,
 provider, issue text, reference implementation, or semantic labels are used.
 """
@@ -28,7 +29,7 @@ from relation_search.oracle_evidence import _modified_sources
 from relational_gap.frontend import _parameters
 
 
-VERSION = "test_value_roles.v1"
+VERSION = "test_value_roles.v2"
 NESTED = FUNCTIONS | {"arrow_function", "function_expression", "func_literal", "lambda"}
 TRUSTED = {"local_symbol", "package_symbol", "import_symbol"}
 WRAPPERS = {"parenthesized_expression", "expression_list", "type_assertion", "as_expression"}
@@ -84,11 +85,22 @@ class _Analysis:
         self.roles, self.findings, self.unknowns, self.assertions = [], [], [], []
         self.contexts = 0
         self.node_maps = {}
+        self.module_conflicts = {}
 
     def nodes(self, source):
         if source.path not in self.node_maps:
             self.node_maps[source.path] = {(node.start_byte, node.end_byte): node for node in walk(source.root)}
         return self.node_maps[source.path]
+
+    def module_binding_conflict(self, source, name):
+        key = (source.path, name)
+        if key not in self.module_conflicts:
+            self.module_conflicts[key] = any(
+                node.type in ASSIGNMENTS | {"assignment_expression"}
+                and any(source.text(part) == name for part in walk(child(node, "left", "name")) if part.type == "identifier")
+                for node in _owned(source.root) if child(node, "left", "name") is not None
+            )
+        return self.module_conflicts[key]
 
     def unknown(self, code, context, node=None):
         self.unknowns.append({"code": code, "span": span(context.unit.source, node or context.unit.node), "call_path": list(context.path)})
@@ -210,6 +222,10 @@ class _Analysis:
                 return nested
             if fn.type == "identifier" and (_locally_rebound(context.unit, context.unit.source.text(fn)) or context.unit.source.text(fn) in context.unit.params):
                 return None
+        root_name = context.unit.source.text(fn).split(".")[0]
+        if self.module_binding_conflict(context.unit.source, root_name):
+            self.unknown("source_callee_binding_modified", context, node)
+            return None
         targets = [(uid, reason) for uid, reason in self.index.resolve(context.unit, context.unit.source.text(fn)) if reason in TRUSTED]
         if len(targets) != 1:
             return None
@@ -297,25 +313,11 @@ class _Analysis:
             fn, args = call_parts(node)
             if fn is not None and fn.type == "identifier" and source.text(fn) == "len" and len(args) == 1 and source.language in {"python", "go"} and self.builtin_unshadowed(context, "len"):
                 return {"type": "number", "provenance": proof + [{"kind": "unshadowed_language_builtin", "symbol": "len"}]}
-            callee = self.callee(resolved)
-            if callee is not None and self.total_ordinary_return(callee):
-                facts = [self.type_fact(_Ref(value, callee), seen.copy()) for value in self.returns(callee)]
-                if facts and all(fact and fact["type"] == facts[0]["type"] for fact in facts):
-                    return {"type": facts[0]["type"], "provenance": proof + [row for fact in facts for row in fact["provenance"]]}
+            # A production function's current return body may itself be the
+            # bug: f currently returning 3 does not invalidate assert f()==[].
+            # Role propagation follows returns, but oracle invalidity never
+            # derives an ACTUAL type from the candidate implementation.
         return None
-
-    @staticmethod
-    def total_ordinary_return(context):
-        """A returned expression is not automatically a callable's runtime type."""
-        unit = context.unit
-        if unit.decorators or unit.node.type == "async_function_definition" or any(part.type == "async" for part in unit.node.children) or any(part.type in {"yield", "yield_statement", "yield_expression"} for part in _owned(unit.body)):
-            return False
-        if unit.body.type not in {"block", "statement_block", "statement_list"}:
-            return True
-        statements = [part for part in unit.body.named_children if part.type != "comment"]
-        if len(statements) == 1 and statements[0].type == "statement_list":
-            statements = [part for part in statements[0].named_children if part.type != "comment"]
-        return bool(statements) and statements[-1].type == "return_statement"
 
     def builtin_unshadowed(self, context, name):
         parent = context.parent
@@ -343,8 +345,11 @@ class _Analysis:
             return False
         if source.language == "python":
             return statement is not None and statement.type == "assert_statement"
-        if assertion.assertion_adapter in {"go_testing_failure_guard", "node_assert_import"}:
+        if assertion.assertion_adapter == "go_testing_failure_guard":
             return True
+        if assertion.assertion_adapter == "node_assert_import":
+            fn, _ = call_parts(statement)
+            return not self.module_binding_conflict(source, source.text(fn).split(".")[0])
         if statement is None or statement.type not in CALLS:
             return False
         fn, _ = call_parts(statement)
@@ -352,12 +357,12 @@ class _Analysis:
         if source.language == "go":
             root = text.split(".")[0]
             imported = source.imports.get(root)
-            return imported is not None and imported[0] in {"github.com/stretchr/testify/require", "github.com/stretchr/testify/assert"} and not _locally_rebound(context.unit, root)
+            return imported is not None and imported[0] in {"github.com/stretchr/testify/require", "github.com/stretchr/testify/assert"} and not _locally_rebound(context.unit, root) and not self.module_binding_conflict(source, root)
         expects = [node for node in walk(fn) if node.type in CALLS and source.text(call_parts(node)[0]) == "expect"]
         if not expects or "expect" in context.unit.params or _locally_rebound(context.unit, "expect"):
             return False
         imported = source.imports.get("expect")
-        return imported is not None and imported[0] in {"vitest", "@jest/globals"} and imported[1] == "expect"
+        return imported is not None and imported[0] in {"vitest", "@jest/globals"} and imported[1] == "expect" and not self.module_binding_conflict(source, "expect")
 
     def contradiction(self, context, statement, actual, expected, predicate):
         if actual is None or expected is None or predicate not in EQUALITY:
@@ -394,7 +399,7 @@ class _Analysis:
                     continue
                 root, method = parts
                 imported = source.imports.get(root)
-                if imported is not None and imported[0] in {"github.com/stretchr/testify/require", "github.com/stretchr/testify/assert"} and root not in context.unit.params and not _locally_rebound(context.unit, root) and method in {"Equal", "NotEqual", "Same", "NotSame"}:
+                if imported is not None and imported[0] in {"github.com/stretchr/testify/require", "github.com/stretchr/testify/assert"} and root not in context.unit.params and not _locally_rebound(context.unit, root) and not self.module_binding_conflict(source, root) and method in {"Equal", "NotEqual", "Same", "NotSame"}:
                     yield node, args[2], args[1], method
             elif source.language == "typescript" and len(args) == 1:
                 for inner in walk(fn):
@@ -403,7 +408,7 @@ class _Analysis:
                     receiver, values = call_parts(inner)
                     name = source.text(receiver)
                     imported = source.imports.get(name)
-                    if receiver is None or receiver.type != "identifier" or len(values) != 1 or imported is None or imported[0] not in {"vitest", "@jest/globals"} or imported[1] != "expect" or name in context.unit.params or _locally_rebound(context.unit, name):
+                    if receiver is None or receiver.type != "identifier" or len(values) != 1 or imported is None or imported[0] not in {"vitest", "@jest/globals"} or imported[1] != "expect" or name in context.unit.params or _locally_rebound(context.unit, name) or self.module_binding_conflict(source, name):
                         continue
                     method = source.text(child(fn, "property"))
                     if method not in {"toBe", "toEqual", "toStrictEqual"}:
@@ -464,7 +469,7 @@ class _Analysis:
                 # closed complete expected-value region, and no other program
                 # input edit. Joint input/oracle changes stay reviewable.
                 closed = expected_only and not escapes and any(role["basis"] != "opaque_argument_may_use" and self.closed(nodes[(role["span"]["start_byte"], role["span"]["end_byte"])]) for role in expected if (role["span"]["start_byte"], role["span"]["end_byte"]) in nodes)
-                self.findings.append({"code": "expected_only_program_edit" if closed else "expected_construction_edited", "severity": "invalid" if closed else "review", "span": change["span"], "edit_ids": [change["id"]], "provenance": expected})
+                self.findings.append({"code": "expected_only_program_edit" if closed else "expected_construction_edited", "severity": "review", "span": change["span"], "edit_ids": [change["id"]], "provenance": expected})
             elif expected and actual:
                 self.findings.append({"code": "shared_actual_expected_dependency_edited", "severity": "review", "span": change["span"], "edit_ids": [change["id"]], "provenance": matching})
 

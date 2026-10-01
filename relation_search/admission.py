@@ -146,7 +146,7 @@ def decide(request, payload, *, finish_reason='stop'):
         return unknown('invalid_json')
     if not isinstance(data, dict) or set(data) != set(request['check_ids']):
         return unknown('missing_or_extra_check')
-    if any(value not in JUDGMENTS for value in data.values()):
+    if any(not isinstance(value, str) or value not in JUDGMENTS for value in data.values()):
         return unknown('invalid_judgment')
     if 'unsupported' in data.values():
         return dict(status='semantic_rejected', alarm_eligible=False, judgments=data,

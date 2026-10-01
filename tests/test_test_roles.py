@@ -69,7 +69,7 @@ def test_numeric_bool_inequality_and_opaque_equality_are_not_rejected(assertion)
 def test_expected_literal_change_alone_is_not_a_new_combination():
     result = fixture("def test_example():\n    assert subject() == '界'\n", edits=[("'界'", "'other'", "input")])
     assert codes(result) == {"expected_only_program_edit"}
-    assert result["status"] == "invalid"
+    assert result["status"] == "review"
     extent = result["findings"][0]["span"]
     assert extent["end_byte"] - extent["start_byte"] == len("'other'".encode())
 
@@ -169,6 +169,36 @@ def test_partial_async_decorated_and_generator_return_are_not_number_proofs(help
     assert "equality_type_contradiction" not in codes(fixture(code))
 
 
+def test_production_body_returning_wrong_type_is_not_a_test_contradiction():
+    # The contract may require a list, and returning 3 may be the real bug.
+    code = "def producer():\n    return 3\ndef test_example():\n    assert producer() == []\n"
+    assert "equality_type_contradiction" not in codes(fixture(code))
+
+
+def test_expected_only_edit_may_strengthen_a_weak_oracle():
+    code = "def producer():\n    return 0\ndef test_example():\n    assert producer() == 0\n"
+    result = fixture(code, edits=[("0", "1", "input")])
+    assert result["status"] == "review"
+    assert codes(result) == {"expected_only_program_edit"}
+
+
+def test_explicit_module_rebinding_does_not_use_old_helper_body():
+    code = "def compare(a, b):\n    assert a == b\ncompare = external()\ndef test_example():\n    compare(subject(), 'old')\n"
+    result = fixture(code, edits=[("'old'", "'new'", "input")])
+    assert not result["findings"]
+    assert result["assertion_count"] == 0
+    assert any(row["code"] == "source_callee_binding_modified" for row in result["unknowns"])
+
+
+def test_explicit_standard_node_assert_method_write_removes_primitive_proof():
+    code = '''import check from "node:assert/strict";
+import { test } from "vitest";
+check.strictEqual = fake;
+test("example", () => { check.strictEqual(1, []); });
+'''
+    assert fixture(code, "typescript")["status"] == "unknown"
+
+
 def test_typescript_alias_and_negated_matcher_preserve_framework_meaning():
     code = '''import { expect as check, test } from "vitest";
 test("example", () => { check(1).not.toEqual([]); });
@@ -193,7 +223,7 @@ func TestExample(t *testing.T) {
 }
 '''
     result = fixture(code, "go", [("7", "8", "input")])
-    assert result["status"] == "invalid", result
+    assert result["status"] == "review", result
     assert "expected_only_program_edit" in codes(result)
 
 
