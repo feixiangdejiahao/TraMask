@@ -25,7 +25,10 @@ def dispatch(request, output: Path, *, root: Path):
     thinking = request.get('thinking', 'disabled')
     if thinking not in {'enabled', 'disabled'}:
         raise ValueError('Unsupported thinking mode')
-    payload = {'model': 'deepseek-v4-flash', 'temperature': 0, 'max_tokens': 16384,
+    max_tokens = request.get('max_tokens', 16384)
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 16384:
+        raise ValueError('Unsupported output token budget')
+    payload = {'model': 'deepseek-v4-flash', 'temperature': 0, 'max_tokens': max_tokens,
                'messages': [{'role': 'system', 'content': request['system']},
                             {'role': 'user', 'content': request['prompt']}],
                'response_format': {'type': 'json_object'}, 'stream': False,
@@ -41,6 +44,8 @@ def dispatch(request, output: Path, *, root: Path):
               'thinking': thinking,
               'reference_or_verifier_inputs': False, 'execution_outcomes': False,
               'status': 'prepared', 'timeout_seconds': 300, 'max_response_bytes': 524288}
+    if 'max_tokens' in request:
+        record['max_output_tokens'] = max_tokens
     if 'reasoning_effort' in payload:
         record['reasoning_effort'] = payload['reasoning_effort']
     write(output/'manifest.json', record)
