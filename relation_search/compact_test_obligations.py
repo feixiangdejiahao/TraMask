@@ -21,7 +21,7 @@ from relation_search.test_roles import _Context, _guard_contexts, _owned
 from relational_gap.frontend import _exception_observations
 
 
-VERSION = 'compact-test-obligations.v2'
+VERSION = 'compact-test-obligations.v3'
 SEMANTICS = '''Judge only this fixed modified test with its supplied inputs,
 fixtures and operation order. A source site is required only when normal
 execution reaches it, with the lexical branches, prior returns/raises and
@@ -125,14 +125,60 @@ def source_text(document, reference):
     return block['code'].encode()[reference['start']:reference['end']].decode()
 
 
-def _guards(rows):
+def source_excerpt(document, reference, max_chars=320):
+    """Return an exact character prefix with its full UTF-8 byte reference.
+
+    ``omitted_chars`` counts Unicode characters, not bytes. The document always
+    retains the full source; the prefix is only a bounded display convenience.
+    """
+    if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 0:
+        raise ValueError('max_chars must be a nonnegative integer')
+    text = source_text(document, reference)
+    return dict(ref=dict(reference), text=text[:max_chars], omitted_chars=max(0, len(text) - max_chars))
+
+
+def _guard_header(row, source, nodes):
+    position = row['span']
+    node = nodes.get((position['start_byte'], position['end_byte']))
+    while node is not None and node.type != row['kind']:
+        if node.start_byte != position['start_byte'] or node.end_byte != position['end_byte']:
+            node = None
+            break
+        node = node.parent
+    body = child(node, 'body', 'consequence') if node is not None else None
+    # Existing lexical headers are exact byte prefixes. Validate them against
+    # both the source and an AST body boundary before retaining the reference.
+    existing = row.get('header')
+    if existing:
+        end = position['start_byte'] + len(existing.encode())
+        if (end <= position['end_byte'] and (body is None or end <= body.start_byte)
+                and source.data[position['start_byte']:end].decode() == existing):
+            return dict(position, end_byte=end)
+    if body is not None:
+        return dict(position, end_byte=body.start_byte)
+    if node is None:
+        return None
+    # Go switches/cases have direct delimiter tokens rather than a body field.
+    # Looking only at direct children avoids braces in struct/interface types,
+    # composite literals or function literals that belong to the header itself.
+    delimiter = ':' if row['kind'] in {
+        'type_case', 'expression_case', 'default_case', 'communication_case', 'case_statement'
+    } else '{'
+    token = next((part for part in node.children if part.type == delimiter), None)
+    if token is None:
+        return None
+    return dict(position, end_byte=token.end_byte if delimiter == ':' else token.start_byte)
+
+
+def _guards(rows, sources, nodes):
     result = []
     for row in rows:
         record = dict(kind=row['kind'], at=_reference(row['span']), branch=row.get('branch'),
                       condition=_reference(row['condition_span']) if row.get('condition_span') else None)
-        if row.get('header'):
-            record['header'] = _reference(dict(row['span'],
-                end_byte=row['span']['start_byte'] + len(row['header'].encode())))
+        position = row['span']
+        header = _guard_header(row, sources[position['path']], nodes[position['path']])
+        if header is not None:
+            record['header'] = _reference(header)
         result.append(record)
     return result
 
@@ -327,7 +373,8 @@ def _compact(graph, sources, source_units, root, changes, imported_bindings):
         node = nodes[position['path']][position['start_byte'], position['end_byte']]
         kind = site['passing_predicate']['form']
         identifier = 'Q' + str(len(obligations))
-        record = dict(unit=site['vertex'], kind=kind, at=_reference(position), guards=_guards(site['guards']))
+        record = dict(unit=site['vertex'], kind=kind, at=_reference(position),
+                      guards=_guards(site['guards'], source_map, nodes))
         for field in ('adapter', 'adapter_identity'):
             if field in site:
                 record[field] = site[field]
@@ -357,7 +404,7 @@ def _compact(graph, sources, source_units, root, changes, imported_bindings):
     calls = {}
     for edge in graph['transitions']:
         calls[edge['id']] = dict(caller=edge['caller'], callee=edge['callee'],
-            at=_reference(edge['source']['span']), guards=_guards(edge['guards']),
+            at=_reference(edge['source']['span']), guards=_guards(edge['guards'], source_map, nodes),
             binding=edge['binding_status'], arguments=[dict(formal=row['formal'],
                 actual=_reference(row['value']['span']), origin=row['origin']) for row in edge['transforms']],
             variadic_tail=_source_refs(edge['variadic_tail']))
@@ -429,12 +476,19 @@ def render(document):
     def ref(value):
         return f"{value['source']}[{value['start']}:{value['end']}]"
     def snippet(value, limit=240):
-        text = source_text(document, value)
-        # Full exact source remains above; the explicitly elided display keeps
-        # a large callback/expected container from dominating each index row.
-        if len(text) > limit:
-            return json.dumps(text[:limit], ensure_ascii=False) + '… [full source ' + ref(value) + ']'
-        return json.dumps(text, ensure_ascii=False)
+        excerpt = source_excerpt(document, value, max_chars=limit)
+        text = json.dumps(excerpt['text'], ensure_ascii=False)
+        if excerpt['omitted_chars']:
+            text += f"… [excerpt; {excerpt['omitted_chars']} chars omitted; full source {ref(value)}]"
+        return text
+    def compact_refs(value):
+        if isinstance(value, dict):
+            if set(value) == {'source', 'start', 'end'}:
+                return ref(value)
+            return {key: compact_refs(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [compact_refs(item) for item in value]
+        return value
     lines.extend(['', 'Fixed root: ' + str(document.get('root'))])
     for identifier, unit in document.get('units', {}).items():
         lines.append(f"{identifier}: {ref(unit['at'])}; provenance={unit['provenance']}")
@@ -442,7 +496,12 @@ def render(document):
         pieces = []
         for guard in row.get('guards', []):
             value = guard.get('condition') or guard.get('header') or guard['at']
-            pieces.append(f"{guard['kind']} {snippet(value)} {ref(guard['at'])} branch={guard['branch']}")
+            text = f"{guard['kind']} {snippet(value)} {ref(value)} branch={guard['branch']}"
+            if value != guard['at']:
+                text += '; control=' + ref(guard['at'])
+            else:
+                text += '; header unavailable'
+            pieces.append(text)
         if row.get('exception_regions'):
             pieces.append('exception consumption=' + ','.join(row['exception_regions']))
         return '; ' + '; '.join(pieces) if pieces else ''
@@ -464,5 +523,19 @@ def render(document):
     for field in ('entries', 'module_context', 'imported_bindings', 'boundaries', 'unknowns'):
         rows = document.get(field, [])
         if rows:
-            lines.append(field + ': ' + json.dumps(rows, sort_keys=True, separators=(',', ':')))
+            lines.append(field + ':')
+            if field != 'boundaries':
+                lines.extend(json.dumps(compact_refs(row), sort_keys=True, separators=(',', ':')) for row in rows)
+                continue
+            # Consecutive boundaries share classification facts. Factor those
+            # constants into a group header and retain every remaining field in
+            # exact, ordered rows; nothing is inferred or discarded.
+            previous = None
+            for row in rows:
+                common = {key: row[key] for key in ('kind', 'semantic_support', 'validation_provenance') if key in row}
+                if common != previous:
+                    lines.append('shared ' + json.dumps(common, sort_keys=True, separators=(',', ':')))
+                    previous = common
+                varying = {key: item for key, item in row.items() if key not in common}
+                lines.append(json.dumps(compact_refs(varying), sort_keys=True, separators=(',', ':')))
     return '\n'.join(lines)

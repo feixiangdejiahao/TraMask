@@ -69,3 +69,32 @@ def test_prompt_budget_never_truncates_test_into_a_different_program():
     assert result['status'] == 'unknown_prompt_budget'
     assert result['request'] is None
     assert result['truncated'] is False
+
+
+def test_large_check_messages_are_indexed_without_repeating_full_statement():
+    message = 'diagnostic_' * 150
+    code = f'def test_value():\n    assert compute(3) == 6, {message!r}\n'
+    result = admission.prepare(*example(code), 'Compute twice the input.')
+    assert result['status'] == 'prepared'
+    payload = json.loads(result['request']['prompt'])
+    check = next(row for key, row in payload['checks'].items() if key != 'P')
+    assert check['expression']['text'] == 'compute(3) == 6'
+    assert check['expression']['omitted_chars'] == 0
+    assert message in payload['modified_test']
+    assert message in payload['source_analysis']
+
+
+def test_exception_check_indexes_type_without_duplicating_region_body():
+    code = '''import pytest
+def test_reject():
+    with pytest.raises(ValueError):
+        load('bad')
+        assert unreachable_state()
+'''
+    result = admission.prepare(*example(code), 'Reject malformed inputs with ValueError.')
+    payload = json.loads(result['request']['prompt'])
+    check = next(row for row in payload['checks'].values() if row.get('kind') == 'expected_exception')
+    assert check['expression']['text'] == 'ValueError'
+    assert check['requires'] == 'matching_exception_adapter_exit'
+    assert check['region']
+    assert "load('bad')" in payload['modified_test']

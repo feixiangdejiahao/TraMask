@@ -6,7 +6,7 @@ import pytest
 
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
-from relation_search.compact_test_obligations import analyze, render, source_text
+from relation_search.compact_test_obligations import analyze, render, source_excerpt, source_text
 
 
 def prepared(code, language='python', extra=None, before=None, after=None, **limits):
@@ -400,3 +400,97 @@ test('result', () => { expect(compute(3)).toBe(4); });
 """, 'typescript', extra={'library.ts': 'export function compute(n) { expect(PRODUCTION_SENTINEL).toBe(9); return n; }'})
     assert len(result['obligations']) == 1
     assert 'PRODUCTION_SENTINEL' not in render(result)
+
+
+def test_large_go_type_switch_uses_direct_header_tokens_and_keeps_full_source():
+    checks = '\n'.join(f'  if entry.Marker != {value} {{ t.Fatal("value {value}") }}' for value in range(18))
+    code = '''package example
+import "testing"
+func leaf(t *testing.T, value int) { if value < 0 { t.Fatal("negative") } }
+func inspect(t *testing.T, value interface{}) {
+ switch entry := func() interface{} { return value }().(type) {
+ // CONTROL_BODY_SENTINEL: this complete switch body belongs only in source.
+ case struct{ Marker int }:
+  // CASE_BODY_SENTINEL: never a case header or repeated control predicate.
+''' + checks + '''
+  leaf(t, entry.Marker)
+ default:
+  t.Fatal("wrong kind")
+ }
+}
+func TestCase(t *testing.T) { inspect(t, struct{ Marker int }{Marker: 7}) }
+'''
+    result = prepared(code, 'go')
+    assert result['status'] == 'complete'
+    all_guards = [guard for row in [*result['obligations'].values(), *result['calls'].values()]
+                  for guard in row['guards']]
+    switches = [guard for guard in all_guards if guard['kind'] == 'type_switch_statement']
+    cases = [guard for guard in all_guards if guard['kind'] == 'type_case']
+    assert len(switches) >= 19 and cases
+    assert {source_text(result, guard['header']) for guard in switches} == {
+        'switch entry := func() interface{} { return value }().(type) '
+    }
+    assert {source_text(result, guard['header']) for guard in cases} == {'case struct{ Marker int }:'}
+    assert all('CONTROL_BODY_SENTINEL' in source_text(result, guard['at']) for guard in switches)
+    assert all('CASE_BODY_SENTINEL' in source_text(result, guard['at']) for guard in cases)
+    snapshot = copy.deepcopy(result)
+    output = render(result)
+    assert result == snapshot
+    assert output.count('CONTROL_BODY_SENTINEL') == 1
+    assert output.count('CASE_BODY_SENTINEL') == 1
+    assert 'type_switch_statement "switch entry := func() interface{} { return value }().(type) " S' in output
+    assert 'type_case "case struct{ Marker int }:" S' in output
+    assert '; control=S' in output
+    assert len(result['obligations']) == 20
+    assert list(result['obligations']) == ['Q' + str(index) for index in range(20)]
+
+
+def test_unicode_source_excerpt_is_exact_and_explicit_about_omitted_characters():
+    result = prepared('def test_case():\n    assert message == "猫🐈"\n')
+    reference = result['units'][result['root']]['at']
+    text = source_text(result, reference)
+    excerpt = source_excerpt(result, reference, max_chars=len(text) - 2)
+    assert excerpt == dict(ref=reference, text=text[:-2], omitted_chars=2)
+    assert source_excerpt(result, reference, max_chars=0) == dict(ref=reference, text='', omitted_chars=len(text))
+    assert source_excerpt(result, reference, max_chars=len(text))['omitted_chars'] == 0
+    assert source_text(result, reference) == text
+    with pytest.raises(ValueError):
+        source_excerpt(result, reference, max_chars=-1)
+
+
+def test_unknown_guard_display_is_bounded_with_exact_full_reference():
+    code = 'UNKNOWN_CONTROL_BODY_' + '猫' * 400
+    reference = dict(source='S0', start=0, end=len(code.encode()))
+    document = dict(status='partial', sources={'S0': dict(path='unknown.py', start_byte=0,
+                    end_byte=len(code.encode()), code=code)}, root='V0', obligations={
+        'Q0': dict(unit='V0', kind='assert_expression', at=reference,
+                   guards=[dict(kind='unknown_control', at=reference, branch='unknown')])})
+    output = render(document)
+    assert '[excerpt;' in output and 'chars omitted; full source S0[0:' in output
+    assert '; header unavailable' in output
+    # The full source survives, while its second appearance is explicitly bounded.
+    assert output.count(code) == 1
+    assert code in document['sources']['S0']['code']
+
+
+def test_boundary_render_factors_common_fields_without_losing_order_or_facts():
+    reference = dict(source='S0', start=0, end=4)
+    boundaries = [
+        dict(caller='V0', kind='unresolved', semantic_support='unconfirmed', source=reference),
+        dict(caller='V1', kind='unresolved', semantic_support='unconfirmed', source=reference, extra='kept'),
+        dict(caller='V1', kind='resolved', validation_provenance='unknown', source=reference,
+             declaration_header=reference),
+    ]
+    document = dict(status='partial', sources={'S0': dict(path='tests/example.py', start_byte=0,
+                    end_byte=4, code='call')}, root='V0', boundaries=boundaries)
+    text = render(document).split('boundaries:\n', 1)[1]
+    restored = []
+    for line in text.splitlines():
+        if line.startswith('shared '):
+            common = json.loads(line.removeprefix('shared '))
+        else:
+            restored.append(common | json.loads(line))
+    expected = [{key: 'S0[0:4]' if value == reference else value for key, value in row.items()}
+                for row in boundaries]
+    assert restored == expected
+    assert text.count('"semantic_support":"unconfirmed"') == 1
