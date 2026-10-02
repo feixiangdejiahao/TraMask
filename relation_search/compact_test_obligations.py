@@ -11,14 +11,17 @@ import hashlib
 import json
 
 from anchor_retrieval.index import Index
+from anchor_retrieval.graph import _locally_rebound
 from anchor_retrieval.syntax import CALLS, call_parts, child, is_test_path, walk
+from generic_composition.corpus import _assertion_nodes
 from relation_search.admission import program_candidate
 from relation_search.oracle_evidence import _modified_sources
 from relation_search.recursive_validator_closure import _Graph, _span
+from relation_search.test_roles import _Context, _guard_contexts, _owned
 from relational_gap.frontend import _exception_observations
 
 
-VERSION = 'compact-test-obligations.v1'
+VERSION = 'compact-test-obligations.v2'
 SEMANTICS = '''Judge only this fixed modified test with its supplied inputs,
 fixtures and operation order. A source site is required only when normal
 execution reaches it, with the lexical branches, prior returns/raises and
@@ -123,9 +126,15 @@ def source_text(document, reference):
 
 
 def _guards(rows):
-    return [dict(kind=row['kind'], at=_reference(row['span']), branch=row.get('branch'),
-                 condition=_reference(row['condition_span']) if row.get('condition_span') else None)
-            for row in rows]
+    result = []
+    for row in rows:
+        record = dict(kind=row['kind'], at=_reference(row['span']), branch=row.get('branch'),
+                      condition=_reference(row['condition_span']) if row.get('condition_span') else None)
+        if row.get('header'):
+            record['header'] = _reference(dict(row['span'],
+                end_byte=row['span']['start_byte'] + len(row['header'].encode())))
+        result.append(record)
+    return result
 
 
 class _CompactGraph(_Graph):
@@ -177,6 +186,59 @@ class _CompactGraph(_Graph):
 
     def sites_for(self, vertex, unit):
         super().sites_for(vertex, unit)
+        # The role walker intentionally rejects unproved assertion identities.
+        # Keep their exact lexical matcher as a conditional source obligation,
+        # with the identity uncertainty explicit. This local Flow inventory
+        # never follows production bodies or requires callback input bindings.
+        known = {tuple(site['source']['span'][key] for key in ('path', 'start_byte', 'end_byte'))
+                 for site in self.sites if site['vertex'] == vertex}
+        context = _Context(unit)
+
+        def fallback(statement, proved, adapter):
+            if statement is None:
+                return
+            position = _span(unit.source, statement)
+            key = tuple(position[field] for field in ('path', 'start_byte', 'end_byte'))
+            if key in known:
+                return
+            known.add(key)
+            self.add_site(vertex, unit, statement, 'primitive_assertion_call', unit.source.text(statement),
+                          _guard_contexts(unit.source, statement, unit.body),
+                          adapter=adapter, adapter_identity='proved' if proved else 'unproved')
+            if not proved:
+                self.unknown('assertion_adapter_identity_unproved', vertex=vertex,
+                             source=dict(span=position, code=unit.source.text(statement)))
+
+        for assertion in self.index.flow(unit.id).assertions:
+            if assertion.predicate == 'assertion_helper':
+                continue
+            statement, _, _, _ = _assertion_nodes(unit.source, assertion, unit)
+            fallback(statement, self.analysis.assertion_supported(context, statement, assertion),
+                     assertion.assertion_adapter)
+        # Native Flow recognizes the conventional global spelling ``expect``.
+        # Import aliases use the same source matcher shape for every method,
+        # including toThrow/not.toThrow, without evaluating the callback.
+        if unit.source.language == 'typescript':
+            for statement in _owned(unit.body):
+                if statement.type not in CALLS:
+                    continue
+                fn, _ = call_parts(statement)
+                if fn is None:
+                    continue
+                for inner in walk(fn):
+                    if inner.type not in CALLS:
+                        continue
+                    receiver, arguments = call_parts(inner)
+                    if receiver is None or receiver.type != 'identifier' or not arguments:
+                        continue
+                    name = unit.source.text(receiver)
+                    imported = unit.source.imports.get(name)
+                    if imported not in {('vitest', 'expect'), ('@jest/globals', 'expect')}:
+                        continue
+                    proved = (name not in unit.params and not _locally_rebound(unit, name)
+                              and not self.analysis.module_binding_conflict(unit.source, name))
+                    fallback(statement, proved, 'imported_expect_matcher')
+                    break
         # A one-statement block can have exactly the statement's byte extent.
         # Prefer the actual assertion/if node over a same-span block wrapper.
         for site in self.sites:
@@ -266,6 +328,9 @@ def _compact(graph, sources, source_units, root, changes, imported_bindings):
         kind = site['passing_predicate']['form']
         identifier = 'Q' + str(len(obligations))
         record = dict(unit=site['vertex'], kind=kind, at=_reference(position), guards=_guards(site['guards']))
+        for field in ('adapter', 'adapter_identity'):
+            if field in site:
+                record[field] = site[field]
         if kind == 'assert_expression':
             record['predicate'] = _node_ref(source, node.named_children[0])
         elif kind == 'negated_failure_guard':
@@ -286,6 +351,8 @@ def _compact(graph, sources, source_units, root, changes, imported_bindings):
         elif kind == 'uncaught_test_failure':
             record['kind'] = 'testing_failure'
             record['requires'] = 'failure_not_reached_unless_consumed'
+        else:
+            record['predicate'] = _reference(position)
         obligations[identifier] = record
     calls = {}
     for edge in graph['transitions']:
@@ -361,20 +428,35 @@ def render(document):
                       '```', block['code'], '```'])
     def ref(value):
         return f"{value['source']}[{value['start']}:{value['end']}]"
+    def snippet(value, limit=240):
+        text = source_text(document, value)
+        # Full exact source remains above; the explicitly elided display keeps
+        # a large callback/expected container from dominating each index row.
+        if len(text) > limit:
+            return json.dumps(text[:limit], ensure_ascii=False) + '… [full source ' + ref(value) + ']'
+        return json.dumps(text, ensure_ascii=False)
     lines.extend(['', 'Fixed root: ' + str(document.get('root'))])
     for identifier, unit in document.get('units', {}).items():
         lines.append(f"{identifier}: {ref(unit['at'])}; provenance={unit['provenance']}")
     def controls(row):
-        pieces = [f"{guard['kind']} {ref(guard['at'])} branch={guard['branch']}"
-                  for guard in row.get('guards', [])]
+        pieces = []
+        for guard in row.get('guards', []):
+            value = guard.get('condition') or guard.get('header') or guard['at']
+            pieces.append(f"{guard['kind']} {snippet(value)} {ref(guard['at'])} branch={guard['branch']}")
         if row.get('exception_regions'):
             pieces.append('exception consumption=' + ','.join(row['exception_regions']))
         return '; ' + '; '.join(pieces) if pieces else ''
     for identifier, row in document.get('obligations', {}).items():
         detail = '; requires=' + row['requires'] if 'requires' in row else ''
+        if row.get('predicate'):
+            detail += '; predicate=' + snippet(row['predicate'])
+        if row.get('expected'):
+            detail += '; expected=' + snippet(row['expected'])
+        if row.get('adapter_identity'):
+            detail += '; adapter_identity=' + row['adapter_identity']
         lines.append(f"{identifier} {row['unit']}: {row['kind']} {ref(row['at'])}" + detail + controls(row))
     for identifier, row in document.get('calls', {}).items():
-        bindings = ', '.join(f"{item['formal']} <- {ref(item['actual'])} ({item['origin']})" for item in row['arguments'])
+        bindings = ', '.join(f"{item['formal']} <- {snippet(item['actual'])} {ref(item['actual'])} ({item['origin']})" for item in row['arguments'])
         lines.append(f"{identifier}: {row['caller']} -> {row['callee']} at {ref(row['at'])}; {row['binding']}; {bindings}" + controls(row))
     for component in document.get('sccs', []):
         if component['recursive']:

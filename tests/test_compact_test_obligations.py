@@ -295,3 +295,108 @@ def test_case(left):
     assert decorated['status'] == cyclic['status'] == 'partial'
     assert any(row['code'] == 'root_decorator_dispatch_unproved' for row in decorated['unknowns'])
     assert any(row['code'] == 'fixture_dependency_cycle' for row in cyclic['unknowns'])
+
+
+def test_global_typescript_throw_matchers_are_retained_with_unproved_identity():
+    result = prepared("""test('exceptions', () => {
+    expect(() => parse('bad')).toThrow(TypeError);
+    expect(() => parse('good')).not.toThrow();
+});
+""", 'typescript')
+    checks = list(result['obligations'].values())
+    assert len(checks) == 2
+    assert [source_text(result, row['predicate']) for row in checks] == [
+        "expect(() => parse('bad')).toThrow(TypeError)",
+        "expect(() => parse('good')).not.toThrow()",
+    ]
+    assert all(row['adapter_identity'] == 'unproved' for row in checks)
+    assert result['status'] == 'partial'
+    assert any(row['code'] == 'assertion_adapter_identity_unproved' for row in result['unknowns'])
+    assert '.not.toThrow()' in render(result)
+
+
+def test_import_aliased_throw_matcher_retains_exact_predicate_and_identity():
+    result = prepared("""import {test, expect as verify} from 'vitest';
+test('exceptions', () => {
+    verify(() => parse('bad')).toThrow(TypeError);
+    verify(() => parse('good')).not.toThrow();
+});
+""", 'typescript')
+    checks = list(result['obligations'].values())
+    assert len(checks) == 2
+    assert all(row['adapter_identity'] == 'proved' for row in checks)
+    assert source_text(result, checks[1]['predicate']) == "verify(() => parse('good')).not.toThrow()"
+
+
+def test_unbound_callback_preserves_its_matcher_and_does_not_invent_arguments():
+    result = prepared("""import {test} from 'vitest';
+test('callback', () => {
+    register((value) => {
+        expect(() => value.parse()).not.toThrow();
+    });
+});
+""", 'typescript')
+    assert result['status'] == 'partial'
+    checks = list(result['obligations'].values())
+    assert len(checks) == 1
+    assert source_text(result, checks[0]['predicate']) == 'expect(() => value.parse()).not.toThrow()'
+    assert any(row['code'] == 'callback_invocation_binding_unproved' for row in result['unknowns'])
+    assert any(parameter['name'] == 'value' for unit in result['units'].values() for parameter in unit['parameters'])
+
+
+def test_renderer_displays_predicate_guard_and_actual_formal_text_with_refs():
+    result = prepared('''def check(values):
+    if values:
+        assert values[0] == 1
+        check(values[1:])
+def test_case():
+    check([1, 2])
+''')
+    text = render(result)
+    assert 'predicate="values[0] == 1"' in text
+    assert 'if_statement "values" S' in text
+    assert 'values <- "values[1:]" S' in text
+    assert 'values <- "[1, 2]" S' in text
+    assert len(result['calls']) == 2
+
+
+def test_python_expected_exception_and_handler_are_readable_without_byte_lookup():
+    result = prepared('''import pytest
+def test_case():
+    try:
+        with pytest.raises(ValueError):
+            parse('bad')
+    except AssertionError:
+        assert fallback == 1
+''')
+    text = render(result)
+    assert 'expected="ValueError"' in text
+    assert 'predicate="fallback == 1"' in text
+    assert 'except_clause "except AssertionError:' in text
+    assert 'matching_exception_adapter_exit' in text
+
+
+def test_go_custom_failure_helper_renders_guard_and_each_call_binding():
+    result = prepared('''package example
+import "testing"
+func reject(t *testing.T, message string) { t.Fatal(message) }
+func inspect(t *testing.T, actual int, expected int) {
+    if actual != expected { reject(t, "mismatch") }
+}
+func TestCase(t *testing.T) { inspect(t, 3, 4) }
+''', 'go')
+    text = render(result)
+    assert 'predicate="actual != expected"' in text
+    assert 'actual <- "3" S' in text
+    assert 'expected <- "4" S' in text
+    assert 'guard_false_on_normal_completion' in text
+    assert len(result['units']) == 3
+
+
+def test_fallback_never_promotes_production_expectation_spelling():
+    result = prepared("""import {test} from 'vitest';
+import {compute} from '../library';
+test('result', () => { expect(compute(3)).toBe(4); });
+""", 'typescript', extra={'library.ts': 'export function compute(n) { expect(PRODUCTION_SENTINEL).toBe(9); return n; }'})
+    assert len(result['obligations']) == 1
+    assert 'PRODUCTION_SENTINEL' not in render(result)

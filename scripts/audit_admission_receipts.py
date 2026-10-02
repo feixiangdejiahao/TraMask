@@ -79,17 +79,30 @@ def expected_payload(request):
     return result
 
 
+def parsed_answers(request, completion, method):
+    """Validate recorded answers without invoking the admission implementation."""
+    try:
+        answers = json.loads(completion)
+    except (ValueError, TypeError):
+        return None
+    if method == "compact":
+        if (not isinstance(answers, dict) or set(answers) != {"basis", "judgments"}
+                or not isinstance(answers["basis"], str)):
+            return None
+        answers = answers["judgments"]
+    if (not isinstance(answers, dict) or set(answers) != set(request["check_ids"])
+            or any(not isinstance(value, str) or value not in {"supported", "unsupported", "unknown"}
+                   for value in answers.values())):
+        return None
+    return answers
+
+
 def parsed_verdict(request, completion, finish_reason, method):
     """Independently derive the coarse gate outcome from recorded enum answers."""
     if finish_reason != "stop":
         return "unknown", False
-    try:
-        answers = json.loads(completion)
-    except (ValueError, TypeError):
-        return "unknown", False
-    if (not isinstance(answers, dict) or set(answers) != set(request["check_ids"])
-            or any(not isinstance(value, str) or value not in {"supported", "unsupported", "unknown"}
-                   for value in answers.values())):
+    answers = parsed_answers(request, completion, method)
+    if answers is None:
         return "unknown", False
     if "unsupported" in answers.values():
         return "semantic_rejected", False
@@ -355,14 +368,8 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
                     require(finish == manifest.get("finish_reason"), "Finish reason differs from provider response")
                     expected = parsed_verdict(request, content, finish, prepared.get("method", "legacy"))
                     require(expected == (decision["status"], decision["alarm_eligible"]), "Decision differs from recorded judgments")
-                    try:
-                        judgments = json.loads(content)
-                    except (ValueError, TypeError):
-                        judgments = None
-                    valid_answers = (isinstance(judgments, dict) and set(judgments) == set(request["check_ids"])
-                                     and all(value in {"supported", "unsupported", "unknown"}
-                                             for value in judgments.values() if isinstance(value, str))
-                                     and all(isinstance(value, str) for value in judgments.values()))
+                    judgments = parsed_answers(request, content, prepared.get("method", "legacy"))
+                    valid_answers = judgments is not None
                     detail["semantic_checks"] = dict(
                         valid_complete_answer=valid_answers,
                         all_checks_model_supported=valid_answers and all(value == "supported" for value in judgments.values()),
@@ -370,7 +377,12 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
                         unsupported_checks=[name for name, value in judgments.items() if value == "unsupported"] if valid_answers else [],
                         unknown_checks=[name for name, value in judgments.items() if value == "unknown"] if valid_answers else [],
                         core_complete=request.get("coverage", {}).get("core_complete"),
+                        source_sites_complete=request.get("coverage", {}).get("source_sites_complete"),
+                        completeness_is_hard_admission_requirement=prepared.get("method") == "guarded",
                         gate_reason=decision.get("reason"))
+                    if prepared.get("method") == "compact" and valid_answers:
+                        detail["semantic_checks"]["basis"] = json.loads(content)["basis"]
+                        detail["semantic_checks"]["basis_words"] = len(json.loads(content)["basis"].split())
                     receipts.extend(frozen(path) for path in (response_path, body_path, completion_path))
                 else:
                     require(decision["status"] == "unknown" and not decision["alarm_eligible"], "Incomplete provider response admitted")
@@ -390,6 +402,10 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
         model_supported_but_not_admitted=[item["key"] for item in details
             if item.get("semantic_checks", {}).get("all_checks_model_supported") and item["outcome"] != "admitted"],
         core_incomplete=[item["key"] for item in details if item.get("semantic_checks", {}).get("core_complete") is False])
+    model_support["source_sites_incomplete"] = [item["key"] for item in details
+        if item.get("semantic_checks", {}).get("source_sites_complete") is False]
+    model_support["source_sites_incomplete_admitted"] = [item["key"] for item in details
+        if item.get("semantic_checks", {}).get("source_sites_complete") is False and item["outcome"] == "admitted"]
     return dict(version=VERSION, created_utc=datetime.now(timezone.utc).isoformat(),
                 evaluator_source=frozen(__file__),
                 inputs=dict(baseline=frozen(baseline_path), heldout=frozen(heldout_path),

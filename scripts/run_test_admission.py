@@ -29,7 +29,8 @@ from scripts.evaluate_test_validity import (
 )
 
 
-METHODS = {'legacy': 'relation_search.admission', 'guarded': 'relation_search.guarded_admission'}
+METHODS = {'legacy': 'relation_search.admission', 'guarded': 'relation_search.guarded_admission',
+           'compact': 'relation_search.compact_admission'}
 REQUEST_IDENTITY_VERSION = 'actual-admission-dispatch-fields-v1'
 PROVIDER_TIMEOUT_SECONDS = 300
 

@@ -29,6 +29,23 @@ def test_all_model_support_does_not_admit_incomplete_source_obligations():
     assert audit.parsed_verdict(req, '{"P":"supported"}', "stop", "guarded") == ("unknown", False)
 
 
+def test_compact_nested_schema_and_partial_source_rule_are_explicit():
+    req = request()
+    req["coverage"] = {"source_sites_complete": False, "core_complete": False}
+    complete = {"basis": "All reachable predicates follow from the fixed contract.",
+                "judgments": {"P": "supported", "Q0": "supported"}}
+    assert audit.parsed_verdict(req, json.dumps(complete), "stop", "compact") == ("semantic_supported", True)
+    assert audit.parsed_verdict(req, json.dumps(complete), "length", "compact") == ("unknown", False)
+    for malformed in ({"judgments": complete["judgments"]}, {**complete, "extra": 1},
+                      {**complete, "basis": []}, {**complete, "judgments": {"P": "supported"}},
+                      {**complete, "judgments": {"P": "supported", "Q0": "probably"}}):
+        assert audit.parsed_verdict(req, json.dumps(malformed), "stop", "compact") == ("unknown", False)
+    assert audit.parsed_verdict(req, json.dumps({**complete, "judgments": {"P": "supported", "Q0": "unknown"}}),
+                                "stop", "compact") == ("unknown", False)
+    assert audit.parsed_verdict(req, json.dumps({**complete, "judgments": {"P": "unknown", "Q0": "unsupported"}}),
+                                "stop", "compact") == ("semantic_rejected", False)
+
+
 @pytest.mark.parametrize("payload", [
     {"checks": {"nested": {"native_evidence": []}}},
     {"issue": "invalid_oracle_or_setup"},
