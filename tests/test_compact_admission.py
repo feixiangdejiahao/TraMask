@@ -34,6 +34,14 @@ def test_contract():
     assert 'not_represented_by_Q' in wire['checks']['P']['scope']
 
 
+def test_json_protocol_does_not_depend_on_source_code_vocabulary():
+    result = admission.prepare(*example('def test_value():\n    assert double(3) == 6\n'),
+                               'Compute twice the input.')
+    # The provider rejects json_object requests unless JSON is named in a
+    # message. A codebase mentioning the module by chance must not be needed.
+    assert 'json' in result['request']['system'].lower()
+
+
 def test_source_partial_is_not_reported_as_proved_complete():
     request = dict(id='frozen', check_ids=['P', 'Q0'], coverage={'source_sites_complete': False})
     result = admission.decide(request, {'basis': 'Contract supports the supplied checks.',
