@@ -96,6 +96,31 @@ def test_verifier_detects_artifact_mutation(tmp_path):
         audit.verify(sealed)
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+def test_heldout_labels_are_not_opened_before_receipt_validation(monkeypatch, tmp_path, deferred):
+    """An audit stopped by a bad receipt must still preserve the unopened holdout."""
+    baseline_path = tmp_path / "baseline.json"
+    run = tmp_path / "positive"
+    opened = []
+    documents = {
+        baseline_path: dict(additional_candidate_holdout=dict(selected_keys=["H:0:c"]),
+                            positive_checkpoint={}, review_files=[]),
+        run / "prepared.json": dict(scope="positive"),
+        run / "summary.json": dict(stage="not_complete"),
+    }
+
+    def read_only_expected(path):
+        opened.append(path)
+        assert path in documents, "Deferred audit attempted an unapproved label read"
+        return documents[path]
+
+    monkeypatch.setattr(audit, "read", read_only_expected)
+    monkeypatch.setattr(audit, "verify", lambda _: None)
+    with pytest.raises(ValueError, match="Admission run is not complete"):
+        audit.audit(baseline_path, None if deferred else tmp_path / "sealed_holdout_labels.json", run)
+    assert opened == [baseline_path, run / "prepared.json", run / "summary.json"]
+
+
 def test_complete_program_pairing_preserves_later_oracle_edits_and_rejects_changed_program(tmp_path):
     original = "def test_value():\n    assert compute(1) == 2\n"
     def edit(before, after, role=None):

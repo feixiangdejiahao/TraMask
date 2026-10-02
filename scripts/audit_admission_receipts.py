@@ -332,7 +332,7 @@ def summarize_truth(baseline, heldout, decisions):
     valid_tasks = {row["case"] for row in positives if row["outcome"] == "admitted"}
     for name in ("development", "heldout"):
         for row in groups[name]:
-            if row["outcome"] == "admitted" and row["classification"] == "valid_issue_related_defect":
+            if row["outcome"] == "admitted" and row.get("classification") == "valid_issue_related_defect":
                 valid_tasks.add(row.get("case", row.get("key", "").split(":")[0]))
     known_keys = {key for row in baseline["positive_witnesses"] + baseline["development_reviews"]
                   for key in row["occurrence_keys"]} | {row["key"] for row in heldout["reviews"]}
@@ -352,14 +352,20 @@ def summarize_truth(baseline, heldout, decisions):
 
 
 def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
-    baseline, heldout = read(baseline_path), read(heldout_path)
+    baseline = read(baseline_path)
     for receipt in [baseline["positive_checkpoint"], *baseline["review_files"]]:
         verify(receipt)
     prepared_path, completed_path = Path(run_path) / "prepared.json", Path(run_path) / "summary.json"
     prepared, completed = read(prepared_path), read(completed_path)
+    require(heldout_path is not None or prepared["scope"] in {"positive", "development"},
+            "Deferred heldout-label audit only supports positive/development scopes")
     require(completed["stage"] == "complete", "Admission run is not complete")
     verify(completed["prepared"])
     require(completed["prepared"]["sha256"] == sha(prepared_path), "Summary links different prepared run")
+    # Open holdout labels only after confirming a completed run tied to its
+    # frozen preparation. No evaluator truth can affect provider decisions.
+    heldout = (read(heldout_path) if heldout_path is not None else
+               dict(reviews=[dict(key=key) for key in baseline["additional_candidate_holdout"]["selected_keys"]]))
     verify(prepared["baseline"])
     selected_inventory = read(prepared["baseline"]["path"])
     if prepared["baseline"]["sha256"] != sha(baseline_path):
@@ -521,7 +527,8 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
     return dict(version=VERSION, created_utc=datetime.now(timezone.utc).isoformat(),
                 evaluator_source=frozen(__file__),
                 evaluator_dependencies=[frozen(ROOT / "scripts/audit_admission_source_additions.py")],
-                inputs=dict(baseline=frozen(baseline_path), heldout=frozen(heldout_path),
+                heldout_labels_deferred=heldout_path is None,
+                inputs=dict(baseline=frozen(baseline_path), heldout=frozen(heldout_path) if heldout_path is not None else None,
                             prepared=frozen(prepared_path), completed=frozen(completed_path)),
                 source_seals=seals, checked_unique_input_artifacts=len(checked_inputs),
                 source_commit=source_commit, receipt_hashes=receipts, items=details,
@@ -542,7 +549,9 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--baseline", type=Path, required=True)
-    parser.add_argument("--heldout-reviews", type=Path, required=True)
+    heldout = parser.add_mutually_exclusive_group(required=True)
+    heldout.add_argument("--heldout-reviews", type=Path)
+    heldout.add_argument("--defer-heldout-labels", action="store_true")
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--source-commit")
     parser.add_argument("--output", type=Path, required=True)
