@@ -177,3 +177,125 @@ def test_other_languages_explicitly_unsupported_and_limits_validated():
     assert analyze(dict(corpus, language='go'), frontend, candidate)['status'] == 'unsupported_language'
     with pytest.raises(ValueError):
         analyze(corpus, frontend, candidate, max_controls=-1)
+
+
+def test_injected_sibling_is_never_recovered_as_original_control():
+    corpus, frontend, candidate = prepare(BASE)
+    selected = corpus['tests'][candidate['base_test_id']]['span']
+    before = BASE.encode()[selected['start_byte']:selected['end_byte']].decode()
+    after = before.replace('"old"', '"new"') + '''
+def test_injected(reader):
+    result = reader.consume("new")
+    assert result == "candidate-invented oracle"
+'''
+    candidate['edits'] = [dict(span=selected, before=before, after=after, role='input')]
+    result = analyze(corpus, frontend, candidate)
+    assert [r['name'] for r in result['controls']] == ['test_existing']
+    assert 'candidate-invented oracle' not in str(result)
+    assert result['controls'][0]['source_version'] == 'original'
+
+
+def test_candidate_added_import_binding_is_suppressed_without_guessing():
+    corpus, frontend, candidate = prepare(BASE)
+    candidate['imports'] = [dict(name='Reader', module='different', imported_name='Fake')]
+    result = analyze(corpus, frontend, candidate)
+    assert result['status'] == 'unknown_added_import_bindings'
+    assert not result['controls'] and not result['documentation_links']
+
+
+@pytest.mark.parametrize('statement', ['reader = other\n', 'del reader\n',
+    'if flag:\n    reader = other\n', 'for reader in values:\n    pass\n',
+    'try:\n    go()\nexcept Error as reader:\n    pass\n'])
+def test_module_reassignment_invalidates_fixture_identity(statement):
+    code = BASE.replace('def test_existing(reader):', statement + 'def test_existing(reader):')
+    assert not analyze(*prepare(code))['controls']
+
+
+def test_module_reassignment_invalidates_local_function_identity():
+    code = '''def consume(value):
+    return value
+consume = replacement
+def test_existing():
+    assert consume("new") == 1
+def test_new():
+    assert consume("old") == 1
+'''
+    assert not analyze(*prepare(code))['controls']
+
+
+@pytest.mark.parametrize('parameters', ['reader=None', 'reader, /', '*reader', '**reader', '*, reader=None'])
+def test_noninjectable_parameter_is_not_a_pytest_fixture(parameters):
+    code = BASE.replace('def test_new(reader):', f'def test_new({parameters}):')
+    assert not analyze(*prepare(code))['controls']
+
+
+def test_required_keyword_only_parameter_can_be_a_fixture():
+    code = BASE.replace('def test_new(reader):', 'def test_new(*, reader):')
+    assert [r['name'] for r in analyze(*prepare(code))['controls']] == ['test_existing']
+
+
+def test_expected_value_assignment_does_not_boost_literal_ranking():
+    code = BASE.replace('def test_existing(reader):', '''def test_unrelated_expected(reader):
+    expected = "new-sample"
+    result = reader.consume("unrelated-input")
+    assert result == expected
+def test_existing(reader):''')
+    result = analyze(*prepare(code, after='"new-sample"'), max_controls=1)
+    assert result['controls'][0]['name'] == 'test_existing'
+    assert result['controls'][0]['literal_fragment_score'] == len('new-sample')
+    # Changing only an unrelated expected assignment cannot affect its score.
+    other = code.replace('expected = "new-sample"', 'expected = "unrelated-expectation"')
+    left = analyze(*prepare(code, after='"new-sample"'))
+    right = analyze(*prepare(other, after='"new-sample"'))
+    assert [(r['name'], r['literal_fragment_score']) for r in left['controls']] == [
+        (r['name'], r['literal_fragment_score']) for r in right['controls']]
+
+
+def test_matched_call_input_follows_simple_assignments_and_loop_provenance():
+    code = BASE.replace('result = reader.consume("new-sample")\n    assert result == 1', '''prefix = "new-sample"
+    data = prefix + "tail"
+    for chunk in pieces(data):
+        assert reader.consume(chunk) == 1''')
+    control, = analyze(*prepare(code, after='"new-sample"'))['controls']
+    assert control['literal_fragment_score'] == len('new-sample')
+
+
+def test_original_and_modified_offsets_are_versioned_independently():
+    # Put the example and fixture after the edited test, so every original
+    # context offset differs from its modified-source position.
+    code = '''import pytest
+from library.reader import Reader
+def test_new(reader):
+    assert reader.consume("old") == 1
+@pytest.fixture
+def reader():
+    return Reader()
+def test_existing(reader):
+    assert reader.consume("new-sample") == 1
+'''
+    data = prepare(code, after='"new-sample-longer"')
+    result = analyze(*data)
+    control, = result['controls']
+    assert control['span']['version'] == 'original'
+    assert code.encode()[control['span']['start_byte']:control['span']['end_byte']].decode() == control['code']
+    match, = control['matches']
+    assert match['example_call']['version'] == 'original'
+    assert match['changed_call']['version'] == 'modified'
+    assert match['fixture']['source_version'] == 'original'
+    fixture = match['fixture']
+    assert fixture['span']['version'] == 'original'
+    assert code.encode()[fixture['span']['start_byte']:fixture['span']['end_byte']].decode() == fixture['code']
+    assert result['original_source_sha256'] != result['modified_source_sha256']
+
+
+@pytest.mark.parametrize('binding, adapter', [('import pytest', 'pytest.raises'), ('from pytest import raises as raises_error', 'raises_error')])
+def test_functional_exception_adapter_expected_regex_is_not_an_input_seed(binding, adapter):
+    code = f'''{binding}
+from library import parse
+def test_existing():
+    {adapter}(ValueError, parse, "new", match="expected-regex")
+def test_new():
+    {adapter}(ValueError, parse, "old", match="new")
+'''
+    result = analyze(*prepare(code))
+    assert not result['controls'] and result['unknowns']

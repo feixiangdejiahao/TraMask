@@ -13,9 +13,12 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(ROOT))
 VERSION = "independent-admission-receipt-audit.v1"
 FORBIDDEN_KEYS = {
     "positive_witnesses", "development_reviews", "heldout_reviews", "native_evidence",
@@ -423,6 +426,10 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
                 detail["complete_program_pairing"] = verify_prompt_program(request, record, source_cache)
                 if prepared.get("method") == "compact":
                     detail["compact_references"] = verify_compact_references(request, read(item["analysis_path"]))
+                    if "additional_source_analyses" in read(item["analysis_path"]):
+                        from scripts.audit_admission_source_additions import verify_additions
+                        detail["additional_source_provenance"] = verify_additions(
+                            request, read(item["analysis_path"]), record, source_cache)
             if request.get("request_identity_version") == "actual-admission-dispatch-fields-v1":
                 require(request["id"] == request_identity(request), "Actual dispatch request identity changed")
             size = len(request["system"].encode()) + len(request["prompt"].encode())
@@ -513,6 +520,7 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
         if item.get("semantic_checks", {}).get("source_sites_complete") is False and item["outcome"] == "admitted"]
     return dict(version=VERSION, created_utc=datetime.now(timezone.utc).isoformat(),
                 evaluator_source=frozen(__file__),
+                evaluator_dependencies=[frozen(ROOT / "scripts/audit_admission_source_additions.py")],
                 inputs=dict(baseline=frozen(baseline_path), heldout=frozen(heldout_path),
                             prepared=frozen(prepared_path), completed=frozen(completed_path)),
                 source_seals=seals, checked_unique_input_artifacts=len(checked_inputs),
@@ -527,6 +535,7 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
                              "Model support remains a hypothesis for candidates lacking independent truth.",
                              "Unknown suppression, semantic rejection and pending selection are distinct outcomes.",
                              "Prompt inspection checks actual fields, known label values, full review reasons and full native messages; it is not a proof against every possible information leak.",
+                             "Optional source-fact audits verify source bytes, source versions and stated evidence roles; they do not prove binding identity, ranking independence or semantic validity.",
                              "No population precision or zero-FP claim follows from incomplete frontier adjudication."])
 
 

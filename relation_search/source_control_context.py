@@ -9,18 +9,22 @@ issue text, outcomes, labels and candidate identifiers play no part.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from difflib import SequenceMatcher
 import hashlib
 import re
+from types import SimpleNamespace
 
 
-VERSION = 'same-binding-source-controls.v1'
+VERSION = 'same-binding-source-controls.v2'
 POLICY = dict(
-    scope='python module-level test_ functions in complete modified owner source',
+    scope='original Python module-level test_ definitions; modified source supplies edited-call seeds only',
     seeds='calls whose argument overlaps a non-oracle edit',
     identity='same unique fixture declaration and method; explicit imported API; local function declaration',
     ranking='fixture identity first, then maximum contiguous literal fragment length, then source order',
-    literals='changed-call argument literals versus first 64 setup/call string/bytes literals, at most 256 characters each; docstrings/assert statements excluded',
+    literals='matched actual arguments and at most four backward unique assignment/loop bindings; first 64 literals of at most 256 characters; unrelated expectations never scanned',
+    added_imports='suppress context when candidate-added imports are not revalidated',
+    validation_adapters='pytest raises/warns/deprecated_call/approx/fail are not input-call identities; their mixed actual/expected arguments are unmodelled',
     docs='module header URLs of receiver constructor/API plus one unique local import hop; links only',
     validity='examples only; no expectation transfer or semantic equivalence is proved',
 )
@@ -46,21 +50,46 @@ def _offsets(code):
     return offsets
 
 
-def _span(node, path, offsets, decorated=False):
+def _span(node, path, offsets, decorated=False, version='modified'):
     first = min([node, *getattr(node, 'decorator_list', [])], key=lambda n: (n.lineno, n.col_offset)) if decorated else node
     start = offsets[first.lineno - 1] + first.col_offset
     if decorated and first is not node:
         start -= 1  # include the @ token preceding the decorator expression
     return dict(path=path, start_byte=start,
                 end_byte=offsets[node.end_lineno - 1] + node.end_col_offset,
-                line=first.lineno, end_line=node.end_lineno)
+                line=first.lineno, end_line=node.end_lineno, version=version)
 
 
 def _overlap(a, b):
     return a['path'] == b['path'] and a['start_byte'] < b['end_byte'] and b['start_byte'] < a['end_byte']
 
 
+def _module_bindings(tree):
+    """Count visible module writes, without treating function locals as globals."""
+    names = Counter()
+    wildcard = False
+    for node in _walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names[node.id] += 1
+        elif isinstance(node, (*_FUNCTIONS, ast.ClassDef)):
+            names[node.name] += 1
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                wildcard |= alias.name == '*'
+                names[alias.asname or alias.name.split('.')[0]] += 1
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names[node.name] += 1
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            names[node.name] += 1
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names[node.rest] += 1
+    return names, wildcard
+
+
 def _imports(tree):
+    counts, wildcard = _module_bindings(tree)
+    if wildcard:
+        return {}
     result, ambiguous, bindings = {}, set(), set()
     for node in tree.body:
         if isinstance(node, ast.Import):
@@ -90,7 +119,7 @@ def _imports(tree):
                     bindings.update(alias.asname or alias.name.split('.')[0] for alias in nested.names)
                 elif isinstance(nested, (*_FUNCTIONS, ast.ClassDef)):
                     bindings.add(nested.name)
-    return {name: value for name, value in result.items() if name not in ambiguous | bindings}
+    return {name: value for name, value in result.items() if name not in ambiguous | bindings and counts[name] == 1}
 
 
 def _chain(node):
@@ -149,6 +178,14 @@ def _parametrized(function):
     return result
 
 
+def _injectable_parameters(function):
+    positional = [*function.args.posonlyargs, *function.args.args]
+    required = {arg.arg for arg in positional[:len(positional) - len(function.args.defaults)]}
+    required -= {arg.arg for arg in function.args.posonlyargs}
+    required.update(arg.arg for arg, default in zip(function.args.kwonlyargs, function.args.kw_defaults) if default is None)
+    return required
+
+
 def _fixtures(functions, imports):
     found = {}
     for function in functions:
@@ -170,23 +207,46 @@ def _fixtures(functions, imports):
             and sum(f.name == rows[0].name for f in functions) == 1}
 
 
-def _literals(function):
-    doc = function.body[0] if function.body and isinstance(function.body[0], ast.Expr) and isinstance(function.body[0].value, ast.Constant) and isinstance(function.body[0].value.value, str) else None
-    assertion_nodes = {id(part) for check in _walk(function) if isinstance(check, ast.Assert)
-                       for part in ast.walk(check)}
+def _input_literals(call, function):
+    """A bounded backward syntax slice of this call's actual arguments.
+
+    Multiple prior definitions are ambiguous and contribute no propagated
+    literal. Unrelated setup/oracle assignments are never visited.
+    """
+    definitions = {}
+    for node in _walk(function):
+        target = value = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target, value = node.target, node.value
+        elif isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name):
+            target, value = node.target, node.iter
+        elif isinstance(node, (ast.AugAssign, ast.NamedExpr)) and isinstance(node.target, ast.Name):
+            target = node.target  # deliberately not propagated
+        if target is not None:
+            definitions.setdefault(target.id, []).append((target, value))
     values = []
-    for statement in function.body:
-        if statement is doc or isinstance(statement, ast.Assert):
-            continue
-        for node in _walk(statement):
-            if id(node) in assertion_nodes:
-                continue
-            if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
-                value = node.value if isinstance(node.value, str) else node.value.decode('latin1')
-                if 2 <= len(value) <= 256:
-                    values.append(value)
-                    if len(values) == 64:
-                        return values
+    def collect(node, hops=0, seen=frozenset()):
+        if node is None or len(values) >= 64:
+            return
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+            value = node.value if isinstance(node.value, str) else node.value.decode('latin1')
+            if 2 <= len(value) <= 256:
+                values.append(value)
+        elif isinstance(node, ast.Name) and hops < 4 and node.id not in seen:
+            prior = [(target, value) for target, value in definitions.get(node.id, [])
+                     if (target.lineno, target.col_offset) < (node.lineno, node.col_offset)]
+            if len(prior) == 1:
+                collect(prior[0][1], hops + 1, seen | {node.id})
+        elif isinstance(node, ast.Call):
+            for argument in [*node.args, *(k.value for k in node.keywords)]:
+                collect(argument, hops, seen)
+        elif not isinstance(node, (*_FUNCTIONS, ast.ClassDef, ast.Lambda)):
+            for child in ast.iter_child_nodes(node):
+                collect(child, hops, seen)
+    for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
+        collect(argument)
     return values
 
 
@@ -200,20 +260,23 @@ def _identity(call, function, fixtures, imports, functions, path, offsets):
     parts = _chain(call.func)
     if not parts:
         return None
-    if len(parts) == 2 and parts[0] in parameters and parts[0] in fixtures:
+    if len(parts) == 2 and parts[0] in _injectable_parameters(function) and parts[0] in fixtures:
         if parts[0] in assigned or parts[0] in _parametrized(function):
             return None
         fixture = fixtures[parts[0]]
-        position = _span(fixture, path, offsets)
-        return dict(key=('fixture', path, position['start_byte'], parts[1]), kind='same_fixture_definition_and_method',
+        signature = hashlib.sha256(ast.dump(fixture, include_attributes=False).encode()).hexdigest()
+        return dict(key=('fixture', path, fixture.name, signature, parts[1]), kind='same_fixture_definition_and_method',
                     priority=1, fixture=fixture)
     imported = _import_symbol(call.func, imports, parameters | stored)
     if imported and imported[1]:
+        if imported[0] == 'pytest' and imported[1] in {'raises', 'warns', 'deprecated_call', 'approx', 'fail'}:
+            return None
         return dict(key=('import', *imported), kind='same_explicit_import_binding', priority=0,
                     module=imported[0])
     if len(parts) == 1 and parts[0] not in parameters | stored and len(functions.get(parts[0], [])) == 1:
         declaration = functions[parts[0]][0]
-        return dict(key=('local', path, _span(declaration, path, offsets)['start_byte']),
+        signature = hashlib.sha256(ast.dump(declaration, include_attributes=False).encode()).hexdigest()
+        return dict(key=('local', path, declaration.name, signature),
                     kind='same_local_function_declaration', priority=0)
     return None
 
@@ -240,7 +303,7 @@ def _header_urls(source):
     for match in _URL.finditer(header):
         url = match.group().rstrip('.,;)')
         start = len(header[:match.start()].encode())
-        links.append(dict(url=url, span=dict(path=source.path, start_byte=start, end_byte=start + len(url.encode())),
+        links.append(dict(url=url, span=dict(path=source.path, start_byte=start, end_byte=start + len(url.encode()), version='original'),
                           source='repository_comment_or_docstring_link', fetched=False,
                           normative_status='not_established_by_link_alone'))
     return links, sorted({module for module, _ in _imports(tree).values() if module})
@@ -258,21 +321,36 @@ def analyze(corpus, frontend, candidate, *, max_controls=3, max_control_bytes=80
         raise ValueError('context budgets must be nonnegative integers')
     try:
         candidate = program_candidate(candidate)
+        if candidate.get('imports'):
+            return dict(result, status='unknown_added_import_bindings',
+                        unknowns=[dict(reason='candidate_added_imports_not_revalidated')])
         sources, owner, changes, *_ = _modified_sources(corpus, candidate)
         tree = ast.parse(owner.code)
         offsets = _offsets(owner.code)
         functions = [n for n in tree.body if isinstance(n, _FUNCTIONS)]
+        counts, wildcard = _module_bindings(tree)
         named = {}
         for function in functions:
-            named.setdefault(function.name, []).append(function)
+            if counts[function.name] == 1 and not wildcard:
+                named.setdefault(function.name, []).append(function)
         selected = corpus['tests'][candidate['base_test_id']]
         definition = selected.get('definition_span', selected['span'])
         roots = [f for f in functions if _span(f, owner.path, offsets)['start_byte'] == definition['start_byte']]
-        if len(roots) != 1:
+        if len(roots) != 1 or counts[roots[0].name] != 1 or wildcard:
             return dict(result, status='unknown_root_scope')
         root = roots[0]
         imports = _imports(tree)
-        fixtures = _fixtures(functions, imports)
+        fixtures = _fixtures([f for f in functions if counts[f.name] == 1], imports)
+        original_code = corpus['sources'][owner.path]['code']
+        original_data = original_code.encode()
+        original_tree = ast.parse(original_code)
+        original_offsets = _offsets(original_code)
+        original_counts, original_wildcard = _module_bindings(original_tree)
+        original_functions = [f for f in original_tree.body if isinstance(f, _FUNCTIONS)
+                              and original_counts[f.name] == 1 and not original_wildcard]
+        original_named = {f.name: [f] for f in original_functions}
+        original_imports = _imports(original_tree)
+        original_fixtures = _fixtures(original_functions, original_imports)
         seeds = []
         for node in _walk(root):
             if not isinstance(node, ast.Call):
@@ -286,52 +364,48 @@ def analyze(corpus, frontend, candidate, *, max_controls=3, max_control_bytes=80
                 seeds.append((node, identity))
             else:
                 result['unknowns'].append(dict(reason='edited_call_binding_not_established', span=_span(node, owner.path, offsets)))
-        root_literals = []
-        for call, _ in seeds:
-            for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
-                for literal in _walk(argument):
-                    if isinstance(literal, ast.Constant) and isinstance(literal.value, (str, bytes)):
-                        value = literal.value if isinstance(literal.value, str) else literal.value.decode('latin1')
-                        if 2 <= len(value) <= 256 and len(root_literals) < 64:
-                            root_literals.append(value)
         ranked, modules = [], set()
-        for function in functions:
-            if function is root or not function.name.startswith('test_'):
+        for function in original_functions:
+            position = _span(function, owner.path, original_offsets, decorated=True, version='original')
+            if _overlap(position, selected['span']) or not function.name.startswith('test_'):
                 continue
             matches = []
             for call in _walk(function):
                 if not isinstance(call, ast.Call):
                     continue
-                identity = _identity(call, function, fixtures, imports, named, owner.path, offsets)
+                identity = _identity(call, function, original_fixtures, original_imports,
+                                     original_named, owner.path, original_offsets)
                 if not identity:
                     continue
                 for changed_call, seed in seeds:
                     if identity['key'] == seed['key']:
-                        matches.append((changed_call, call, seed))
+                        matches.append((changed_call, call, identity))
             if not matches:
                 continue
-            score = max(m[2]['priority'] for m in matches), _similarity(root_literals, _literals(function))
-            position = _span(function, owner.path, offsets, decorated=True)
-            code = owner.data[position['start_byte']:position['end_byte']].decode()
+            score = max(m[2]['priority'] for m in matches), max(
+                _similarity(_input_literals(changed, root), _input_literals(example, function))
+                for changed, example, _ in matches)
+            code = original_data[position['start_byte']:position['end_byte']].decode()
             records = []
             for changed_call, call, identity in matches:
                 record = dict(identity=list(identity['key']), basis=identity['kind'],
                               changed_call=_span(changed_call, owner.path, offsets),
-                              example_call=_span(call, owner.path, offsets), equivalence_proved=False)
+                              example_call=_span(call, owner.path, original_offsets, version='original'), equivalence_proved=False)
                 if 'fixture' in identity:
                     fixture = identity['fixture']
-                    extent = _span(fixture, owner.path, offsets, decorated=True)
-                    record['fixture'] = dict(span=extent, code=owner.data[extent['start_byte']:extent['end_byte']].decode())
+                    extent = _span(fixture, owner.path, original_offsets, decorated=True, version='original')
+                    record['fixture'] = dict(span=extent, code=original_data[extent['start_byte']:extent['end_byte']].decode(),
+                                             source_version='original')
                     returned = [n.value for n in _walk(fixture) if isinstance(n, ast.Return)]
                     if len(returned) == 1 and isinstance(returned[0], ast.Call):
-                        symbol = _import_symbol(returned[0].func, imports, _names(fixture)[2])
+                        symbol = _import_symbol(returned[0].func, original_imports, _names(fixture)[2])
                         if symbol:
                             modules.add(symbol[0])
                 elif 'module' in identity:
                     modules.add(identity['module'])
                 records.append(record)
             ranked.append((score, position['start_byte'], dict(name=function.name, span=position, code=code,
-                matches=records, literal_fragment_score=score[1], oracle_validity='unconfirmed_source_example')))
+                source_version='original', matches=records, literal_fragment_score=score[1], oracle_validity='unconfirmed_source_example')))
         used = 0
         for score, _, row in sorted(ranked, key=lambda r: (-r[0][0], -r[0][1], r[1])):
             if len(result['controls']) >= max_controls:
@@ -343,15 +417,16 @@ def analyze(corpus, frontend, candidate, *, max_controls=3, max_control_bytes=80
             used += size
         links = []
         visited = set()
+        original_sources = [SimpleNamespace(path=path, code=row['code']) for path, row in corpus['sources'].items()]
         for module in sorted(modules):
-            source = _module_source(module, sources)
+            source = _module_source(module, original_sources)
             if source is None:
                 continue
             current, children = _header_urls(source)
             links.extend(current)
             visited.add(source.path)
             for child in children:
-                nested = _module_source(child, sources)
+                nested = _module_source(child, original_sources)
                 if nested is not None and nested.path not in visited:
                     visited.add(nested.path)
                     current, _ = _header_urls(nested)
@@ -359,7 +434,8 @@ def analyze(corpus, frontend, candidate, *, max_controls=3, max_control_bytes=80
         unique = {row['url']: row for row in links}
         result['documentation_links'] = [unique[url] for url in sorted(unique)[:max_urls]]
         return dict(result, status='analyzed', matched_examples=len(ranked), selected_control_bytes=used,
-                    source_sha256=hashlib.sha256(owner.data).hexdigest())
+                    original_source_sha256=hashlib.sha256(original_data).hexdigest(),
+                    modified_source_sha256=hashlib.sha256(owner.data).hexdigest())
     except (SyntaxError, KeyError, ValueError, TypeError, AttributeError, RecursionError) as error:
         return dict(result, status='unknown_source_context', controls=[], documentation_links=[],
                     unknowns=[dict(reason='source_context_unavailable', detail=str(error))])
