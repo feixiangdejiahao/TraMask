@@ -113,6 +113,60 @@ def parsed_verdict(request, completion, finish_reason, method):
     return "semantic_supported", True
 
 
+def verify_prompt_program(request, record, cache):
+    """Reconstruct the fixed source test independently from frozen edit bytes.
+
+    Native probes are excluded using the accepted candidate's pre-probe edit
+    snapshot; later oracle edits without instrumentation remain in the program.
+    No parser, analyzer, provider or subject module is imported or executed.
+    """
+    corpus_path = record["inputs"]["corpus"]["path"]
+    candidates_path = record["inputs"]["candidates"]["path"]
+    if corpus_path not in cache:
+        cache[corpus_path] = read(corpus_path)
+    if candidates_path not in cache:
+        cache[candidates_path] = unique(read(candidates_path), "id", "accepted candidate")
+    corpus = cache[corpus_path]
+    candidate = cache[candidates_path][record["candidate_id"]]
+
+    def edit_identity(edit):
+        span = edit["span"]
+        return (span["path"], span["start_byte"], span["end_byte"], edit["before"], edit["after"])
+
+    if candidate.get("instrumentation", {}).get("status") == "instrumented":
+        edits = list(candidate["program_edits"])
+        for edit in candidate.get("edits", []):
+            if (edit.get("role") == "semantic_expected" and not edit.get("instrumented_prefix")
+                    and edit_identity(edit) not in {edit_identity(old) for old in edits}):
+                edits.append(edit)
+    else:
+        edits = candidate.get("edits", [])
+    program_candidate = {**candidate, "edits": edits}
+    digest = hashlib.sha256(json.dumps(program_candidate, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":")).encode()).hexdigest()
+    require(digest == request["candidate_sha256"], "Requested candidate program identity differs from frozen candidate")
+    span = corpus["tests"][candidate["base_test_id"]]["span"]
+    full_source = corpus["sources"][span["path"]]["code"].encode()
+    original = full_source[span["start_byte"]:span["end_byte"]]
+    modified = original
+    ordered = sorted(edits, key=lambda edit: edit["span"]["start_byte"])
+    for left, right in zip(ordered, ordered[1:]):
+        require(left["span"]["end_byte"] <= right["span"]["start_byte"], "Overlapping source program edits")
+    for edit in reversed(ordered):
+        position = edit["span"]
+        begin, end = position["start_byte"] - span["start_byte"], position["end_byte"] - span["start_byte"]
+        require(position["path"] == span["path"] and 0 <= begin <= end <= len(original),
+                "Edited source lies outside selected test")
+        require(original[begin:end].decode() == edit["before"], "Edit before bytes differ from frozen source")
+        modified = modified[:begin] + edit["after"].encode() + modified[end:]
+    payload = json.loads(request["prompt"])
+    require(payload["original_test"] == original.decode(), "Prompt original test differs from frozen source")
+    require(payload["modified_test"] == modified.decode(), "Prompt modified test differs from frozen complete program")
+    return dict(candidate_sha256=digest, original_test_sha256=hashlib.sha256(original).hexdigest(),
+                modified_test_sha256=hashlib.sha256(modified).hexdigest(), program_edits=len(edits),
+                exact_frozen_test_program=True, native_instrumentation_excluded=True)
+
+
 def prompt_exclusions(request, truth, record):
     """Inspect dispatched text, not self-reported no-label/no-outcome flags.
 
@@ -287,7 +341,7 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
     truth = baseline["positive_witnesses"] + baseline["development_reviews"] + heldout["reviews"]
     calls = accounted = missing = prompt_tokens = completion_tokens = reasoning_tokens = 0
     seconds = 0.0
-    details, receipts, checked_inputs = [], [], set()
+    details, receipts, checked_inputs, source_cache = [], [], set(), {}
     for key, item in items.items():
         require(key in expected_keys, "Unexpected occurrence key")
         record, row = pool[key], decisions[key]
@@ -313,11 +367,12 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
         if item["request_path"]:
             require(sha(item["request_path"]) == item["request_sha256"], "Frozen request changed")
             request = read(item["request_path"])
-            if prepared.get("method") == "guarded":
+            if prepared.get("method") in {"guarded", "compact"}:
                 require(set(json.loads(request["prompt"])["checks"]) == set(request["check_ids"]),
                         "Request check IDs differ from actual prompt obligations")
                 require(read(item["analysis_path"])["coverage"] == request["coverage"],
                         "Request obligation coverage differs from source analysis")
+                detail["complete_program_pairing"] = verify_prompt_program(request, record, source_cache)
             if request.get("request_identity_version") == "actual-admission-dispatch-fields-v1":
                 require(request["id"] == request_identity(request), "Actual dispatch request identity changed")
             size = len(request["system"].encode()) + len(request["prompt"].encode())

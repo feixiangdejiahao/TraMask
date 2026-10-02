@@ -1,4 +1,5 @@
 """Independent audits must preserve denominators and detect content tampering."""
+import hashlib
 import json
 
 import pytest
@@ -93,3 +94,28 @@ def test_verifier_detects_artifact_mutation(tmp_path):
     path.write_text('{"changed":true}')
     with pytest.raises(ValueError, match="Changed artifact"):
         audit.verify(sealed)
+
+
+def test_complete_program_pairing_preserves_later_oracle_edits_and_rejects_changed_program(tmp_path):
+    original = "def test_value():\n    assert compute(1) == 2\n"
+    def edit(before, after, role=None):
+        begin = original.index(before)
+        return dict(span=dict(path="tests/test_value.py", start_byte=begin, end_byte=begin + len(before)),
+                    before=before, after=after, **({"role": role} if role else {}))
+    input_edit, oracle_edit = edit("1", "3"), edit("2", "6", "semantic_expected")
+    candidate = dict(id="c", base_test_id="test", instrumentation={"status": "instrumented"},
+                     program_edits=[input_edit], edits=[{**input_edit, "after": "PROBE()", "instrumented_prefix": True}, oracle_edit])
+    corpus = dict(tests={"test": {"span": dict(path="tests/test_value.py", start_byte=0, end_byte=len(original))}},
+                  sources={"tests/test_value.py": {"code": original}})
+    corpus_path, candidates_path = tmp_path / "corpus.json", tmp_path / "candidates.json"
+    corpus_path.write_text(json.dumps(corpus))
+    candidates_path.write_text(json.dumps([candidate]))
+    program = {**candidate, "edits": [input_edit, oracle_edit]}
+    digest = hashlib.sha256(json.dumps(program, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    record = dict(candidate_id="c", inputs={"corpus": {"path": str(corpus_path)}, "candidates": {"path": str(candidates_path)}})
+    prompt = {"original_test": original, "modified_test": "def test_value():\n    assert compute(3) == 6\n"}
+    req = dict(candidate_sha256=digest, prompt=json.dumps(prompt))
+    assert audit.verify_prompt_program(req, record, {})["exact_frozen_test_program"]
+    prompt["modified_test"] = original
+    with pytest.raises(ValueError, match="modified test differs"):
+        audit.verify_prompt_program({**req, "prompt": json.dumps(prompt)}, record, {})
