@@ -13,7 +13,7 @@ import posixpath
 
 from anchor_retrieval.syntax import ATTRS, FUNCTIONS, Source, attr_parts, child, literal, walk
 
-VERSION = 'source-observation-address-effects.v2'
+VERSION = 'source-observation-address-effects.v3'
 INDEXES = {'subscript','subscript_expression','index_expression'}
 ASSIGNMENTS = {'assignment','augmented_assignment','assignment_statement','short_var_declaration',
                'assignment_expression','augmented_assignment_expression','variable_declarator','var_spec'}
@@ -181,7 +181,7 @@ def summarize_method(index,function_id,*,max_nodes=4000):
             if type(value) not in {str,int,float,bool,type(None)}:
                 return None
             literal_kind=(name if value is None else 'go_rune' if source.language=='go' and name.startswith("'") else type(value).__name__)
-            return dict(kind='literal',literal_kind=literal_kind,text=name,value=value)
+            return dict(kind='literal',literal_kind=literal_kind,text=name,value=value,value_span=_ref(source,node))
 
         def address(node,environment):
             node=_unwrap(node)

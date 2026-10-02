@@ -217,3 +217,12 @@ def test_exception_import_delete_or_with_bindings_do_not_inherit_formal_key(stat
 def test_typescript_catch_parameter_is_not_original_formal():
     _,get=setup('class Box { read(key:string) { try { throw Error(); } catch(key) { return this.items[key]; } } }','typescript')
     assert get('read')['status']=='unknown'
+
+
+def test_literal_key_alias_keeps_definition_and_address_use_refs_distinct():
+    code='class Box:\n def read(self):\n  key="fixed"\n  alias=key\n  return self.items[alias]\n'
+    _,get=setup(code);effect=get('read')['reads'][0]
+    value=effect['key']['value_span'];use=effect['key_span']
+    assert code.encode()[value['start_byte']:value['end_byte']].decode()==effect['key']['text']=='"fixed"'
+    assert code.encode()[use['start_byte']:use['end_byte']].decode()=='alias'
+    assert value['start_byte']<use['start_byte']
