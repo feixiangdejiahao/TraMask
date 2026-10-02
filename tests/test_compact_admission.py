@@ -106,3 +106,42 @@ def test_reject():
     assert check['requires'] == 'matching_exception_adapter_exit'
     assert check['region']
     assert "load('bad')" in payload['modified_test']
+
+
+def test_conditional_false_fact_is_evidence_not_an_unconditional_test_rejection():
+    code = '''import pytest
+def test_expected_failure():
+    with pytest.raises(AssertionError):
+        assert len([1]) == []
+'''
+    result = admission.prepare(*example(code), 'This check deliberately verifies assertion failure.')
+    assert result['status'] == 'prepared'
+    payload = json.loads(result['request']['prompt'])
+    facts = payload['conditional_predicate_facts']
+    assert len(facts['facts']) == 1
+    assert facts['facts'][0]['normal_completion_value'] is False
+    assert facts['facts'][0]['implies_test_invalid'] is False
+    assert 'normally' in facts['premise']
+    assert any(check.get('kind') == 'expected_exception' for check in payload['checks'].values())
+
+
+def test_old_tests_can_supply_context_without_being_selected_validation_roots():
+    code = '''import pytest
+@pytest.fixture
+def reader():
+    return Reader()
+def test_existing(reader):
+    assert reader.read('abc') == 'ok'
+def test_new(reader):
+    assert reader.read('abd') == 'ok'
+'''
+    corpus, frontend, candidate = example(code)
+    new_id = next(key for key in corpus['tests'] if 'test_new' in key)
+    corpus['tests'] = {new_id: corpus['tests'][new_id]}
+    candidate['base_test_id'] = new_id
+    start = code.index("'abd'")
+    candidate['edits'] = [dict(span=dict(path='tests/test_acceptance.py', start_byte=start,
+                                       end_byte=start + 5), before="'abd'", after="'abe'", role='input')]
+    result = admission.prepare(corpus, frontend, candidate, 'Reader accepts the supplied input formats.')
+    payload = json.loads(result['request']['prompt'])
+    assert any(control['name'] == 'test_existing' for control in payload['recovered_source_controls'])
