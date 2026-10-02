@@ -119,3 +119,24 @@ def test_complete_program_pairing_preserves_later_oracle_edits_and_rejects_chang
     prompt["modified_test"] = original
     with pytest.raises(ValueError, match="modified test differs"):
         audit.verify_prompt_program({**req, "prompt": json.dumps(prompt)}, record, {})
+
+
+def test_compact_excerpt_uses_character_prefix_and_retains_complete_source():
+    code = "变量" * 200
+    reference = dict(source="S0", start=0, end=len(code.encode()))
+    block = dict(path="tests/test.py", start_byte=0, end_byte=len(code.encode()), code=code)
+    site = dict(unit="V0", kind="assert_expression", at=reference, predicate=reference, guards=[])
+    document = dict(sources={"S0": block}, obligations={"Q0": site})
+    check = dict(unit="V0", kind="assert_expression", at=reference,
+                 expression=dict(ref=reference, text=code[:320], omitted_chars=80), guards=[], exception_regions=[])
+    payload = dict(checks={"P": {}, "Q0": check}, source_analysis=f"S0 tests/test.py bytes 0:{len(code.encode())}\n```\n{code}\n```")
+    request = dict(prompt=json.dumps(payload))
+    result = audit.verify_compact_references(request, dict(analysis=document))
+    assert result["excerpts_with_omitted_suffix"] == 1
+    payload["checks"]["Q0"]["expression"]["omitted_chars"] = 880
+    with pytest.raises(ValueError, match="omission count"):
+        audit.verify_compact_references(dict(prompt=json.dumps(payload)), dict(analysis=document))
+    payload["checks"]["Q0"]["expression"]["omitted_chars"] = 80
+    payload["source_analysis"] = code[:320]
+    with pytest.raises(ValueError, match="Complete compact source block missing"):
+        audit.verify_compact_references(dict(prompt=json.dumps(payload)), dict(analysis=document))

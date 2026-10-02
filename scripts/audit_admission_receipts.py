@@ -167,6 +167,54 @@ def verify_prompt_program(request, record, cache):
                 exact_frozen_test_program=True, native_instrumentation_excluded=True)
 
 
+def verify_compact_references(request, analysis):
+    """Check complete source blocks and every v2 predicate/header excerpt."""
+    payload = json.loads(request["prompt"])
+    document = analysis["analysis"]
+    rendered = payload["source_analysis"]
+    sources = document["sources"]
+    for identifier, block in sources.items():
+        exact = (f"{identifier} {block['path']} bytes {block['start_byte']}:{block['end_byte']}\n"
+                 + "```\n" + block["code"] + "\n```")
+        require(exact in rendered, "Complete compact source block missing from actual prompt: " + identifier)
+    counts = Counter()
+
+    def excerpt(actual, reference):
+        require(actual["ref"] == reference, "Compact excerpt points at a different predicate/header")
+        block = sources[reference["source"]]["code"].encode()
+        require(0 <= reference["start"] <= reference["end"] <= len(block), "Compact excerpt reference out of bounds")
+        complete = block[reference["start"]:reference["end"]].decode()
+        require(actual["text"] == complete[:320], "Compact excerpt is not the exact source prefix")
+        require(actual["omitted_chars"] == max(0, len(complete) - 320), "Compact excerpt omission count differs")
+        counts["excerpts"] += 1
+        counts["excerpts_with_omitted_suffix"] += bool(actual["omitted_chars"])
+
+    for identifier, site in document["obligations"].items():
+        check = payload["checks"][identifier]
+        require(check["unit"] == site["unit"] and check["kind"] == site["kind"], "Compact obligation identity changed")
+        if "expression" not in check:
+            # v1 displayed entire source sites; no source-excerpt schema existed.
+            continue
+        require(check["at"] == site["at"], "Compact obligation source span changed")
+        excerpt(check["expression"], site.get("predicate") or site.get("expected") or site["at"])
+        require(len(check["guards"]) == len(site.get("guards", [])), "Compact guard index dropped a condition")
+        for actual, guard in zip(check["guards"], site.get("guards", [])):
+            require(actual["kind"] == guard["kind"] and actual.get("branch") == guard.get("branch"),
+                    "Compact guard kind/branch changed")
+            excerpt(actual["expression"], guard.get("condition") or guard.get("header") or guard["at"])
+            if guard.get("header"):
+                header, control = guard["header"], guard["at"]
+                require(header["source"] == control["source"] and header["start"] == control["start"]
+                        and header["start"] <= header["end"] <= control["end"], "Compact header is not a source prefix")
+                counts["header_references"] += 1
+        require(check.get("exception_regions", []) == site.get("exception_regions", []), "Exception-consumption references changed")
+        for field in ("requires", "adapter_identity", "region"):
+            require(check.get(field) == site.get(field), "Compact predicate semantics omitted: " + field)
+    return dict(complete_source_blocks=len(sources), indexed_obligations=len(document["obligations"]),
+                **dict(counts), full_source_blocks_present=True,
+                excerpt_omissions_are_display_only=True)
+
+
 def prompt_exclusions(request, truth, record):
     """Inspect dispatched text, not self-reported no-label/no-outcome flags.
 
@@ -373,6 +421,8 @@ def audit(baseline_path, heldout_path, run_path, *, source_commit=None):
                 require(read(item["analysis_path"])["coverage"] == request["coverage"],
                         "Request obligation coverage differs from source analysis")
                 detail["complete_program_pairing"] = verify_prompt_program(request, record, source_cache)
+                if prepared.get("method") == "compact":
+                    detail["compact_references"] = verify_compact_references(request, read(item["analysis_path"]))
             if request.get("request_identity_version") == "actual-admission-dispatch-fields-v1":
                 require(request["id"] == request_identity(request), "Actual dispatch request identity changed")
             size = len(request["system"].encode()) + len(request["prompt"].encode())
