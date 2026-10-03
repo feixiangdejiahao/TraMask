@@ -15,9 +15,10 @@ import json
 
 from anchor_retrieval.syntax import Source,child,walk
 from relation_search import oracle
+from relation_search.candidate_edit_transport import rewrite_view
 
 
-VERSION='source-observation-prefix-projection.v1'
+VERSION='source-observation-prefix-projection.v2'
 ORACLE_ROLES={'semantic_expected','projected_observation','projected_continuation'}
 
 
@@ -42,7 +43,7 @@ def _body(source):
 
 def construct(corpus,frontend,candidate,*,limit=32):
     if type(limit) is not int or limit<1:raise ValueError('A positive finite prefix limit is required')
-    candidate=oracle.program_candidate(candidate);owner=corpus['tests'][candidate['base_test_id']]['span']
+    candidate=rewrite_view(candidate);owner=corpus['tests'][candidate['base_test_id']]['span']
     language=corpus['language'];header='package prefix\n' if language=='go' else ''
     original=oracle.text(corpus,owner);source=Source(owner['path'],header+original,language)
     body=_body(source)

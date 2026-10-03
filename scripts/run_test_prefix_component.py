@@ -16,12 +16,14 @@ import sys
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from relation_search import oracle,test_prefix_projection
+from relation_search.candidate_edit_transport import rewrite_view,verify_emission,GO_MATERIALIZER_SOURCE
 from relation_search.checkpoint import read
 from scripts import run_test_admission as admission
 from scripts.run_contract_repair_search import execute,write,frozen,verify
+from scripts.run_type_projection_component import emit
 
 
-VERSION='finite-source-prefix-construction-component.v1'
+VERSION='finite-source-prefix-construction-component.v3'
 
 
 def prepare(args):
@@ -37,7 +39,7 @@ def prepare(args):
         if isinstance(catalog,dict):catalog=catalog['candidates']
         candidate=next(row for row in catalog if row['id']==item['candidate_id'])
         projection=test_prefix_projection.construct(corpus,frontend,candidate,limit=args.max_prefixes)
-        prefixes=projection.pop('candidates');programs=prefixes+[oracle.program_candidate(candidate)]
+        prefixes=projection.pop('candidates');programs=prefixes+[rewrite_view(candidate)]
         directory=root/'cases'/name;write(directory/'construction.json',projection)
         rows=[]
         for rank,program in enumerate(programs,1):
@@ -50,7 +52,8 @@ def prepare(args):
         max_prefixes=args.max_prefixes,max_native_executions=args.max_native_executions,timeout=180,
         deadline_utc=args.deadline_utc,ordering='prefix_rank_then_cohort_order',
         stop='first_controlled_failure_or_failed_source_control_per_program',
-        original_program_fallback=True,external_model_calls=0,detector_alerts=0,
+        original_program_fallback=True,exact_emitted_test_ast_required=True,external_model_calls=0,detector_alerts=0,
+        go_binding_materializer=frozen(GO_MATERIALIZER_SOURCE),
         evaluation_labels_used=False,prior_native_results_used=False,
         created_utc=datetime.now(timezone.utc).isoformat())
     write(root/'prepared.json',protocol);write(root/'seal.json',frozen(root/'prepared.json'))
@@ -59,6 +62,7 @@ def prepare(args):
 
 def run(args):
     root=args.input;verify(read(root/'seal.json'));p=read(root/'prepared.json')
+    verify(p['go_binding_materializer'])
     admission.verify_seal(p['algorithm']);results={i['name']:dict(name=i['name'],case=i['case'],parent=i['parent'],attempts=[],first_failure=None,stop_reason=None) for i in p['items']}
     count=0;deadline=datetime.fromisoformat(p['deadline_utc'].replace('Z','+00:00'))
     for rank in range(max(len(i['programs']) for i in p['items'])):
@@ -72,11 +76,21 @@ def run(args):
                     result['stop_reason']='execution_budget';continue
                 for receipt in item['source_inputs'].values():verify(receipt)
                 verify(entry['program']);candidate=read(entry['program']['path']);corpus=read(item['source_inputs']['corpus']['path'])
-                native=execute(candidate,Path(item['source']),corpus,directory/'native',p)
-                outcome=dict(rank=rank+1,is_original=entry['is_original'],program=entry['program'],native=native,
+                if not (directory/'native/emitted/group_000/manifest.json').exists():
+                    artifact=emit(candidate,Path(item['source']),directory/'native',p)
+                else:artifact=directory/'native/emitted/group_000'
+                transport=verify_emission(corpus,candidate,artifact);write(directory/'transport.json',transport)
+                native=(execute(candidate,Path(item['source']),corpus,directory/'native',p)
+                        if transport['status']=='matched' else None)
+                outcome=dict(rank=rank+1,is_original=entry['is_original'],program=entry['program'],native=native,transport=transport,
                              semantic_validity='unconfirmed',detector_alert=False)
                 write(directory/'outcome.json',outcome)
-            count+=1;result['attempts'].append(outcome)
+            result['attempts'].append(outcome)
+            if outcome['native'] is None:
+                result['stop_reason']='program_transport_mismatch'
+                print(json.dumps(dict(case=item['case'],parent=item['name'],rank=rank+1,transport=outcome['transport'])),flush=True)
+                continue
+            count+=1
             if outcome['native']['controlled_failure']:
                 result['first_failure']=outcome;result['stop_reason']='first_controlled_failure'
             elif outcome['native']['controls']['status']!='all_source_controls_passed':result['stop_reason']='source_control_unavailable_or_failed'

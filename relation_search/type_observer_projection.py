@@ -15,9 +15,10 @@ import json
 from anchor_retrieval.syntax import Source,child,walk
 from experimental import assertion_operand_guard as guard
 from relation_search import oracle
+from relation_search.candidate_edit_transport import rewrite_view
 
 
-VERSION='type-directed-pure-observation-projection.v2'
+VERSION='type-directed-pure-observation-projection.v3'
 
 
 def _byte(text,utf16_offset):
@@ -87,7 +88,7 @@ def project(corpus,frontend,candidate,report,emitted_source):
         position=_byte(emitted_source,error['start_utf16'])
         for row in statements.values():
             if row['source_start_byte']<=position<row['source_end_byte']:row['diagnostics'].append(error)
-    candidate=oracle.program_candidate(candidate);base=candidate['base_test_id'];matches={};seen=set()
+    candidate=rewrite_view(candidate);base=candidate['base_test_id'];matches={};seen=set()
     for observation in frontend.get('observations',[]):
         if observation.get('test_id')!=base or observation.get('kind')!='assertion':continue
         span=observation.get('assertion_span',observation.get('span'))

@@ -2,6 +2,7 @@ from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend,to_emitter_corpus
 from relation_search import oracle
 from relation_search.test_prefix_projection import construct
+import copy
 
 
 def fixture(code,language,before,after):
@@ -38,3 +39,13 @@ def test_oracle_revisions_in_removed_continuation_do_not_remove_input():
     rows=construct(corpus,frontend,candidate)['candidates'];assert len(rows)==1
     assert rows[0]['prefix_projection']['removed_oracle_edits']==1
     assert candidate['edits'][0] in rows[0]['edits']
+
+
+def test_historical_instrumentation_cannot_restore_the_deleted_suffix():
+    args=fixture('def test_flow():\n    use(2)\n    assert first()\n    assert second()\n','python','use(2)','use(3)')
+    corpus,frontend,candidate=args
+    candidate.update(program_edits=copy.deepcopy(candidate['edits']),instrumentation={'status':'instrumented'},runtime_probes=[{'old':'measurement'}])
+    revised=construct(corpus,frontend,candidate)['candidates'][0]
+    assert 'instrumentation' not in revised and 'runtime_probes' not in revised
+    assert oracle.program_candidate(revised)['edits']==revised['edits']
+    assert 'second()' not in oracle.preview(corpus,oracle.program_candidate(revised))
