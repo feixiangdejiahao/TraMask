@@ -15,6 +15,7 @@ import sys
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from relation_search import type_observer_projection
+from relation_search.candidate_edit_transport import verify_emission
 from relation_search.checkpoint import read
 from scripts import run_test_admission as admission
 from scripts import inspect_typescript_candidate as compiler
@@ -22,7 +23,7 @@ from scripts.run_type_projection_component import emit
 from scripts.run_contract_repair_search import write,frozen,verify
 
 
-VERSION='typescript-emitted-frontier-census.v1'
+VERSION='typescript-emitted-frontier-census.v2'
 
 
 def prepare(args):
@@ -44,6 +45,7 @@ def prepare(args):
         projection_version=type_observer_projection.VERSION,timeout=180,
         selection='Every emitted TypeScript program, ordered by source path.',
         label_selection=False,native_outcomes_read=False,external_model_calls=0,
+        exact_emitted_test_ast_required=True,
         subject_test_execution=False,projection_semantics='new weaker test; validity remains unconfirmed',
         created_utc=datetime.now(timezone.utc).isoformat())
     write(root/'prepared.json',protocol);write(root/'seal.json',frozen(root/'prepared.json'))
@@ -67,6 +69,12 @@ def run(args):
             results.append(read(directory/'result.json'));continue
         for receipt in item['inputs'].values():verify(receipt)
         outcome=dict(case=item['case'],occurrence=item['occurrence'])
+        source=Path(item['source']);corpus=read(source/'corpus.json');frontend=read(source/'frontend.json')
+        candidate=read(source/'candidates.json')['candidates'][0]
+        transport=verify_emission(corpus,candidate,Path(item['artifact']));outcome['original_transport']=transport
+        if transport['status']!='matched':
+            outcome['original_compile']=dict(status='program_transport_mismatch',new_diagnostics=[])
+            write(directory/'result.json',outcome);results.append(outcome);continue
         original=directory/'original'
         if not (original/'prepared.json').exists():compiler.prepare(Path(item['artifact']),original)
         if (original/'outcome.json').exists():compiled=read(original/'outcome.json')
@@ -74,16 +82,17 @@ def run(args):
             compiled=compiler.run(original,protocol['timeout']);write(original/'outcome.json',compiled)
         outcome['original_compile']=compiled
         if compiled['status']=='compiler_completed':
-            report=read(compiled['report']['path']);source=Path(item['source'])
-            corpus=read(source/'corpus.json');frontend=read(source/'frontend.json')
-            candidate=read(source/'candidates.json')['candidates'][0]
+            report=read(compiled['report']['path'])
             projection=type_observer_projection.project(corpus,frontend,candidate,report,emitted_source(original,report))
             chosen=projection.pop('candidate');outcome['projection']=projection
             if chosen:
                 write(directory/'projected_program.json',chosen)
                 artifact=emit(chosen,source,directory/'projected',protocol)
-                recheck=directory/'recheck';compiler.prepare(artifact,recheck)
-                checked=compiler.run(recheck,protocol['timeout']);write(recheck/'outcome.json',checked)
+                transport=verify_emission(corpus,chosen,artifact);outcome['projected_transport']=transport
+                if transport['status']=='matched':
+                    recheck=directory/'recheck';compiler.prepare(artifact,recheck)
+                    checked=compiler.run(recheck,protocol['timeout']);write(recheck/'outcome.json',checked)
+                else:checked=dict(status='program_transport_mismatch',new_diagnostics=[])
                 outcome['projected_compile']=checked
         write(directory/'result.json',outcome);results.append(outcome)
         print(json.dumps(dict(case=item['case'],occurrence=item['occurrence'],new_errors=len(compiled.get('new_diagnostics',[])),projection=outcome.get('projection'))),flush=True)
