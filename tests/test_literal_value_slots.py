@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from relation_search import expected_slots,literal_value_slots
 from tests.test_review_repair import fixture
@@ -31,3 +32,10 @@ def test_existing_go_conversion_keeps_its_name():
     slot=expected_slots.slot(code,'got','go')
     descriptor=literal_value_slots._descriptor(code,slot,'go')
     assert literal_value_slots.encode(dict(kind='number',value=4),'go',descriptor,'int64(3)')=='int64(4)'
+
+
+def test_echoed_retained_reference_must_match_the_unchanged_source_exactly():
+    descriptor=dict(kinds=['same'])
+    assert literal_value_slots.encode(dict(kind='same',source_reference='previous'),'python',descriptor,'previous')=='previous'
+    with pytest.raises(ValueError):
+        literal_value_slots.encode(dict(kind='same',source_reference='other'),'python',descriptor,'previous')
