@@ -33,7 +33,7 @@ def prepare(artifact,output):
                    dict(source=str((output/'plan.json').resolve()),target='.type_analysis/plan.json',sha256=digest(output/'plan.json'))])
     protocol=dict(artifact=frozen(artifact/'manifest.json'),case=manifest['case'],mounts=mounts,
         worker=frozen(worker),program_execution=False,
-        command='node .type_analysis/worker.cjs .type_analysis/plan.json "$COMBINATION_REPORT_DIR/types.json"')
+        command='node .type_analysis/worker.cjs .type_analysis/plan.json /replay-logs/types.json')
     write(output/'prepared.json',protocol)
     return protocol
 
