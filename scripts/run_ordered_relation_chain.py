@@ -16,11 +16,13 @@ from relation_search.checkpoint import read
 from scripts import run_documented_default_search as documentation
 from scripts import run_byte_stream_search as stream
 from scripts import run_checked_carrier_search as carrier
+from scripts import run_error_finalization_search as finalization
 from scripts import replay_uniform_second_gate as semantic
 from scripts.run_contract_repair_search import frozen, verify, write
 
-VERSION = 'ordered-source-relation-exact-semantic-chain.v1'
-REGISTRY = dict(documentation=documentation, stream=stream, carrier=carrier, semantic=semantic)
+VERSION = 'ordered-source-relation-exact-semantic-chain.v2'
+REGISTRY = dict(documentation=documentation, stream=stream, carrier=carrier,
+                finalization=finalization, semantic=semantic)
 
 
 def prepare(args):
