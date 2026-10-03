@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 import re
 import textwrap
 
-VERSION = 'new-codec-boundary-abstention.v1'
+VERSION = 'new-codec-boundary-abstention.v2'
 DOMAINS = {
     'shlex.quote': 'one POSIX-shell token',
     'shlex.join': 'POSIX-shell command words',
@@ -27,6 +27,7 @@ AUTHORITIES = ['https://docs.python.org/3/library/shlex.html#shlex.quote',
 POLICY = dict(version=VERSION, language='python', domains=DOMAINS,
     rule='If an edited input adds an encoder from the fixed public registry, abstain. The existing model verdict is not an adapter certificate.',
     inputs='Complete original/modified test, exact input edits, and source import fragments from the already frozen request.',
+    fragment_context='A non-standalone input edit is checked through its unique byte-exact embedding in the corresponding complete test AST; missing or ambiguous embeddings abstain.',
     status='unknown input/consumer grammar compatibility; never a claim that the product or test is faulty',
     recovery='Keep this candidate unknown; do not choose a later candidate or another cached verdict.',
     forbidden_inputs=['case or repository IDs', 'known witness lists', 'audit labels', 'native failures', 'reference code', 'model rationale'],
@@ -79,14 +80,33 @@ def _identities(node, imports):
     return set()
 
 
-def _encoders(text, imports):
+def _encoders(text, imports, complete_test=''):
     tree = _parse(text)
+    extent = None
     if tree is None:
-        return None
+        # Replacement spans start at their first token. Their later lines keep
+        # the original enclosing indentation and need not parse in isolation.
+        try:
+            tree = ast.parse(complete_test)
+        except (SyntaxError, ValueError):
+            return None
+        data, fragment = complete_test.encode(), text.encode()
+        start = data.find(fragment)
+        if not fragment or start < 0 or data.find(fragment, start+1) >= 0:
+            return None
+        extent = start, start+len(fragment)
+        starts = [0]
+        for line in data.splitlines(keepends=True):
+            starts.append(starts[-1]+len(line))
     calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        if extent is not None:
+            start = starts[node.lineno-1]+node.col_offset
+            end = starts[node.end_lineno-1]+node.end_col_offset
+            if not extent[0] <= start < end <= extent[1]:
+                continue
         matches = sorted(_identities(node.func, imports) & DOMAINS.keys())
         if matches:
             calls.append(dict(identities=matches, syntax=ast.unparse(node.func),
@@ -100,8 +120,8 @@ def analyze(payload):
     imports = _imports(payload)
     additions, unknown = [], []
     for index, edit in enumerate(payload.get('input_edits', [])):
-        before = _encoders(edit.get('before', ''), imports)
-        after = _encoders(edit.get('after', ''), imports)
+        before = _encoders(edit.get('before', ''), imports, payload.get('original_test', ''))
+        after = _encoders(edit.get('after', ''), imports, payload.get('modified_test', ''))
         if before is None or after is None:
             unknown.append(dict(edit=index, reason='input_edit_syntax_unresolved'))
             continue

@@ -65,3 +65,30 @@ def test_unsupported_python_input_edit_syntax_abstains_and_other_languages_are_e
     row = payload('x', 'fn(x)')
     row['language'] = 'go'
     assert analyze(row)['status'] == 'outside_python_codec_scope'
+
+
+def test_multiline_replacement_uses_its_exact_complete_test_ast_without_reindenting():
+    fragment = 'ready = False\n    with expected_error():\n        result = consume(value)'
+    row = payload('result = consume(value)', fragment)
+    row['modified_test'] = 'def test_case():\n    '+fragment+'\n    check(result)'
+    assert analyze(row)['allow_prior_gate']
+    encoded = fragment.replace('consume(value)', 'consume(__import__("shlex").quote(value))')
+    row['input_edits'][0]['after'] = encoded
+    row['modified_test'] = 'def test_case():\n    '+encoded+'\n    check(result)'
+    assert not analyze(row)['allow_prior_gate']
+    assert analyze(row)['additions'][0]['identities'] == ['shlex.quote']
+
+
+def test_missing_or_ambiguous_fragment_embedding_remains_unknown():
+    fragment = 'ready = False\n    with expected_error():\n        result = consume(value)'
+    row = payload('result = consume(value)', fragment)
+    assert not analyze(row)['allow_prior_gate']
+    row['modified_test'] = 'def first():\n    '+fragment+'\ndef second():\n    '+fragment
+    assert not analyze(row)['allow_prior_gate']
+
+
+def test_contextual_codec_scan_does_not_pick_up_an_encoder_outside_the_edit():
+    fragment = 'ready = False\n    with expected_error():\n        result = consume(value)'
+    row = payload('result = consume(value)', fragment)
+    row['modified_test'] = 'def test_case():\n    unused = __import__("shlex").quote("µ")\n    '+fragment
+    assert analyze(row)['allow_prior_gate']

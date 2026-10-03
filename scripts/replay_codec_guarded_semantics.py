@@ -16,7 +16,7 @@ from scripts import replay_uniform_second_gate as baseline
 from scripts import run_test_admission as admission
 from scripts.run_contract_repair_search import frozen, verify, write
 
-VERSION = 'codec-guarded-exact-semantic-replay.v1'
+VERSION = 'codec-guarded-exact-semantic-replay.v2'
 
 
 def prepare(args):
