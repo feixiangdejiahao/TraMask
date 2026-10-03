@@ -25,7 +25,7 @@ from scripts.evaluate_relational_gap import matches_runtime
 from scripts.run_contract_repair_search import frozen, verify, write
 from scripts.run_type_projection_component import emit
 
-VERSION = 'frozen-alert-blind-reference-evaluator.v1'
+VERSION = 'frozen-alert-blind-reference-evaluator.v2'
 DRIVER = '''import json, os, runpy
 from pathlib import Path
 module = runpy.run_path('.relational_phase_inputs/runner.py')
@@ -102,6 +102,31 @@ def prepare(args):
                 prepared=frozen(root / 'prepared.json'))
 
 
+def resume(args):
+    """Rebind only this evaluator after a normalization repair; preserve runs."""
+    old = args.previous
+    verify(read(old / 'seal.json'))
+    p = read(old / 'prepared.json')
+    for row in p['algorithm'].values():
+        if Path(row['path']).resolve() != Path(__file__).resolve():
+            verify(row)
+    cache = {}
+    for item in p['items']:
+        for program in ('candidate', 'reference'):
+            path = old / 'cases' / item['name'] / program / 'result.json'
+            if path.exists():
+                cache[f"{item['name']}:{program}"] = frozen(path)
+    args.output.mkdir(parents=True, exist_ok=False)
+    admission._preload_local_imports(sys.modules[__name__])
+    p.update(version=VERSION, previous_prepared=frozen(old / 'prepared.json'),
+             algorithm=admission._loaded_sources(), cached_executions=cache,
+             migration='Only evaluator normalization changes; same frozen artifacts and patch receipts.',
+             created_utc=datetime.now(timezone.utc).isoformat())
+    write(args.output / 'prepared.json', p)
+    write(args.output / 'seal.json', frozen(args.output / 'prepared.json'))
+    return dict(alerts=len(p['items']), cached_executions=len(cache), prepared=frozen(args.output / 'prepared.json'))
+
+
 def normalize(output, emission, execution):
     rows = []
     for phase in emission['phases']:
@@ -120,7 +145,8 @@ def normalize(output, emission, execution):
             if isolated:
                 path, _ = _go_item_view(directory, phase, item, isolation)
             rows.append(dict(role=phase['role'], result=str(path.resolve()), test_ids=[item['id']],
-                             control_ids=item.get('control_ids', []), candidate_id=item.get('candidate_id')))
+                             control_ids=item.get('control_ids', []), candidate_id=item.get('candidate_id'),
+                             base_test_id=item['base_test_id'], manifest=str((output / 'artifact/manifest.json').resolve())))
     generated = [row for row in rows if row['role'] == 'generated']
     controls = inspect_controls(generated, rows)
     tests, errors = [], []
@@ -157,7 +183,10 @@ def run(args):
             if program == 'reference':
                 verify(item['reference']['patch'])
                 patch = Path(item['reference']['patch']['path'])
-            output = directory / program
+            cached = p.get('cached_executions', {}).get(f"{item['name']}:{program}")
+            if cached:
+                verify(cached)
+            output = Path(cached['path']).parent if cached else directory / program
             if (output / 'result.json').exists():
                 execution = read(output / 'result.json')
             else:
@@ -174,6 +203,7 @@ def run(args):
     admission.verify_seal(p['algorithm'])
     summary = dict(version=VERSION, items=results, external_model_calls=0, detector_outputs_changed=False,
                    native_executions=sum(1 + ('reference' in r) for r in results),
+                   reused_native_executions=len(p.get('cached_executions', {})),
                    completed_utc=datetime.now(timezone.utc).isoformat())
     write(root / 'summary.json', summary)
     return dict(alerts=len(results), native_executions=summary['native_executions'],
@@ -182,11 +212,12 @@ def run(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(__doc__)
-    parser.add_argument('stage', choices=['prepare', 'run'])
+    parser.add_argument('stage', choices=['prepare', 'resume', 'run'])
     parser.add_argument('--alerts', type=Path)
     parser.add_argument('--inventory', type=Path)
     parser.add_argument('--registry', type=Path, default=ROOT / 'data/relational_gap_v1/registry.json')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--input', type=Path)
+    parser.add_argument('--previous', type=Path)
     args = parser.parse_args()
-    print(json.dumps(prepare(args) if args.stage == 'prepare' else run(args)))
+    print(json.dumps({'prepare': prepare, 'resume': resume, 'run': run}[args.stage](args)))
