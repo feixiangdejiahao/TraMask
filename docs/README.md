@@ -1,4 +1,8 @@
-# Research presentation
+# Research reports
+
+[HTML progress report](research_progress.html): method families and subversions, experiments, all 17 trials, false alarms, model cost, and next research decisions. The English report uses short sentences and includes a Chinese term guide. Open it directly in a browser. It has no external page dependencies.
+
+## Archived presentation
 
 [PDF](combination_testing_research.pdf) · [Beamer source](combination_testing_research.tex)
 
