@@ -23,6 +23,9 @@ def prepare(input_path,output,*,limits=(16,32,64),selector=priority,frontend_ref
     records=read(input_path)['controlled_failures'];by_case=defaultdict(list)
     for row in records:by_case[row['case']].append(row)
     output.mkdir(parents=True,exist_ok=False)
+    if frontend_refresher:
+        from scripts.run_test_admission import _preload_local_imports
+        _preload_local_imports(frontend_refresher)
     algorithm=loaded_local_sources()
     protocol=dict(policy=selector.POLICY,policy_sha256=selector.digest(selector.POLICY),
         algorithm=algorithm,limits=list(limits),source_inventory=dict(path=str(input_path.resolve()),sha256=digest(input_path)),
@@ -70,9 +73,11 @@ def prepare(input_path,output,*,limits=(16,32,64),selector=priority,frontend_ref
         if refreshed:case_record['refreshed_frontend']=refreshed
         write_new(output/(case+'.json'),case_record)
         cases.append({key:value for key,value in case_record.items() if key!='ranking'})
-        print(json.dumps(cases[-1]),flush=True)
+        print(json.dumps({key:cases[-1][key] for key in
+            ('case','candidates','feature_true','status_counts','source_analysis_seconds')}),flush=True)
     verify_seal(algorithm)
-    if set(loaded_local_sources())-set(algorithm):raise ValueError('unsealed source imported during selection')
+    new_sources=set(loaded_local_sources())-set(algorithm)
+    if new_sources:raise ValueError('unsealed source imported during selection: '+','.join(sorted(new_sources)))
     artifacts=[]
     for limit in limits:
         destination=output/('selected_'+str(limit)+'.json')
