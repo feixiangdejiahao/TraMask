@@ -24,7 +24,7 @@ def prepare(artifact,output):
     mounts=[row for row in manifest['mounts'] if row['target'] in needed]
     for row in mounts:
         if digest(row['source'])!=row['sha256']:raise ValueError('Frozen emitted source changed')
-    names=[row['id'] for row in manifest['obligations']]
+    names=[row['test_name'] for row in manifest['obligations']]
     worker=ROOT/'scripts/compare_typescript_programs.cjs'
     comparison=dict(target=next(iter(targets)),test_names=names,
                     phases=[dict(role=row['role'],files=row['files']) for row in phases])
