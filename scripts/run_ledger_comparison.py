@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from relation_search import compact_admission, ledger_admission
+from relation_search import compact_admission, ledger_admission, counterfactual_admission
 from relational_gap.provider import dispatch
 
 
@@ -62,15 +62,19 @@ def freeze(args):
         if sha(item['request_path']) != item['request_sha256']:
             raise ValueError('Historical source request changed')
         original = read(item['request_path'])
-        for arm in ('compact', 'ledger'):
+        for arm in args.arms:
             request = copy.deepcopy(original)
             request.update(thinking=args.thinking, max_tokens=args.output_tokens,
                            reasoning_effort=args.reasoning_effort)
-            if arm == 'ledger':
-                request = ledger_admission.from_compact_request(request,
-                    max_output_tokens=args.output_tokens, thinking=args.thinking)
+            if arm in {'ledger', 'counterfactual'}:
+                method = ledger_admission if arm == 'ledger' else counterfactual_admission
+                kwargs = dict(max_output_tokens=args.output_tokens)
+                if arm == 'ledger':
+                    kwargs['thinking'] = args.thinking
+                request = method.from_compact_request(request, **kwargs)
                 if request is None:
                     raise ValueError('Paired ledger exceeds the frozen prompt budget')
+                request.update(thinking=args.thinking,reasoning_effort=args.reasoning_effort)
             request['id'] = request['query_sha256'] = identity(request)
             name = f'item_{len(entries):04d}'
             path = output / name / 'request.json'
@@ -79,7 +83,8 @@ def freeze(args):
                 candidate_id=item['candidate_id'], source_request_sha256=item['request_sha256'],
                 request_sha256=sha(path)))
     modules = [Path(__file__), Path(compact_admission.__file__),
-               Path(ledger_admission.__file__), ROOT/'relational_gap/provider.py']
+               Path(ledger_admission.__file__),Path(counterfactual_admission.__file__),
+               ROOT/'relational_gap/provider.py']
     prepared = dict(version='paired-contract-ledger-component.v1', created_utc=now().isoformat(),
         source=dict(path=str(args.input.resolve()), sha256=sha(args.input)),
         entries=entries, algorithm={str(path.resolve()): sha(path) for path in modules},
@@ -127,7 +132,8 @@ def run(args):
             tokens = usage.get('total_tokens')
             measured = type(tokens) is int and tokens >= 0
             accounted += tokens if measured else reservation
-            method = compact_admission if item['arm'] == 'compact' else ledger_admission
+            method = {'compact':compact_admission,'ledger':ledger_admission,
+                      'counterfactual':counterfactual_admission}[item['arm']]
             if receipt['status'] == 'complete':
                 result = method.decide(request, (directory/'completion/completion.txt').read_text(),
                                        finish_reason=receipt.get('finish_reason'))
@@ -158,6 +164,8 @@ if __name__ == '__main__':
     parser.add_argument('--input', type=Path, required=True)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--thinking', choices=['enabled', 'disabled'], default='enabled')
+    parser.add_argument('--arms',nargs='+',choices=['compact','ledger','counterfactual'],
+                        default=['compact','ledger'])
     parser.add_argument('--reasoning-effort', choices=['low', 'high', 'max'], default='low')
     parser.add_argument('--output-tokens', type=int, default=8192)
     parser.add_argument('--max-calls', type=int, default=32)
