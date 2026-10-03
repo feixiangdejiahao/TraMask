@@ -18,11 +18,20 @@ from scripts import run_byte_stream_search as stream
 from scripts import run_checked_carrier_search as carrier
 from scripts import run_error_finalization_search as finalization
 from scripts import replay_uniform_second_gate as semantic
+from scripts import replay_codec_guarded_semantics as codec
 from scripts.run_contract_repair_search import frozen, verify, write
 
-VERSION = 'ordered-source-relation-exact-semantic-chain.v2'
+VERSION = 'ordered-source-relation-exact-semantic-chain.v3'
 REGISTRY = dict(documentation=documentation, stream=stream, carrier=carrier,
                 finalization=finalization, semantic=semantic)
+SEMANTIC_RUNNERS = {semantic.VERSION: semantic, codec.VERSION: codec}
+
+
+def _runner(name, version):
+    runner = SEMANTIC_RUNNERS.get(version) if name == 'semantic' else REGISTRY.get(name)
+    if runner is None or runner.VERSION != version:
+        raise ValueError('Unexpected component protocol: ' + name)
+    return runner
 
 
 def prepare(args):
@@ -34,12 +43,11 @@ def prepare(args):
         sources[name] = Path(path)
     if list(sources)[-1:] != ['semantic'] or len(sources) < 2:
         raise ValueError('Require relation components followed by one semantic fallback')
-    protocols = {}
+    protocols, runners = {}, {}
     for name, source in sources.items():
         verify(read(source/'seal.json'))
         protocols[name] = read(source/'prepared.json')
-        if protocols[name]['version'] != REGISTRY[name].VERSION:
-            raise ValueError('Unexpected component protocol: ' + name)
+        runners[name] = _runner(name, protocols[name]['version'])
     cases = sorted(protocols['semantic']['cases'])
     if any(sorted(row['case'] for row in protocols[name]['cases']) != cases
            for name in sources if name != 'semantic'):
@@ -53,7 +61,7 @@ def prepare(args):
         components.append(dict(name=name, source=frozen(sources[name]/'prepared.json'),
                                prepared=frozen(destination)))
     protocol = dict(version=VERSION, cases=cases, components=components,
-        algorithm=[frozen(Path(__file__)), *[frozen(Path(REGISTRY[name].__file__)) for name in sources]],
+        algorithm=[frozen(Path(__file__)), *[frozen(Path(runners[name].__file__)) for name in sources]],
         precedence=list(sources),
         policy='For each trial, emit the first available component alert in this fixed order. Do not replace after an audit rejects it.',
         preparation_reads='Sealed component protocols only; no output summary, known witness list, audit label or reference.',
@@ -77,7 +85,8 @@ def run(args):
         verify(component['prepared'])
     if (root/'summary.json').exists():
         return read(root/'summary.json')
-    runners = [(name, REGISTRY[name]) for name in protocol['precedence']]
+    runners = [(name, _runner(name, read(root/name/'prepared.json')['version']))
+               for name in protocol['precedence']]
     for name, runner in runners:
         if not (root/name/'summary.json').exists():
             runner.run(SimpleNamespace(input=root/name))

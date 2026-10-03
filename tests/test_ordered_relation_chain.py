@@ -6,13 +6,13 @@ from scripts import run_ordered_relation_chain as chain
 from scripts.run_contract_repair_search import frozen, write
 
 
-def prepared_sources(tmp_path, stream_cases=None):
+def prepared_sources(tmp_path, stream_cases=None, semantic_runner=None):
     args = SimpleNamespace(defaults=tmp_path/'doc', stream=tmp_path/'stream',
                            fallback=tmp_path/'semantic', output=tmp_path/'combined')
     cases = ['a', 'b', 'c', 'd']
     for name, root, runner in [('documentation', args.defaults, chain.documentation),
                                ('stream', args.stream, chain.stream),
-                               ('semantic', args.fallback, chain.semantic)]:
+                               ('semantic', args.fallback, semantic_runner or chain.semantic)]:
         selected = stream_cases if name == 'stream' and stream_cases is not None else cases
         payload = dict(version=runner.VERSION, cases=selected if name == 'semantic' else
                        [dict(case=case) for case in selected])
@@ -58,3 +58,12 @@ def test_duplicate_or_unregistered_components_and_nonfinal_semantic_are_refused(
         args.component = components
         with pytest.raises(ValueError):
             chain.prepare(args)
+
+
+def test_guarded_semantic_protocol_selects_its_runner_by_exact_version(tmp_path):
+    args = prepared_sources(tmp_path, semantic_runner=chain.codec)
+    assert chain.prepare(args)['trials'] == 4
+    protocol = chain.read(args.output/'prepared.json')
+    assert any(row['path'].endswith('replay_codec_guarded_semantics.py') for row in protocol['algorithm'])
+    assert chain._runner('semantic', chain.codec.VERSION) is chain.codec
+    assert chain._runner('semantic', chain.semantic.VERSION) is chain.semantic
