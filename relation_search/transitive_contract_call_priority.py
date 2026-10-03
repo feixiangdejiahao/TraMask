@@ -17,10 +17,12 @@ from relation_search.edited_contract_call_priority import (
 )
 
 POLICY = dict(base.POLICY,
-    version='transitive-edited-contract-call-priority.v1',
+    version='transitive-edited-contract-call-priority.v2',
     issue_names='v1 code names plus exact source API identifiers containing an internal capital or underscore in issue prose',
     input_reach='bounded backward local assignment closure, zero-argument local function bodies, and receiver constructor arguments',
     receiver='unchanged frontend class constructor binding with edits confined to constructor arguments; no factory-return guess',
+    lexical_binding='latest preceding local definition must be in the same block or an ancestor block; branch joins remain unknown',
+    call_alignment='exact call bytes in a uniquely matched AST node inside one replacement, or unchanged offset mapping',
     limits=dict(max_reach_nodes=64, max_reach_depth=12),
     claim='may dependence for ranking only; no execution, validity, path feasibility, purity, or runtime dispatch proof',
     unknown='cyclic or exhausted reach does not receive priority; unresolved dispatch stays in baseline order')
@@ -52,6 +54,42 @@ class Analyzer(base.Analyzer):
         self.names = issue_names(issue, frontend.get('functions', []))
         self.reach_unknowns = set()
 
+    def _binding_for(self, assignments, name, node):
+        candidates = [row for row in assignments if row['name'] == name
+                      and row['node'].end_byte <= node.start_byte and row['scope'] == _scope(node)]
+        if not candidates:
+            return None
+        latest = max(candidates, key=lambda row: row['node'].start_byte)
+        ancestor = node.parent
+        while ancestor is not None:
+            if _extent(ancestor) == latest['block']:
+                return latest
+            if ancestor.type in FUNCTIONS:
+                break
+            ancestor = ancestor.parent
+        return None
+
+    def _call_positions(self, old, source, changes):
+        positions = super()._call_positions(old, source, changes)
+        if positions:
+            start, end = positions[0]
+            node = source.root.named_descendant_for_byte_range(start, max(start, end - 1))
+            while node is not None:
+                if _extent(node) == (start, end) and node.type in CALLS:
+                    return positions
+                node = node.parent
+        extent = old['span']
+        original = self.original[source.path]
+        text = original.data[extent['start_byte']:extent['end_byte']].decode()
+        containers = [edit for edit in changes
+                      if _inside(edit['old'], (extent['start_byte'], extent['end_byte']))]
+        if len(containers) != 1:
+            return []
+        inside = containers[0]['new']
+        matched = [_extent(node) for node in walk(source.root) if node.type in CALLS
+                   and _inside(inside, _extent(node)) and source.text(node) == text]
+        return matched if len(matched) == 1 else []
+
     def _resolve(self, source, call, assignments, original_calls, changes):
         old_result = super()._resolve(source, call, assignments, original_calls, changes)
         if old_result:
@@ -70,7 +108,7 @@ class Analyzer(base.Analyzer):
                                    if row.get('resolved')}) != 1:
             return None
         function = self.functions.get(targets[0]['function_id'])
-        binding = _binding(assignments, parts[0], call)
+        binding = self._binding_for(assignments, parts[0], call)
         if function is None or not function.get('owner') or binding is None:
             return None
         value = binding['value']
@@ -110,7 +148,7 @@ class Analyzer(base.Analyzer):
             active.add(key)
             hits.update(edit['index'] for edit in inputs if _overlap(edit['new'], key))
             for name in sorted(_read_names(source, value)):
-                binding = _binding(assignments, name, value)
+                binding = self._binding_for(assignments, name, value)
                 if binding is not None:
                     visit(binding['value'], depth + 1)
                     continue

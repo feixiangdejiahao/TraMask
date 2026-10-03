@@ -5,6 +5,7 @@ import pytest
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search.transitive_contract_call_priority import Analyzer, issue_names, select
+from relation_search.source_frontend_refresh import refresh
 from tests.test_edited_contract_call_priority import fixture
 
 
@@ -116,3 +117,68 @@ def test_candidate_truth_fields_do_not_affect_frozen_ranking():
     annotated = dict(candidate, evaluation={'valid': False}, native_failure='anything')
     assert result == select(corpus, frontend, [annotated], 'Change `Box.consume`.', budget=1) | {'selected': [candidate]}
     assert (corpus, frontend, candidate) == original
+
+
+def wrapped_fixture(replacement):
+    library = '''class Resource:
+    def __init__(self, value):
+        self.value = value
+    def consume(self):
+        self.closed = True
+'''
+    code = '''from lib import Resource
+def test_lifetime():
+    resource = Resource(1)
+    resource.consume()
+    assert resource.closed
+'''
+    frontend = extract_frontend([Source('lib.py', library, 'python'),
+                                 Source('test_lifetime.py', code, 'python')])
+    corpus = to_emitter_corpus(frontend)
+    def edit(before, after):
+        start = code.index(before)
+        return dict(before=before, after=after, span=dict(path='test_lifetime.py',
+            start_byte=start, end_byte=start+len(before)))
+    candidate = dict(id='wrapped', base_test_id=next(iter(corpus['tests'])), imports=[], kind='input',
+        edits=[edit('1', '2'), edit('resource.consume()', replacement)])
+    return corpus, frontend, candidate
+
+
+def test_source_call_inside_new_exception_wrapper_retains_receiver_dependency():
+    c, f, candidate = wrapped_fixture('with guard:\n        resource.consume()')
+    result = Analyzer(c, f, 'Change `Resource.consume`.').evidence(candidate)
+    assert result['feature'], result
+    assert any(row['observation_basis'] == 'same_unrebound_receiver_field' for row in result['witnesses'])
+
+
+def test_two_identical_calls_inside_one_replacement_are_ambiguous():
+    c, f, candidate = wrapped_fixture('resource.consume()\n    resource.consume()')
+    result = Analyzer(c, f, 'Change `Resource.consume`.').evidence(candidate)
+    assert not result['feature'], result
+
+
+def test_frontend_refresh_preserves_source_test_identity_and_resolves_legacy_receiver():
+    corpus, frontend, candidate = class_fixture()
+    legacy = copy.deepcopy(frontend)
+    for call in legacy['calls']:
+        for target in call['targets']:
+            if target['reason'] == 'source_constructor_receiver':
+                target['reason'] = 'receiver_type'
+    updated = refresh(corpus, legacy)
+    assert {row['id'] for row in updated['tests']} == set(corpus['tests'])
+    assert any(target['reason'] == 'source_constructor_receiver'
+               for call in updated['calls'] for target in call['targets'])
+    assert Analyzer(corpus, updated, 'Change `Box.consume`.').evidence(candidate)['feature']
+    assert corpus['sources'] == to_emitter_corpus(updated)['sources']
+
+
+def test_frontend_refresh_refuses_changed_source_bytes_or_lost_test_identity():
+    corpus, frontend, _ = class_fixture()
+    changed = copy.deepcopy(corpus)
+    changed['sources']['test_sample.py']['code'] += '\n'
+    with pytest.raises(ValueError, match='frontend_source_mismatch'):
+        refresh(changed, frontend)
+    renamed = copy.deepcopy(corpus)
+    renamed['tests']['nonexistent'] = renamed['tests'].pop(next(iter(renamed['tests'])))
+    with pytest.raises(ValueError, match='source_tests_not_recovered'):
+        refresh(renamed, frontend)

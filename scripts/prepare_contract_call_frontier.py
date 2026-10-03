@@ -17,7 +17,7 @@ from relation_search import semantic_selection
 from scripts.evaluate_test_validity import digest, loaded_local_sources, read, verify_seal, write_new
 
 
-def prepare(input_path,output,*,limits=(16,32,64),selector=priority):
+def prepare(input_path,output,*,limits=(16,32,64),selector=priority,frontend_refresher=None):
     if any(type(limit) is not int or limit<0 for limit in limits):raise ValueError('nonnegative integer limits required')
     # No other inventory section is read by this selector.
     records=read(input_path)['controlled_failures'];by_case=defaultdict(list)
@@ -29,6 +29,8 @@ def prepare(input_path,output,*,limits=(16,32,64),selector=priority):
         input_section='controlled_failures only',evaluation_labels_used=False,
         runtime_outcomes_used_only_for_initial_failing_pool=True,native_failure_text_used=False,
         provider_calls=0,native_executions=0)
+    if frontend_refresher:
+        protocol['frontend_refresh']=frontend_refresher.VERSION
     write_new(output/'protocol.json',protocol)
     selected={limit:[] for limit in limits};cases=[];inputs=[];started=time.monotonic()
     for case,rows in sorted(by_case.items()):
@@ -51,6 +53,12 @@ def prepare(input_path,output,*,limits=(16,32,64),selector=priority):
         issue=issue_path.read_text();issue_receipt=dict(path=str(issue_path.resolve()),sha256=digest(issue_path))
         inputs.append(issue_receipt)
         case_started=time.monotonic()
+        refreshed=None
+        if frontend_refresher:
+            frontend=frontend_refresher.refresh(source,frontend)
+            path=output/'refreshed_frontends'/(case+'.json')
+            write_new(path,frontend)
+            refreshed=dict(path=str(path.resolve()),sha256=digest(path),stats=frontend['stats'])
         allocation=selector.select(source,frontend,list(candidates.values()),issue,budget=0)
         ranked_ids=[row['id'] for row in allocation['ranking']]
         for limit in limits:selected[limit].extend(occurrences[identifier] for identifier in ranked_ids[:limit])
@@ -59,6 +67,7 @@ def prepare(input_path,output,*,limits=(16,32,64),selector=priority):
             status_counts=dict(Counter(row['contract_call']['status'] for row in allocation['ranking'])),
             source_analysis_seconds=time.monotonic()-case_started,
             ranking=allocation['ranking'],policy_sha256=allocation['policy_sha256'],baseline_policy_sha256=allocation['baseline_policy_sha256'])
+        if refreshed:case_record['refreshed_frontend']=refreshed
         write_new(output/(case+'.json'),case_record)
         cases.append({key:value for key,value in case_record.items() if key!='ranking'})
         print(json.dumps(cases[-1]),flush=True)

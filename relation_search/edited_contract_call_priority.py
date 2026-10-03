@@ -181,6 +181,21 @@ class Analyzer:
             if row.get('kind')=='assertion':self.observations[row['test_id']].append(row)
         self.original={}
 
+    def _binding_for(self,assignments,name,node):
+        return _binding(assignments,name,node)
+
+    def _binding_key_for(self,assignments,name,node):
+        value=self._binding_for(assignments,name,node)
+        if value:return _extent(value['node'])
+        if any(row['name']==name and row['scope']==_scope(node) and row['node'].end_byte<=node.start_byte for row in assignments):
+            return None
+        return 'unbound',_scope(node),name
+
+    def _call_positions(self,old,source,changes):
+        position=old['span']
+        mapped=_mapped((position['start_byte'],position['end_byte']),changes)
+        return [mapped] if mapped is not None else []
+
     def _source(self,candidate):
         test=self.corpus['tests'][candidate['base_test_id']];path=test['span']['path']
         if path not in self.original:
@@ -218,7 +233,7 @@ class Analyzer:
         if old.get('callee')!=source.text(fn):return None
         # An argument edit can preserve a callee; a receiver-defining edit cannot.
         if len(parts)>1:
-            binding=_binding(assignments,parts[0],call)
+            binding=self._binding_for(assignments,parts[0],call)
             if binding and any(_overlap(edit['new'],_extent(binding['value'])) for edit in changes):return None
         elif rebound:
             return None
@@ -247,7 +262,7 @@ class Analyzer:
             affected.extend((edit,slot,'direct_argument') for edit in inputs
                             if _overlap(edit['new'],_extent(arg)))
             for name in _read_names(source,arg):
-                binding=_binding(assignments,name,call)
+                binding=self._binding_for(assignments,name,call)
                 if binding is not None:
                     affected.extend((edit,slot,'one_local_assignment') for edit in inputs
                                     if _overlap(edit['new'],_extent(binding['value'])))
@@ -267,8 +282,8 @@ class Analyzer:
             for row in self.calls[base]:
                 position=row['span']
                 if position['path']==source.path:
-                    mapped=_mapped((position['start_byte'],position['end_byte']),changes)
-                    if mapped is not None:original_calls[mapped].append(row)
+                    for mapped in self._call_positions(row,source,changes):
+                        original_calls[mapped].append(row)
             observed=[];expected=[]
             for row in self.observations[base]:
                 expected_span=(row.get('expected') or {}).get('span')
@@ -296,15 +311,15 @@ class Analyzer:
                     elif call.end_byte<=actual.start_byte and _scope(call)==_scope(actual):
                         reads=_read_names(source,actual)
                         for name in reads:
-                            binding=_binding(assignments,name,actual)
+                            binding=self._binding_for(assignments,name,actual)
                             if binding and _inside(_extent(binding['value']),_extent(call)):
                                 basis='assigned_return_read';break
                         if basis is None and receiver:
                             for member in walk(actual):
                                 if member.type in ATTRS:
                                     owner,_=attr_parts(member)
-                                    receiver_key=_binding_key(assignments,receiver,call)
-                                    if source.text(owner)==receiver and receiver_key is not None and receiver_key==_binding_key(assignments,receiver,actual):
+                                    receiver_key=self._binding_key_for(assignments,receiver,call)
+                                    if source.text(owner)==receiver and receiver_key is not None and receiver_key==self._binding_key_for(assignments,receiver,actual):
                                         basis='same_unrebound_receiver_field';break
                     if basis:
                         for edit,slot,input_basis in affected:
