@@ -21,7 +21,7 @@ from scripts import run_test_prefix_component as prefix
 from scripts.run_contract_repair_search import execute, frozen, verify, write
 from scripts.run_type_projection_component import emit
 
-VERSION = 'frozen-prefix-probe-continuation.v1'
+VERSION = 'frozen-prefix-probe-continuation.v2'
 
 
 def validate_cached(outcome, entry):
@@ -39,22 +39,35 @@ def prepare(args):
     old = args.previous
     verify(read(old / 'seal.json'))
     p = read(old / 'prepared.json')
-    admission.verify_seal(p['algorithm'])
+    migrations = []
+    for row in p['algorithm'].values():
+        if Path(row['path']).resolve() == Path(__file__).resolve() and row['sha256'] != frozen(Path(__file__))['sha256']:
+            if p['version'] != 'frozen-prefix-probe-continuation.v1':
+                raise ValueError('Unsupported executor migration')
+            migrations.append(dict(before=row, after=frozen(Path(__file__)),
+                                   reason='Use immutable per-rank snapshots; preserve earlier cached outcomes.'))
+        else:
+            verify(row)
     verify(p['go_binding_materializer'])
-    cache = {}
+    cache = dict(p.get('cached_outcomes', {}))
     for item in p['items']:
         for receipt in item['source_inputs'].values():
             verify(receipt)
         for entry in item['programs']:
             verify(entry['program'])
+            key = f"{item['name']}:{entry['rank']}"
+            if key in cache:
+                verify(cache[key])
+                validate_cached(read(cache[key]['path']), entry)
             path = old / 'cases' / item['name'] / f"candidate_{entry['rank']:04d}" / 'outcome.json'
             if path.exists():
                 validate_cached(read(path), entry)
-                cache[f"{item['name']}:{entry['rank']}"] = frozen(path)
+                cache[key] = frozen(path)
     args.output.mkdir(parents=True, exist_ok=False)
     admission._preload_local_imports(prefix)
     p.update(version=VERSION, previous_prepared=frozen(old / 'prepared.json'),
              algorithm=admission._loaded_sources(), cached_outcomes=cache,
+             executor_migrations=migrations,
              emission_refusal='record_and_continue_next_prefix',
              created_utc=datetime.now(timezone.utc).isoformat())
     write(args.output / 'prepared.json', p)
@@ -140,12 +153,14 @@ def run(args):
                     result['stop_reason'] = 'first_controlled_failure'
                 elif outcome['native']['controls']['status'] != 'all_source_controls_passed':
                     result['stop_reason'] = 'source_control_unavailable_or_failed'
-            write(root / 'cases' / item['name'] / 'result.json', result)
+            write(root / 'cases' / item['name'] / f'result_at_rank_{rank + 1:04d}.json', result)
             print(json.dumps(dict(case=item['case'], parent=item['name'], rank=rank + 1,
                                   controlled_failure=bool(result['first_failure']),
                                   stop_reason=result['stop_reason'], native_executions=count,
                                   reused_native_executions=reused, emission_refusals=emitted_refusals)), flush=True)
     admission.verify_seal(p['algorithm'])
+    for result in results.values():
+        write(root / 'cases' / result['name'] / 'result.json', result)
     summary = dict(version=VERSION, results=list(results.values()), external_model_calls=0,
                    native_executions=count, reused_native_executions=reused,
                    new_native_executions=count - reused, emission_refusals=emitted_refusals,
