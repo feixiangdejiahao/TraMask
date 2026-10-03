@@ -240,6 +240,19 @@ class Analyzer:
         return dict(identity=canonical or identities[0],names=sorted(set().union(*(_identity_names(v) for v in identities))),
                     basis='unchanged_frontend_callee_and_receiver_binding')
 
+    def _affected(self,source,call,assignments,inputs):
+        """V1 reach policy, kept separate so other policies can be compared."""
+        _,args=call_parts(call);affected=[]
+        for slot,arg in enumerate(args):
+            affected.extend((edit,slot,'direct_argument') for edit in inputs
+                            if _overlap(edit['new'],_extent(arg)))
+            for name in _read_names(source,arg):
+                binding=_binding(assignments,name,call)
+                if binding is not None:
+                    affected.extend((edit,slot,'one_local_assignment') for edit in inputs
+                                    if _overlap(edit['new'],_extent(binding['value'])))
+        return affected
+
     def evidence(self,raw):
         candidate=program_candidate(raw);base=candidate['base_test_id']
         result=dict(feature=False,status='no_witness',witnesses=[],unknowns=[])
@@ -272,15 +285,8 @@ class Analyzer:
                 if not resolved:continue
                 names=sorted(set(self.names)&set(resolved['names']))
                 if not names:continue
-                fn,args=call_parts(call);affected=[]
-                for slot,arg in enumerate(args):
-                    direct=[edit for edit in inputs if _overlap(edit['new'],_extent(arg))]
-                    affected.extend((edit,slot,'direct_argument') for edit in direct)
-                    for name in _read_names(source,arg):
-                        binding=_binding(assignments,name,call)
-                        if binding is not None:
-                            affected.extend((edit,slot,'one_local_assignment') for edit in inputs
-                                if _overlap(edit['new'],_extent(binding['value'])))
+                fn,args=call_parts(call)
+                affected=self._affected(source,call,assignments,inputs)
                 if not affected:continue
                 parts=_chain(source,fn);receiver=parts[0] if parts and len(parts)==2 else None
                 for row,actual in observed:

@@ -17,14 +17,14 @@ from relation_search import semantic_selection
 from scripts.evaluate_test_validity import digest, loaded_local_sources, read, verify_seal, write_new
 
 
-def prepare(input_path,output,*,limits=(16,32,64)):
+def prepare(input_path,output,*,limits=(16,32,64),selector=priority):
     if any(type(limit) is not int or limit<0 for limit in limits):raise ValueError('nonnegative integer limits required')
     # No other inventory section is read by this selector.
     records=read(input_path)['controlled_failures'];by_case=defaultdict(list)
     for row in records:by_case[row['case']].append(row)
     output.mkdir(parents=True,exist_ok=False)
     algorithm=loaded_local_sources()
-    protocol=dict(policy=priority.POLICY,policy_sha256=priority.digest(priority.POLICY),
+    protocol=dict(policy=selector.POLICY,policy_sha256=selector.digest(selector.POLICY),
         algorithm=algorithm,limits=list(limits),source_inventory=dict(path=str(input_path.resolve()),sha256=digest(input_path)),
         input_section='controlled_failures only',evaluation_labels_used=False,
         runtime_outcomes_used_only_for_initial_failing_pool=True,native_failure_text_used=False,
@@ -51,7 +51,7 @@ def prepare(input_path,output,*,limits=(16,32,64)):
         issue=issue_path.read_text();issue_receipt=dict(path=str(issue_path.resolve()),sha256=digest(issue_path))
         inputs.append(issue_receipt)
         case_started=time.monotonic()
-        allocation=priority.select(source,frontend,list(candidates.values()),issue,budget=0)
+        allocation=selector.select(source,frontend,list(candidates.values()),issue,budget=0)
         ranked_ids=[row['id'] for row in allocation['ranking']]
         for limit in limits:selected[limit].extend(occurrences[identifier] for identifier in ranked_ids[:limit])
         case_record=dict(case=case,candidates=len(candidates),issue=issue_receipt,
@@ -67,7 +67,7 @@ def prepare(input_path,output,*,limits=(16,32,64)):
     artifacts=[]
     for limit in limits:
         destination=output/('selected_'+str(limit)+'.json')
-        write_new(destination,dict(version=priority.POLICY['version'],controlled_failures=selected[limit],
+        write_new(destination,dict(version=selector.POLICY['version'],controlled_failures=selected[limit],
             source_inventory=protocol['source_inventory'],source_only_ranking=True,
             selected_without_positive_or_review_labels=True,per_case=limit,unselected_status='pending_admission_budget'))
         artifacts.append(dict(limit=limit,path=str(destination.resolve()),sha256=digest(destination),selected=len(selected[limit])))
