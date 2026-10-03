@@ -13,7 +13,7 @@ from scripts.run_relational_gap_case import run_case
 from scripts.run_contract_repair_search import write,frozen
 
 
-def prepare(artifact,output):
+def prepare(artifact,output,test_names=None):
     output.mkdir(parents=True,exist_ok=False)
     manifest=read(artifact/'manifest.json');plan=read(artifact/'phase_plan.json')
     phases=[row for row in plan['phases'] if row['role'] in {'control','generated'}]
@@ -25,6 +25,9 @@ def prepare(artifact,output):
     for row in mounts:
         if digest(row['source'])!=row['sha256']:raise ValueError('Frozen emitted source changed')
     names=[row['test_name'] for row in manifest['obligations']]
+    if test_names is not None:
+        if not set(test_names)<=set(names):raise ValueError('Unknown emitted test name')
+        names=[name for name in names if name in test_names]
     worker=ROOT/'scripts/compare_typescript_programs.cjs'
     comparison=dict(target=next(iter(targets)),test_names=names,
                     phases=[dict(role=row['role'],files=row['files']) for row in phases])
@@ -54,6 +57,7 @@ def run(root,timeout):
 if __name__=='__main__':
     p=argparse.ArgumentParser(__doc__);p.add_argument('stage',choices=['prepare','run'])
     p.add_argument('--artifact',type=Path);p.add_argument('--output',type=Path);p.add_argument('--input',type=Path)
+    p.add_argument('--test-name',action='append')
     p.add_argument('--timeout',type=int,default=180);args=p.parse_args()
-    result=prepare(args.artifact,args.output) if args.stage=='prepare' else run(args.input,args.timeout)
+    result=prepare(args.artifact,args.output,args.test_name) if args.stage=='prepare' else run(args.input,args.timeout)
     print(json.dumps(result,indent=2))
