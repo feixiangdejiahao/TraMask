@@ -47,7 +47,7 @@ def prepare(args):
         cases.append(dict(case=case, source=str(source.resolve()), inputs=inputs,
                           generation=frozen(directory/'generation.json'),
                           candidates=entries, status=generated['status']))
-        print(json.dumps(dict(case=case, selected=len(entries), **generated)), flush=True)
+        print(json.dumps(dict(generated, case=case, selected=len(entries))), flush=True)
     admission.verify_seal(algorithm)
     if set(admission._loaded_sources()) - set(algorithm):
         raise ValueError('Unsealed local source imported')
