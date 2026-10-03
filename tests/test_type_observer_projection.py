@@ -6,8 +6,8 @@ from relation_search import oracle
 from relation_search.type_observer_projection import project
 
 
-def fixture():
-    code="test('schema', () => { const schema = build(); expect(schema.entries.item).toBe(schema); expect(parse(schema, input)).toEqual(input); });"
+def fixture(message=''):
+    code="test('schema', () => { const schema = build(); expect(schema.entries.item"+message+").toBe(schema); expect(parse(schema, input)).toEqual(input); });"
     source=Source('test.ts',code,'typescript');frontend=extract_frontend([source]);corpus=to_emitter_corpus(frontend);base=next(iter(corpus['tests']));at=code.index('build()')
     candidate=dict(id='fixed',base_test_id=base,edits=[dict(span=dict(path='test.ts',start_byte=at,end_byte=at+7),before='build()',after='wrap(build())',role='input')])
     emitted=oracle.preview(corpus,candidate);start=emitted.index('entries')
@@ -34,3 +34,9 @@ def test_input_call_type_errors_cannot_be_hidden_by_projection():
 def test_stale_compiler_evidence_cannot_modify_a_test():
     corpus,frontend,candidate,report,emitted=fixture()
     assert project(corpus,frontend,candidate,report,emitted+' ')['reason']=='compiler_source_mismatch'
+
+
+def test_assertion_diagnostic_actions_cannot_be_removed():
+    for message in (', announce()', ', new Error()', ', counter++'):
+        args=fixture(message)
+        assert project(*args)['reason']=='type_error_in_action_or_effectful_observation'

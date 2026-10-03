@@ -17,7 +17,7 @@ from experimental import assertion_operand_guard as guard
 from relation_search import oracle
 
 
-VERSION='type-directed-pure-observation-projection.v1'
+VERSION='type-directed-pure-observation-projection.v2'
 
 
 def _byte(text,utf16_offset):
@@ -38,7 +38,13 @@ def pure_reference(source,node):
 
 def parts(code):
     try:
-        source=Source('assertion.ts',code,'typescript');_,observed,expected=guard._ts_parts(source)
+        source=Source('assertion.ts',code,'typescript');statement,observed,expected=guard._ts_parts(source)
+        nodes=list(walk(statement))
+        # Only expect(...) and its matcher may be explicit calls. Diagnostic
+        # arguments also execute, so they cannot hide an additional action.
+        if sum(node.type=='call_expression' for node in nodes)!=2:return None
+        if any(node.type in {'new_expression','assignment_expression','augmented_assignment_expression',
+                             'update_expression','await_expression','yield_expression'} for node in nodes):return None
         if not pure_reference(source,observed):return None
         if not (pure_reference(source,expected) or guard._closed_ts(source,expected)):return None
         if observed.type in {'number','string','true','false','null'}:return None
