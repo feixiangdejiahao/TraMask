@@ -83,7 +83,7 @@ def run(args):
     verify(p['go_binding_materializer'])
     admission.verify_seal(p['algorithm']);results={i['name']:dict(name=i['name'],case=i['case'],parent=i['parent'],attempts=[],first_failure=None,stop_reason=None) for i in p['items']}
     count=0;deadline=datetime.fromisoformat(p['deadline_utc'].replace('Z','+00:00'))
-    for rank in range(max(len(i['programs']) for i in p['items'])):
+    for rank in range(max((len(i['programs']) for i in p['items']),default=0)):
         for item in p['items']:
             result=results[item['name']]
             if result['stop_reason'] or rank>=len(item['programs']):continue
