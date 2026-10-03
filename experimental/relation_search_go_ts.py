@@ -26,9 +26,10 @@ from typing import Iterable
 from anchor_retrieval.syntax import (
     ATTRS, CALLS, Source, Unit, attr_parts, call_parts, child, is_test_path, literal, units, walk,
 )
+from generic_composition.emitter import _relative_module
 
 
-VERSION = "source-neighbours-v1"
+VERSION = "source-neighbours-v2"
 OPERATORS = ("record_delete", "argument_omit", "receiver_route", "expression_rebind",
              "constructor_wrap", "constructor_field_lift", "guest_result_container", "owner_prefix_rebind",
              "guest_alias_route", "sequence_interval_extend", "structured_literal_route", "numeric_context_route")
@@ -468,11 +469,8 @@ def _transport_constructor(template, target: Source, hole, extra_changes=()):
             if alias in identifiers:
                 alias = "rs_import_" + _digest(signature)[:8]
             module, imported = donor.imports[name]
-            if module.startswith("."):
-                absolute = posixpath.normpath(posixpath.join(posixpath.dirname(donor.path), module))
-                module = posixpath.relpath(absolute, posixpath.dirname(target.path) or ".")
-                if not module.startswith("."):
-                    module = "./" + module
+            # Keep the module in its declared source coordinate system. Both
+            # emitters resolve source_path -> target_path exactly once.
             imports.append({"name": alias, "module": module, "imported_name": imported,
                             "source_path": donor.path, "source_binding": name})
             existing = alias
@@ -1767,7 +1765,9 @@ def emit_neighbors(source: Source, proposals: Iterable[dict]) -> tuple[str, list
     imports = {}
     for proposal in proposals:
         for item in proposal.get("imports", []):
-            imports[(item["name"], item["module"], item.get("imported_name"))] = item
+            module = _relative_module(item["module"], item.get("source_path", source.path),
+                                      source.path, source.language)
+            imports[(item["name"], module, item.get("imported_name"))] = item
     if imports:
         if source.language != "typescript":
             raise ValueError("Constructor import transport only supports TypeScript")
