@@ -93,3 +93,16 @@ def test_namespace_renaming_does_not_change_template_eligibility():
     code = CODE.replace('test_rejection', 'test_alternative').replace('quota', 'amount').replace('file', 'resource')
     corpus, candidate = fixture(code)
     assert template.classify(corpus, candidate)['status'] == 'eligible'
+
+
+@pytest.mark.parametrize('source', [
+    CODE.replace('import pytest as pt', 'import pytest as pt\npt.raises = replacement'),
+    CODE.replace('    file =', '    pt.raises = replacement\n    file ='),
+    CODE.replace('    file =', '    del pt.raises\n    file ='),
+    CODE.replace('from example import validate as inspect_input, Invalid',
+                 'from example import Invalid\nimport example as api\napi.validate = replacement')
+        .replace('inspect_input(file)', 'api.validate(file)'),
+])
+def test_direct_attribute_rewrites_invalidate_imported_call_binding(source):
+    corpus, candidate = fixture(source)
+    assert template.classify(corpus, candidate)['reason'] == 'imported_adapter_or_operation_attribute_written'

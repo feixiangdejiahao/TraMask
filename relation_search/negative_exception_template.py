@@ -75,6 +75,15 @@ def classify(corpus, candidate):
     imported = context._import_symbol(operation.func, imports, blocked)
     if not imported or imported[0] == 'pytest':
         return result('unknown', 'exception_operation_binding_unresolved')
+    roots = {context._chain(call.func)[0] for call in (adapter, operation)}
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.Attribute, ast.Subscript))
+                and isinstance(node.ctx, (ast.Store, ast.Del))):
+            owner = node
+            while isinstance(owner, (ast.Attribute, ast.Subscript)):
+                owner = owner.value
+            if isinstance(owner, ast.Name) and owner.id in roots:
+                return result('unknown', 'imported_adapter_or_operation_attribute_written')
     forbidden = (ast.Assert, ast.Raise, ast.If, ast.For, ast.AsyncFor, ast.While,
                  ast.Try, ast.AsyncWith, ast.Return, ast.Yield, ast.YieldFrom,
                  ast.Lambda, ast.AsyncFunctionDef, ast.ClassDef, ast.Match)
@@ -105,4 +114,5 @@ def classify(corpus, candidate):
                   original_test=dict(span), exception_adapter=adapter_span,
                   operation=context._span(operation, path, offsets),
                   operation_binding=list(imported),
+                  binding_limit='Lexical direct imports only. Dynamic monkeypatches, alias effects and fixture effects require complete-test review.',
                   input_to_rejection_binding='Requires complete-test semantic review; not proved by this syntax predicate.')

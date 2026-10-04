@@ -92,11 +92,7 @@ def prepare(args):
     component = archive.read(args.component)
     base, summary, semantic, provenance, sources = load_base(component)
     rows = classifications(base)
-    algorithm = {name: archive.frozen(path) for name, path in {
-        'driver': __file__, 'predicate': predicate.__file__,
-        'source_bindings': source_control_context.__file__,
-        'archive': archive.__file__, 'gated_native': archive.gated_native.__file__,
-    }.items()}
+    algorithm = archive.verification_algorithm()
     record = dict(version=VERSION, base_component=component,
         component_spec=archive.frozen(args.component), algorithm=algorithm,
         policy=predicate.POLICY, cases=[c['case'] for c in base['cases']],
