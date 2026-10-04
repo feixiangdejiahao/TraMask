@@ -13,10 +13,15 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = 'archived-complete-component-chain.v2'
+sys.path.insert(0, str(ROOT))
+from scripts import archived_absence_null_validation as gated_native
+
+VERSION = 'archived-complete-component-chain.v3'
 ARCHIVED = 'archived-complete-component-chain.v1'
+ARCHIVES = {ARCHIVED, 'archived-complete-component-chain.v2', VERSION}
 SEQUENTIAL = 'sequential-source-admission.v1'
 QUANTITY = 'controlled-quantity-bound-search.v1'
 CHAIN = 'ordered-source-relation-exact-semantic-chain.v4'
@@ -402,7 +407,7 @@ class Verifier:
         summary_path = self.receipt(summary_receipt, 'data')
         protocol, summary = read(prepared_path), read(summary_path)
         version = protocol.get('version')
-        if version not in NATIVE | {CHAIN, CODEC, GATE, ARCHIVED, SEQUENTIAL}:
+        if version not in NATIVE | ARCHIVES | {CHAIN, CODEC, GATE, SEQUENTIAL, gated_native.VERSION}:
             raise ValueError('No provenance roles for protocol version: ' + str(version))
         if summary.get('version') != version:
             raise ValueError('Protocol/summary version differs')
@@ -415,7 +420,7 @@ class Verifier:
         self.receipts(protocol['algorithm'], 'executed_code')
         if 'gate_implementation' in protocol:
             self.receipts(protocol['gate_implementation'], 'executed_code')
-        derived_fields = {'provenance'} if version == ARCHIVED else set()
+        derived_fields = {'provenance'} if version in ARCHIVES else set()
         self.receipts({k: v for k, v in protocol.items()
                        if k not in {'algorithm', 'gate_implementation'} | derived_fields})
         if derived_fields:
@@ -428,6 +433,8 @@ class Verifier:
             raise ValueError('Empty or duplicate protocol cohort')
         if version == SEQUENTIAL:
             return self.sequential(protocol, summary, prepared_receipt, prepared_path.parent)
+        if version == gated_native.VERSION:
+            return gated_native.validate(self, protocol, summary, prepared_receipt, prepared_path.parent)
         expected_rows = ([item['case'] for item in protocol['items']]
                          if version in {CODEC, GATE} else cases)
         rows = summary.get('results' if version in NATIVE else 'decisions', [])
@@ -463,7 +470,7 @@ class Verifier:
             child = self.execution(protocol['semantic'], summary['source_summary'])
             if set(child['cases']) != set(cases):
                 raise ValueError('Semantic replay cohort differs')
-        elif version == ARCHIVED:
+        elif version in ARCHIVES:
             components = protocol['components']
             names = component_names(components)
             if (protocol['precedence'] != names
@@ -479,14 +486,15 @@ class Verifier:
                 child_verifier = Verifier(self.root, component['commit'],
                     code_root=self.root / component.get('code_root', '.'))
                 seal = read(child_verifier.receipt(component['seal'], 'data'))
-                if seal != component['prepared']:
+                child_protocol = read(component['prepared']['path'])
+                expected_seal = ({'prepared': component['prepared']}
+                    if child_protocol.get('version') == SEQUENTIAL else component['prepared'])
+                if seal != expected_seal:
                     raise ValueError('Archived child seal changed')
                 child = child_verifier.execution(component['prepared'], component['summary'])
                 if set(child['cases']) != set(cases):
                     raise ValueError('Archived child cohort differs')
-                if sources is not None and sources != child['sources']:
-                    raise ValueError('Archived children have different source hashes')
-                sources = child['sources']
+                sources = merge_sources(sources, child['sources'])
                 loaded[name] = child
                 self.dependencies.append(dict(role='archived_executed_component', name=name,
                     prepared=component['prepared'], summary=component['summary'], verifier=child_verifier.report()))
@@ -604,6 +612,15 @@ def compose(cases, loaded, *, precedence=None):
     return decisions
 
 
+def verification_algorithm():
+    """Freeze every loaded local module used by the read-only verifier."""
+    return {name: frozen(module.__file__) for name, module in sorted(sys.modules.items())
+            if getattr(module, '__file__', None)
+            and Path(module.__file__).suffix == '.py'
+            and Path(module.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1])
+            and not any(part in {'.venv', 'tests'} for part in Path(module.__file__).parts)}
+
+
 def prepare(args):
     components = read(args.components)
     names = component_names(components)
@@ -611,7 +628,7 @@ def prepare(args):
     protocol = {'version': VERSION, 'precedence': names, 'components': components,
                 'components_spec': frozen(args.components),
                 'cases': sorted(sources), 'source_inventory': sources,
-                'algorithm': frozen(__file__), 'provenance': reports,
+                'algorithm': verification_algorithm(), 'provenance': reports,
                 'retrospective': True, 'fresh_native_executions': 0, 'fresh_provider_calls': 0,
                 'evaluation_labels_used': False,
                 'policy': 'First existing alert in fixed component order. Never replace based on audit labels.',
@@ -634,7 +651,7 @@ def run(args):
         raise ValueError('Unexpected archived chain protocol')
     if read(verifier.receipt(protocol['components_spec'], 'data')) != protocol['components']:
         raise ValueError('Frozen component specification differs')
-    verifier.receipt(protocol['algorithm'], 'data')
+    verifier.receipts(protocol['algorithm'], 'data')
     loaded, reports, sources = load_components(protocol['components'])
     if sources != protocol['source_inventory'] or sorted(sources) != protocol['cases']:
         raise ValueError('Frozen chain source inventory changed')

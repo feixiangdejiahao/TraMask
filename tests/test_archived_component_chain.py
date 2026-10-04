@@ -427,9 +427,12 @@ def legacy_chain_fixture(queue, code, commit):
     return prepared, summary
 
 
-def test_nested_archive_uses_original_commits_and_does_not_execute_cached_reports(archive, monkeypatch):
+@pytest.mark.parametrize('version', sorted(chain.ARCHIVES))
+def test_nested_archive_uses_original_commits_and_does_not_execute_cached_reports(archive, monkeypatch, version):
     queue = queue_fixture(archive)
     prepared, summary = legacy_chain_fixture(queue, archive[2], archive[1])
+    prepared = put(prepared['path'], dict(chain.read(prepared['path']), version=version))
+    summary = put(summary['path'], dict(chain.read(summary['path']), version=version))
     verifier = chain.Verifier(archive[0], archive[1])
     result = verifier.execution(prepared, summary)
     assert result['index']['a']['alert'] == {'token':'earlier-alert'}
