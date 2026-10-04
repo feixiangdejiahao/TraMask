@@ -443,8 +443,25 @@ def analyze(corpus, frontend, candidate, *, max_units=256, max_edges=2048):
         builder = _CompactGraph(sources, owner, changes, max_units=max_units, max_edges=max_edges)
         selected = corpus['tests'][candidate['base_test_id']]
         definition = selected.get('definition_span', selected['span'])
+        if definition['path'] != owner.path:
+            raise ValueError('selected definition belongs to another source')
+        # Decorator edits precede the function node. Recover its complete
+        # modified extent from the already validated original-byte edits.
+        # Names cannot identify an occurrence: other scopes may reuse them.
+        def moved_boundary(position):
+            delta = 0
+            for change in changes:
+                original = change['original_span']
+                start, end = original['start_byte'], original['end_byte']
+                if start < position < end:
+                    raise ValueError('candidate edit crosses selected definition boundary')
+                if end <= position:
+                    delta += len(change['after'].encode()) - (end - start)
+            return position + delta
+        start = moved_boundary(definition['start_byte'])
+        end = moved_boundary(definition['end_byte'])
         roots = [unit for unit in builder.index.units.values() if unit.source.path == owner.path
-                 and unit.test and unit.node.start_byte == definition['start_byte']]
+                 and unit.test and unit.node.start_byte == start and unit.node.end_byte == end]
         if len(roots) != 1:
             raise ValueError('modified root test not recovered')
         for unknown in import_unknowns:
