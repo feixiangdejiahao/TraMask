@@ -12,23 +12,26 @@ import hashlib
 import json
 import re
 
-from anchor_retrieval.syntax import CALLS, Source, attr_parts, call_parts, child, walk
+from anchor_retrieval.syntax import CALLS, Source, attr_parts, call_parts, child, units, walk
 from experimental import relation_search_go_ts as neighbors
 
-VERSION = 'checked-guest-carrier-inverse.v1'
+VERSION = 'checked-guest-carrier-inverse.v2'
 POLICY = dict(version=VERSION, language='go',
     contract='an explicit issue sentence says returned functions/closures and composite/container values must stay/remain/be callable',
     generation='source-neighbour guest_result_container only, rebuilt from repository source tests; no old candidate pool',
     static_checks=['single top-level factory with one owned return', 'byte-exact clone except fresh name and box around returned closure',
-                   'producer lookup owner traces to the same guest program', 'all projected uses keep one local value binding',
+                   'producer lookup owner traces to the same guest program through bounded source helper returns',
+                   'all projected uses keep one local value binding',
                    'source host-view imports and selector are checked', 'source expected expressions are untouched'],
-    precondition='separate native scalar-box projection probe; failed or unavailable probes do not become defect reports',
+    precondition='same-path native scalar-return factory probe; original setup, helper calls and factory invocation remain; failed or unavailable probes do not become defect reports',
     ordering='source retrieval rank, source position, mapping/sequence kind, member and program hash',
     unchanged='complete source test, closure body, other guest statements and all source expected expressions',
     alert='first eligible candidate fails twice with source controls and exact transport; independent full-test audit still required',
     forbidden_inputs=['known witness IDs', 'old candidate lists', 'runtime outcomes during generation', 'audit labels', 'reference code'],
     limitations=['bounded Go-like guest syntax', 'local source binding checks, not a whole-language proof',
-                 'a failed adapter probe can hide a real defect and remains an explicit miss',
+                 'same-file helpers only; single final return, no recursive flow, rebinding, defer or asynchronous calls',
+                 'helper summaries establish source provenance, not purity or whole-program semantics',
+                 'a failed scalar-return probe can hide a real return-path defect and remains an explicit miss',
                  'additional guest globals and opaque host effects require whole-test audit'])
 
 
@@ -100,39 +103,179 @@ def _factory_guard(program, factory):
         raise ValueError('factory_name_observed_inside_clone')
 
 
+def _write_targets(node):
+    if node.type == 'var_spec':
+        return node.children_by_field_name('name')
+    if node.type in {'short_var_declaration', 'assignment_statement', 'range_clause'}:
+        left = child(node, 'left')
+        return [left] if left is not None else []
+    if node.type in {'inc_statement', 'dec_statement'}:
+        return [node]
+    return []
+
+
 def _single_binding(source, unit, name, at):
     bindings = neighbors._bindings(source)
     binding = neighbors._resolve(bindings, name, at)
+    if binding is None:
+        # Go's comma-ok assertion binds its object in the first slot. The
+        # general frontend currently records multi-results only for calls.
+        assertions = []
+        for declaration in walk(unit.body):
+            if declaration.type != 'short_var_declaration':
+                continue
+            left, right = child(declaration, 'left'), child(declaration, 'right')
+            names = list(left.named_children) if left is not None else []
+            values = list(right.named_children) if right is not None else []
+            if (len(names) == 2 and source.text(names[0]) == name and len(values) == 1
+                    and values[0].type == 'type_assertion_expression'):
+                assertions.append((names[0], values[0], neighbors._scope(declaration)))
+        binding = neighbors._resolve({name: assertions}, name, at)
     if binding is None or not neighbors._contains(unit.body, binding[0]):
         return None
     writes = []
     for node in walk(unit.body):
-        if node.type in {'short_var_declaration', 'assignment_statement', 'var_spec'}:
-            left = child(node, 'left', 'name')
-            if left is not None:
-                writes.extend(part for part in walk(left) if part.type == 'identifier' and source.text(part) == name)
+        for left in _write_targets(node):
+            writes.extend(part for part in walk(left) if part.type == 'identifier' and source.text(part) == name)
     if len(writes) != 1 or writes[0].start_byte != binding[0].start_byte:
         return None
     return binding
 
 
-def _owner_reaches_program(source, unit, owner, at, literal, seen=None):
-    seen = set() if seen is None else set(seen)
-    if owner in seen or len(seen) >= 12:
+def _helper_return(source, context, invocation, env):
+    """Bind a same-file helper's one final return to actual argument nodes.
+
+    No helper is inlined into a candidate. Setup loops and status checks remain
+    in the original execution path. This summary only tracks returned origins.
+    """
+    function, arguments = call_parts(invocation)
+    if function is None or function.type != 'identifier':
+        return None
+    name = source.text(function)
+    local_declaration = any(
+        node.type in {'short_var_declaration', 'var_spec', 'range_clause'} and node.start_byte < invocation.start_byte
+        and neighbors._contains(neighbors._scope(node), invocation)
+        and any(part.type == 'identifier' and source.text(part) == name
+                for left in _write_targets(node) for part in walk(left))
+        for node in walk(context.body))
+    if name in context.params or local_declaration:
+        raise ValueError('dynamic_helper_callee')
+    if not hasattr(source, '_carrier_helper_units'):
+        source._carrier_helper_units = units(source)[0]
+    definitions = [unit for unit in source._carrier_helper_units
+                   if unit.name == name and unit.node.type == 'function_declaration'
+                   and unit.node.parent == source.root]
+    if not definitions:
+        return None
+    if len(definitions) != 1:
+        raise ValueError('ambiguous_helper_definition')
+    helper = definitions[0]
+    result_type = child(helper.node, 'result')
+    if result_type is not None and result_type.type == 'parameter_list' and any(
+            part.type == 'parameter_declaration' and child(part, 'name') is not None
+            for part in result_type.named_children):
+        raise ValueError('named_helper_return_binding_unsupported')
+    if len(helper.params) != len(arguments) or any(
+            node.type in {'variadic_parameter_declaration', 'defer_statement', 'go_statement', 'func_literal'}
+            for node in walk(helper.node)):
+        raise ValueError('unsupported_helper_execution_shape')
+    statements = neighbors._statements(helper)
+    returns = [node for node in walk(helper.body) if node.type == 'return_statement']
+    if len(returns) != 1 or not statements or returns[0] != statements[-1]:
+        raise ValueError('helper_requires_one_final_return')
+    values = list(returns[0].named_children)
+    if len(values) == 1 and values[0].type == 'expression_list':
+        values = list(values[0].named_children)
+    if len(values) != 1:
+        raise ValueError('helper_requires_one_returned_value')
+    for node in walk(helper.body):
+        if any(part.type == 'identifier' and source.text(part) in helper.params
+               for left in _write_targets(node) for part in walk(left)):
+            raise ValueError('helper_parameter_is_rebound')
+    return helper, values[0], dict(zip(helper.params, ((context, arg, env) for arg in arguments)))
+
+
+def _origin(source, context, node, env):
+    """Resolve one lexical value step, keeping the caller context for params."""
+    if node.type == 'identifier':
+        name = source.text(node)
+        if name in env:
+            return env[name]
+        binding = _single_binding(source, context, name, node)
+        if binding is None:
+            return None
+        # _bindings records every multi-result name against the same call.
+        # Only its first value can carry the program/function being traced.
+        declaration = binding[0].parent
+        if declaration is not None and declaration.type == 'expression_list':
+            declaration = declaration.parent
+        if declaration is not None and declaration.type == 'short_var_declaration':
+            names, rhs = neighbors._go_results(source, declaration)
+            if rhs is not None and names[0] != binding[0]:
+                return None
+        return context, binding[1], env
+    if node.type in {'parenthesized_expression', 'type_assertion_expression', 'type_conversion_expression'}:
+        operand = child(node, 'operand')
+        if operand is None and len(node.named_children) == 1:
+            operand = node.named_children[0]
+        return (context, operand, env) if operand is not None else None
+    if node.type in CALLS:
+        return _helper_return(source, context, node, env)
+    return None
+
+
+def _reaches(source, context, node, env, literal, symbol=None, seen=()):
+    """Check program provenance, or a lookup using that program and symbol."""
+    key = (context.node.start_byte, node.start_byte, node.end_byte)
+    if key in seen or len(seen) >= 32:
         return False
-    seen.add(owner)
-    binding = _single_binding(source, unit, owner, at)
-    if binding is None:
-        return False
-    value = binding[1]
-    if neighbors._contains(value, literal):
+    seen = (*seen, key)
+    if symbol is None and node == literal:
         return True
-    if value.type not in CALLS:
+    resolved = _origin(source, context, node, env)
+    if resolved is not None:
+        unit, value, bindings = resolved
+        return _reaches(source, unit, value, bindings, literal, symbol, seen)
+    if node.type not in CALLS:
         return False
-    callee, arguments = call_parts(value)
-    path = neighbors._path(source, callee)
-    return (path is not None and len(path) == 2 and not arguments
-            and _owner_reaches_program(source, unit, path[0], value, literal, seen))
+    function, arguments = call_parts(node)
+    receiver, _ = attr_parts(function) if function is not None else (None, None)
+    if symbol is not None:
+        if receiver is None:
+            return False
+        if not arguments:
+            return _reaches(source, context, receiver, env, literal, symbol, seen)
+        return (len(arguments) == 1 and _same_actual(source, context, arguments[0], env, symbol)
+                and _reaches(source, context, receiver, env, literal, seen=seen))
+    if receiver is not None and not arguments:
+        return _reaches(source, context, receiver, env, literal, seen=seen)
+    # Existing constructor boundary: the program is an actual argument.
+    # A local helper has already been resolved above, so ignored parameters
+    # cannot establish provenance merely by occurring at its call site.
+    path = neighbors._path(source, function)
+    if path is None or (len(path) > 1 and path[0] not in source.imports):
+        return False
+    return any(_reaches(source, context, arg, env, literal, seen=seen) for arg in arguments)
+
+
+def _same_actual(source, context, node, env, target, seen=()):
+    key = (context.node.start_byte, node.start_byte, node.end_byte)
+    if node == target:
+        return True
+    if key in seen or len(seen) >= 32:
+        return False
+    resolved = _origin(source, context, node, env)
+    return resolved is not None and _same_actual(source, *resolved, target, (*seen, key))
+
+
+def _contains_lookup(source, unit, value, lookup, seen=()):
+    if neighbors._contains(value, lookup):
+        return True
+    if value.type != 'identifier' or source.text(value) in seen or len(seen) >= 12:
+        return False
+    binding = _single_binding(source, unit, source.text(value), value)
+    return binding is not None and _contains_lookup(source, unit, binding[1], lookup,
+                                                    (*seen, source.text(value)))
 
 
 def check(source, sources, unit, row):
@@ -175,12 +318,13 @@ def check(source, sources, unit, row):
     lookup = symbol.parent
     while lookup is not None and lookup.type not in CALLS:
         lookup = lookup.parent
-    lookup_fn, _ = call_parts(lookup) if lookup is not None else (None, [])
-    lookup_path = neighbors._path(source, lookup_fn)
-    if lookup_path is None or len(lookup_path) != 2 or not _owner_reaches_program(
-            source, unit, lookup_path[0], lookup, literal):
+    if lookup is None or not _reaches(source, unit, lookup, {}, literal, symbol):
         raise ValueError('lookup_owner_does_not_trace_to_guest_program')
-    product = symbol.parent
+    first_use = _exact(source, projections[0]['span'])
+    value_binding = _single_binding(source, unit, source.text(first_use), first_use)
+    if value_binding is None:
+        raise ValueError('result_binding_is_not_unique')
+    product = value_binding[0].parent
     while product is not None and product.type != 'short_var_declaration':
         product = product.parent
     if product is None:
@@ -190,7 +334,7 @@ def check(source, sources, unit, row):
         raise ValueError('direct_factory_invocation_required')
     fn, _ = call_parts(rhs)
     receiver, _ = attr_parts(fn) if fn is not None else (None, None)
-    if receiver is None or not neighbors._contains(receiver, lookup):
+    if receiver is None or not _contains_lookup(source, unit, receiver, lookup):
         raise ValueError('producer_does_not_invoke_the_lookup_value')
     value_name = source.text(names[0])
     if _single_binding(source, unit, value_name, projections and _exact(source, projections[0]['span'])) is None:
@@ -227,24 +371,25 @@ def check(source, sources, unit, row):
     expected = neighbors._expected_regions(source)
     if any(edit['span']['start_byte'] < high and low < edit['span']['end_byte'] for edit in edits for low, high in expected):
         raise ValueError('source_expected_value_changed')
-    # This is an adapter probe, not a defect witness. Add a fresh scalar box,
-    # fetch it without invoking a function, project through the same host type,
-    # and stop before the original result observers.
-    probe_input = dict(inputs[0], after='`'+program+'\n'+fresh+':='+before+'0'+after+'\n`')
-    getter = source.text(receiver)
-    relative_start, relative_end = symbol.start_byte-receiver.start_byte, symbol.end_byte-receiver.start_byte
-    getter_bytes = getter.encode()
-    getter = (getter_bytes[:relative_start]+bindings[0]['after'].encode()+getter_bytes[relative_end:]).decode()
-    cut = dict(path=source.path, start_byte=product.start_byte, end_byte=unit.body.end_byte-1)
+    # This is an adapter probe, never a defect witness. Keep the original
+    # helper/getter/invocation path, but return a boxed scalar from the clone.
+    # Thus a typed getter still fetches a function, and no helper check is
+    # bypassed just to obtain a raw container view.
+    scalar_clone = fresh+program[start+len(factory['name']):a]+before+'0'+after+program[b:end]
+    probe_input = dict(inputs[0], after='`'+program+'\n'+scalar_clone+'\n`')
+    cut = dict(path=source.path, start_byte=product.end_byte, end_byte=unit.body.end_byte-1)
+    tail = '\n_ = ('+value_name+')'+suffix+'\n'
+    tail += ''.join('_ = '+source.text(name)+'\n' for name in names[1:] if source.text(name) != '_')
     probe_tail = dict(span=cut, before=source.data[cut['start_byte']:cut['end_byte']].decode(),
-                      after='_ = ('+getter+')'+suffix+'\n', role='carrier_precondition')
-    if inputs[0]['span']['end_byte'] > cut['start_byte']:
+                      after=tail, role='carrier_precondition')
+    if inputs[0]['span']['end_byte'] > product.start_byte or bindings[0]['span']['end_byte'] > product.end_byte:
         raise ValueError('guest_program_not_before_producer')
     return dict(factory=factory, guest_fresh_name=fresh, host_suffix=suffix,
                 original_return_sha256=hashlib.sha256(program[a:b].encode()).hexdigest(),
                 producer_span=neighbors._span(source, product), projected_uses=len(projections),
                 relation='host_project(guest_box(returned_closure)) preserves the original callable value contract',
-                probe_edits=[probe_input, probe_tail])
+                probe_kind='same_source_factory_path_with_scalar_return',
+                probe_edits=[probe_input, bindings[0], probe_tail])
 
 
 def generate(corpus, frontend, issue, *, limit=16):

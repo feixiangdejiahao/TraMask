@@ -25,6 +25,25 @@ func TestCarrier(t *testing.T) {
 }
 '''
 
+HELPER_CODE = CODE.replace('c := run(`', 'c := prepare(t, `', 1).replace(
+    'return n} }`)\n result, err := c.Lookup("build").Object().Invoke(integer(3))',
+    'return n} }`, nil)\n selected := fetch(t, c, "build")\n result, err := selected.Invoke(integer(3))'
+) + '''
+func prepare(t *testing.T, src string, variables map[string]interface{}) *guest.Compiled {
+ vm := guest.Load([]byte(src))
+ for k, v := range variables { assertNoError(t, vm.Bind(k,v)) }
+ compiled, err := vm.Start()
+ assertNoError(t, err)
+ return compiled
+}
+func fetch(t *testing.T, compiled *guest.Compiled, symbol string) *guest.Function {
+ object := compiled.Lookup(symbol).Object()
+ function, ok := object.(*guest.Function)
+ assertTrue(t, ok, object)
+ return function
+}
+'''
+
 
 def fixture(code=CODE):
     source = Source('sample_test.go', code, 'go', 'repository')
@@ -55,16 +74,20 @@ def test_inverse_preserves_closure_body_all_observers_and_two_source_controls():
     assert (corpus, frontend) == before
 
 
-def test_scalar_probe_fetches_container_without_invoking_factory_or_claiming_a_defect():
+def test_scalar_probe_preserves_factory_path_without_claiming_a_defect():
     source, corpus, frontend = fixture()
     for pair in relation.generate(corpus, frontend, ISSUE)['pairs']:
         probe = pair['probe']
         assert probe['oracle_status'] == 'precondition_only_never_a_defect_alert'
-        tail = probe['edits'][1]['after']
-        assert '.Lookup(' in tail and '.Object()).(*guest.Vector).Elements[' in tail
-        assert 'Invoke' not in tail and 'check(' not in tail
-        assert ':=[' in probe['edits'][0]['after']
-        assert not emit(corpus, [probe])['unsupported']
+        tail = probe['edits'][-1]['after']
+        assert '(result).(*guest.Vector).Elements[' in tail
+        assert '_ = err' in tail and 'check(' not in tail
+        assert 'return [0]' in probe['edits'][0]['after'] or 'return [0, 0]' in probe['edits'][0]['after']
+        material = emit(corpus, [probe])
+        assert not material['unsupported']
+        code = material['files'][source.path]
+        assert '.Object().Invoke(integer(3))' in code
+        assert not Source(source.path, code, 'go').root.has_error
 
 
 @pytest.mark.parametrize('replacement', [
@@ -133,3 +156,74 @@ def test_generation_ignores_evaluation_labels_and_refuses_changed_source_bytes()
     corpus['sources']['sample_test.go']['code'] += '\n'
     with pytest.raises(ValueError, match='frontend_source_mismatch'):
         relation.generate(corpus, frontend, ISSUE)
+
+
+def test_helpers_keep_setup_checks_invocation_and_all_original_observers():
+    source, corpus, frontend = fixture(HELPER_CODE)
+    generated = relation.generate(corpus, frontend, ISSUE)
+    assert generated['total_candidates'] == 2
+    for pair in generated['pairs']:
+        full = emit(corpus, [pair['candidate']])
+        probe = emit(corpus, [pair['probe']])
+        assert not full['unsupported'] and not probe['unsupported']
+        candidate_code, probe_code = full['files'][source.path], probe['files'][source.path]
+        for code in (candidate_code, probe_code):
+            assert 'selected := fetch(t, c,' in code
+            assert 'result, err := selected.Invoke(integer(3))' in code
+            assert HELPER_CODE[HELPER_CODE.index('func prepare'):].strip() in code
+            assert not Source(source.path, code, 'go').root.has_error
+        assert 'check(t, 4, invoke((result)' in candidate_code
+        assert 'check(t, 5, invoke((result)' in candidate_code
+        assert '_ = (result).(*guest.Vector).Elements[' in probe_code
+
+
+def test_nested_helper_return_and_parameter_binding_are_compositional():
+    code = HELPER_CODE.replace('c := prepare(t,', 'c := prepareOuter(t,') + '''
+func prepareOuter(t *testing.T, src string, variables map[string]interface{}) *guest.Compiled {
+ return prepare(t, src, variables)
+}
+'''
+    _, corpus, frontend = fixture(code)
+    assert relation.generate(corpus, frontend, ISSUE)['total_candidates'] == 2
+
+
+def test_lookup_can_be_stored_in_one_local_before_invocation():
+    code = CODE.replace('result, err := c.Lookup("build").Object().Invoke(integer(3))',
+                        'selected := c.Lookup("build").Object()\n result, err := selected.Invoke(integer(3))')
+    _, corpus, frontend = fixture(code)
+    assert relation.generate(corpus, frontend, ISSUE)['total_candidates'] == 2
+
+
+@pytest.mark.parametrize(('before', 'after'), [
+    ('[]byte(src)', '[]byte("unrelated:=1")'),
+    ('return compiled', 'return prepare(t,src,variables)'),
+    ('return compiled', 'if condition { return other }; return compiled'),
+    ('return compiled', 'compiled = other; return compiled'),
+    ('vm := guest.Load', 'src = "unrelated:=1"; vm := guest.Load'),
+    ('return compiled', 'defer release(compiled); return compiled'),
+    ('return compiled', 'go release(compiled); return compiled'),
+    ('return compiled', 'return err'),
+    ('Lookup(symbol)', 'Lookup("unrelated")'),
+    ('return function', 'function = other; return function'),
+    ('object := compiled.Lookup', 'symbol = "unrelated"; object := compiled.Lookup'),
+    ('result, err := selected.Invoke', 'selected = other; result, err := selected.Invoke'),
+    ('selected := fetch(t, c,', 'fetch := other; selected := fetch(t, c,'),
+    ('selected := fetch(t, c,', 'fetch, ok := other.(func(*testing.T,*guest.Compiled,string) *guest.Function); _=ok; selected := fetch(t, c,'),
+    ('selected := fetch(t, c,', 'var ignored, fetch = other, other; _=ignored; selected := fetch(t, c,'),
+    ('variables map[string]interface{}) *guest.Compiled {', 'variables map[string]interface{}) (compiled *guest.Compiled) {'),
+])
+def test_unproved_helper_origins_and_rebindings_are_refused(before, after):
+    _, corpus, frontend = fixture(HELPER_CODE.replace(before, after))
+    generated = relation.generate(corpus, frontend, ISSUE)
+    assert not generated['pairs']
+    assert generated['skipped']
+
+
+def test_source_helper_definition_is_required_instead_of_trusting_call_arguments():
+    code = CODE + '''
+func run(src string) *guest.Compiled {
+ return unrelatedProgram()
+}
+'''
+    _, corpus, frontend = fixture(code)
+    assert not relation.generate(corpus, frontend, ISSUE)['pairs']
