@@ -30,7 +30,8 @@ from scripts.evaluate_test_validity import (
 
 
 METHODS = {'legacy': 'relation_search.admission', 'guarded': 'relation_search.guarded_admission',
-           'compact': 'relation_search.compact_admission'}
+           'compact': 'relation_search.compact_admission',
+           'compact_contract_guarded': 'relation_search.compact_contract_guarded'}
 REQUEST_IDENTITY_VERSION = 'actual-admission-dispatch-fields-v1'
 PROVIDER_TIMEOUT_SECONDS = 300
 
