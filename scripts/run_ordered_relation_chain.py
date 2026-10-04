@@ -21,7 +21,7 @@ from scripts import replay_uniform_second_gate as semantic
 from scripts import replay_codec_guarded_semantics as codec
 from scripts.run_contract_repair_search import frozen, verify, write
 
-VERSION = 'ordered-source-relation-exact-semantic-chain.v3'
+VERSION = 'ordered-source-relation-exact-semantic-chain.v4'
 REGISTRY = dict(documentation=documentation, stream=stream, carrier=carrier,
                 finalization=finalization, semantic=semantic)
 SEMANTIC_RUNNERS = {semantic.VERSION: semantic, codec.VERSION: codec}
@@ -32,6 +32,29 @@ def _runner(name, version):
     if runner is None or runner.VERSION != version:
         raise ValueError('Unexpected component protocol: ' + name)
     return runner
+
+
+def _verify_receipts(value):
+    if isinstance(value, dict):
+        if isinstance(value.get('path'), str) and isinstance(value.get('sha256'), str):
+            verify(value)
+        for item in value.values():
+            _verify_receipts(item)
+    elif isinstance(value, list):
+        for item in value:
+            _verify_receipts(item)
+
+
+def _replay_summary(source, prepared):
+    verify(read(source/'seal.json'))
+    old = read(source/'prepared.json')
+    if old != prepared:
+        raise ValueError('Native replay requires an identical complete component protocol')
+    summary = read(source/'summary.json')
+    if (summary['version'] != prepared['version']
+            or sorted(row['case'] for row in summary['results']) != sorted(row['case'] for row in prepared['cases'])):
+        raise ValueError('Native replay summary does not cover the complete frozen cohort')
+    return frozen(source/'summary.json')
 
 
 def prepare(args):
@@ -58,14 +81,17 @@ def prepare(args):
         destination = args.output/name/'prepared.json'
         write(destination, protocols[name])
         write(destination.parent/'seal.json', frozen(destination))
-        components.append(dict(name=name, source=frozen(sources[name]/'prepared.json'),
-                               prepared=frozen(destination)))
+        component = dict(name=name, source=frozen(sources[name]/'prepared.json'), prepared=frozen(destination))
+        replay_root = getattr(args, 'reuse_relations', None)
+        if replay_root is not None and name != 'semantic':
+            component['replay_summary'] = _replay_summary(replay_root/name, protocols[name])
+        components.append(component)
     protocol = dict(version=VERSION, cases=cases, components=components,
         algorithm=[frozen(Path(__file__)), *[frozen(Path(runners[name].__file__)) for name in sources]],
         precedence=list(sources),
         policy='For each trial, emit the first available component alert in this fixed order. Do not replace after an audit rejects it.',
         preparation_reads='Sealed component protocols only; no output summary, known witness list, audit label or reference.',
-        native_execution='Every relation component executes its frozen source candidates afresh.',
+        native_execution='Execute fresh unless an exact complete component protocol and immutable native summary are explicitly sealed for replay; no per-case native-cache selection.',
         semantic_execution='Exact-payload replay of the fixed first-stage alerts and historical high-reasoning gate.',
         external_model_calls=0, labels_used=False, retrospective=True,
         created_utc=datetime.now(timezone.utc).isoformat())
@@ -87,6 +113,19 @@ def run(args):
         return read(root/'summary.json')
     runners = [(name, _runner(name, read(root/name/'prepared.json')['version']))
                for name in protocol['precedence']]
+    replayed = set()
+    for component in protocol['components']:
+        if 'replay_summary' not in component:
+            continue
+        verify(component['replay_summary'])
+        prepared = read(component['prepared']['path'])
+        summary = read(component['replay_summary']['path'])
+        if isinstance(prepared.get('algorithm'), dict):
+            documentation.admission.verify_seal(prepared['algorithm'])
+        _verify_receipts(prepared)
+        _verify_receipts(summary)
+        write(root/component['name']/'summary.json', summary)
+        replayed.add(component['name'])
     for name, runner in runners:
         if not (root/name/'summary.json').exists():
             runner.run(SimpleNamespace(input=root/name))
@@ -107,7 +146,9 @@ def run(args):
     summary = dict(version=VERSION, denominator=len(protocol['cases']), decisions=decisions,
         alerts=[row for row in decisions if row['alert']],
         component_summaries={name: frozen(root/name/'summary.json') for name, _ in runners},
-        fresh_native_executions=sum(summaries[name]['native_executions'] for name, _ in runners if name != 'semantic'),
+        fresh_native_executions=sum(summaries[name]['native_executions'] for name, _ in runners
+                                    if name != 'semantic' and name not in replayed),
+        replayed_native_executions=sum(summaries[name]['native_executions'] for name in replayed),
         semantic_historical_cost={key: summaries['semantic'][key] for key in
             ['first_stage_calls', 'first_stage_tokens', 'entire_second_gate_experiment_cost',
              'compatible_cached_reviews', 'compatible_cached_review_tokens']},
@@ -115,13 +156,15 @@ def run(args):
         completed_utc=datetime.now(timezone.utc).isoformat())
     write(root/'summary.json', summary)
     return dict(alerts=len(summary['alerts']), denominator=summary['denominator'],
-                fresh_native_executions=summary['fresh_native_executions'], fresh_provider_calls=0)
+                fresh_native_executions=summary['fresh_native_executions'],
+                replayed_native_executions=summary['replayed_native_executions'], fresh_provider_calls=0)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument('stage', choices=['prepare', 'run'])
     parser.add_argument('--component', action='append', help='Ordered NAME=PATH; semantic must come last')
+    parser.add_argument('--reuse-relations', type=Path, help='Replay every identical frozen native relation component from this prior chain')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--input', type=Path)
     args = parser.parse_args()

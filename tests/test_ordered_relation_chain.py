@@ -36,7 +36,8 @@ def test_uniform_precedence_retains_first_relation_even_when_another_claims_an_a
         entire_second_gate_experiment_cost={'calls': 24, 'tokens': 200},
         compatible_cached_reviews=11, compatible_cached_review_tokens=80))
     result = chain.run(SimpleNamespace(input=args.output))
-    assert result == dict(alerts=3, denominator=4, fresh_native_executions=6, fresh_provider_calls=0)
+    assert result == dict(alerts=3, denominator=4, fresh_native_executions=6,
+                         replayed_native_executions=0, fresh_provider_calls=0)
     summary = chain.read(args.output/'summary.json')
     assert [(r['case'], r['branch']) for r in summary['decisions']] == [
         ('a', 'documentation'), ('b', 'stream'), ('c', 'semantic'), ('d', 'abstain')]
@@ -67,3 +68,27 @@ def test_guarded_semantic_protocol_selects_its_runner_by_exact_version(tmp_path)
     assert any(row['path'].endswith('replay_codec_guarded_semantics.py') for row in protocol['algorithm'])
     assert chain._runner('semantic', chain.codec.VERSION) is chain.codec
     assert chain._runner('semantic', chain.semantic.VERSION) is chain.semantic
+
+
+def test_native_replay_requires_whole_protocol_identity_and_keeps_cost_separate(tmp_path):
+    args = prepared_sources(tmp_path)
+    args.reuse_relations = tmp_path/'old'
+    cases = ['a', 'b', 'c', 'd']
+    for name, source, cost in [('documentation', args.defaults, 2), ('stream', args.stream, 4)]:
+        target = args.reuse_relations/name
+        chain.write(target/'prepared.json', chain.read(source/'prepared.json'))
+        chain.write(target/'seal.json', chain.frozen(target/'prepared.json'))
+        chain.write(target/'summary.json', dict(version=chain.REGISTRY[name].VERSION,
+            native_executions=cost, results=[dict(case=case, alert={'program': name} if case == 'a' else None) for case in cases]))
+    assert chain.prepare(args)['trials'] == 4
+    chain.write(args.output/'semantic/summary.json', dict(decisions=[], first_stage_calls=1,
+        first_stage_tokens=20, entire_second_gate_experiment_cost=dict(calls=1, tokens=30),
+        compatible_cached_reviews=1, compatible_cached_review_tokens=30))
+    result = chain.run(SimpleNamespace(input=args.output))
+    assert result['fresh_native_executions'] == 0
+    assert result['replayed_native_executions'] == 6
+    assert result['alerts'] == 1
+    changed = chain.read(args.defaults/'prepared.json')
+    changed['changed_budget'] = 4
+    with pytest.raises(ValueError, match='identical complete component protocol'):
+        chain._replay_summary(args.reuse_relations/'documentation', changed)
