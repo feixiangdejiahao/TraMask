@@ -1,5 +1,7 @@
 # Research reports
 
+[Trajectory gap pilot, 2026-10-05](trajectory_gap_pilot_20261005.html): deterministic extraction, paired source/trajectory generation, full-test validity review, native results, and next experiments. This Chinese report keeps the two pilot stages and earlier search results separate.
+
 [HTML progress report](research_progress.html): method families and subversions, experiments, all 17 trials, false alarms, model cost, and next research decisions. The English report uses short sentences and includes a Chinese term guide. Open it directly in a browser. It has no external page dependencies.
 
 ## Archived presentation
