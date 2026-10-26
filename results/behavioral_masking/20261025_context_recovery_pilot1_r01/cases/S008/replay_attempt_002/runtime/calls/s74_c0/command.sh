@@ -1,0 +1,1 @@
+cd /app && sed -n '120,145p' types/settings/settings.go

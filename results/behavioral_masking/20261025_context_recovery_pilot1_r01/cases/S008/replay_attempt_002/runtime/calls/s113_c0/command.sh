@@ -1,0 +1,1 @@
+cat /tmp/test_drift.log | tail -30

@@ -1,0 +1,1 @@
+cat packages/core/src/types.ts && echo "=====INDEX=====" && cat packages/core/src/index.ts && echo "=====CORE TEST=====" && find packages/core/test -type f | sort && echo "=====PROMPTS TEST=====" && find packages/prompts/test -type f | sort

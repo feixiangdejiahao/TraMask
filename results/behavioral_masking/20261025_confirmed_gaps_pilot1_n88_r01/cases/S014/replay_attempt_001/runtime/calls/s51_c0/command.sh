@@ -1,0 +1,1 @@
+cd /app/packages/core && npx vitest run 2>&1 | tail -15 && echo "=====PROMPTS=====" && cd /app/packages/prompts && npx vitest run 2>&1 | tail -15

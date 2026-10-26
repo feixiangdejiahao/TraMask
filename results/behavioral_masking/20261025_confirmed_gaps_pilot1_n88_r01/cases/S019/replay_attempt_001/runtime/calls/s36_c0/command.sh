@@ -1,0 +1,1 @@
+cd /app && cat src/errors/allErrors.ts && echo "===UNUSED CHECK===" && cat src/errors/index.ts && ls src/errors

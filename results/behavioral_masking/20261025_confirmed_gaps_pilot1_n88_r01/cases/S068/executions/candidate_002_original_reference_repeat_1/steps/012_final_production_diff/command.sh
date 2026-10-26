@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary 8d74ffc93292c604d5827e2b44fffedca0c28c19 -- sqlite_utils/__init__.py sqlite_utils/cli.py sqlite_utils/db.py

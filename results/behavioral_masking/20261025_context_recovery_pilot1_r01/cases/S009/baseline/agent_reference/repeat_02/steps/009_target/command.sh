@@ -1,0 +1,1 @@
+cd /app && ./node_modules/.bin/mocha --no-config --no-package --ui bdd --node-option conditions=ark-ts --node-option import=tsx --require ./ark/repo/mocha.globalSetup.ts --timeout 10000 --spec ark/json-schema/__tests__/pilot1-agent.test.ts --grep 'recursive.*inside anyOf composition'

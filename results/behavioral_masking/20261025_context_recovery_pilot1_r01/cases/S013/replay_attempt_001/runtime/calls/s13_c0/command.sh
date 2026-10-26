@@ -1,0 +1,1 @@
+cd /tmp && npm view awilix version 2>&1 | head -5

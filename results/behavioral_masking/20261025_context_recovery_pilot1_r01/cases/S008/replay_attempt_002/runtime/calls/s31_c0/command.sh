@@ -1,0 +1,1 @@
+cd /app && sed -n '300,400p' types/container/container.go && echo "=====HOSTCONFIG=====" && sed -n '532,545p' types/container/container.go

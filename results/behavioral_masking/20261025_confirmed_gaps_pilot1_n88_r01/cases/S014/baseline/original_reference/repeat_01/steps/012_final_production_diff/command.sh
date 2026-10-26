@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary 8a96e2dcd7f821d1250b58cf71c327679f94de25 -- packages/core/src/index.ts packages/core/src/prompts/autocomplete-async.ts packages/core/src/prompts/autocomplete.ts packages/core/src/prompts/prompt.ts

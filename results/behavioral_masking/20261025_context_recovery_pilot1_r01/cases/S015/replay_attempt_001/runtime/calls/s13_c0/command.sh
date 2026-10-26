@@ -1,0 +1,1 @@
+ls -la tests/ tests/functional tests/unit && echo "---" && sed -n '1,250p' tests/functional/test_functional.py

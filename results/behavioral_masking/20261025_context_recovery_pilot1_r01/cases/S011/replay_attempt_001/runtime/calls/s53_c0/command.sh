@@ -1,0 +1,1 @@
+cd /app && rm src/__tests__/debug.test.ts && npx jest src/__tests__/initialize.test.ts --no-coverage 2>&1 | tail -80

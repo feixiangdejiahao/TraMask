@@ -1,0 +1,1 @@
+cd /app && cat src/schema/types/index.ts && echo "===SCHEMA INDEX types===" && cat src/schema/types/index.ts | grep schemaProps

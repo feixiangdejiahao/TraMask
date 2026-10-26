@@ -1,0 +1,1 @@
+cd /app && timeout 20 python /tmp/test_mux_basic.py

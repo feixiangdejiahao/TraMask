@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/jsonSchemer/jsonSchemer.ts && echo "===ITEM===" && cat src/schema/actions/jsonSchemer/formattedValue/item.ts && echo "===MAP===" && cat src/schema/actions/jsonSchemer/formattedValue/map.ts && echo "===SHARED===" && cat src/schema/actions/jsonSchemer/formattedValue/shared.ts

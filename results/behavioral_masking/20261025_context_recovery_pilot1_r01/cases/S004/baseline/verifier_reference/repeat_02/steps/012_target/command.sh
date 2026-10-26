@@ -1,0 +1,1 @@
+cd /app && python -m pytest tests/test_snapshot.py::test_webui_snapshot_save -q -p no:cacheprovider

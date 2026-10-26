@@ -1,0 +1,1 @@
+cd /app/libs/core && grep -n "def ensure_config" -A 15 langchain_core/runnables/config.py

@@ -1,0 +1,1 @@
+cd /app && sed -n '150,280p' bandit/core/nosec.py

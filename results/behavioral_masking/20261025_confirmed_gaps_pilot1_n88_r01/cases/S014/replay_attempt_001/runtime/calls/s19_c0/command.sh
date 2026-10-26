@@ -1,0 +1,1 @@
+cat packages/prompts/test/autocomplete.test.ts | head -200 && echo "=====TEST UTILS=====" && cat packages/prompts/test/test-utils.ts

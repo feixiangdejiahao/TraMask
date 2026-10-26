@@ -1,0 +1,201 @@
+   130	    def low_water_mark(self, value):
+   131	        if value is not None and self._high_water_mark is not None and value > self._high_water_mark:
+   132	            raise ValueError('low_water_mark cannot be greater than high_water_mark')
+   133	        self._low_water_mark = value
+   134	        for ch in list(self.channels.values()):
+   135	            ch._recv_buffer.set_watermarks(low=value)
+   136	
+   137	    # ------------------------------------------------------------------
+   138	    # Public API
+   139	    # ------------------------------------------------------------------
+   140	    def open_channel(self, channel_id=None, timeout=None):
+   141	        """
+   142	        Opens a new channel and waits for the remote end to acknowledge it.
+   143	
+   144	        Arguments:
+   145	            channel_id(int): The channel id to use.  When ``None``, a unique
+   146	                id in ``[1, max_channels]`` is automatically allocated.
+   147	            timeout(float): Maximum time in seconds to wait for the remote
+   148	                acknowledgement.
+   149	
+   150	        Returns:
+   151	            MuxChannel: The newly opened channel.
+   152	
+   153	        Raises:
+   154	            TypeError: If ``channel_id`` is not an integer.
+   155	            ValueError: If ``channel_id`` is out of range, a duplicate, or
+   156	                exceeds the multiplexer capacity.
+   157	            TimeoutError: If the remote end does not acknowledge in time.
+   158	            EOFError: If the multiplexer is closed.
+   159	        """
+   160	        with self._lock:
+   161	            if self._closed:
+   162	                raise EOFError('multiplexer is closed')
+   163	
+   164	            auto = False
+   165	            if channel_id is None:
+   166	                channel_id = self._allocate_id()
+   167	                auto = True
+   168	            else:
+   169	                self._validate_channel_id(channel_id)
+   170	
+   171	            if channel_id in self.channels or channel_id in self._closing_ids:
+   172	                raise ValueError('channel id %d is already in use' % channel_id)
+   173	            if len(self.channels) >= self._max_channels:
+   174	                raise ValueError('multiplexer has reached its maximum of %d channels' % self._max_channels)
+   175	
+   176	            ch = MuxChannel(self, channel_id)
+   177	            self.channels[channel_id] = ch
+   178	            ack_queue = queue.Queue(maxsize=1)
+   179	            self._open_results[channel_id] = ack_queue
+   180	
+   181	        try:
+   182	            self._write_frame(_OPEN, channel_id)
+   183	        except EOFError:
+   184	            self._discard_open(channel_id, ch)
+   185	            raise EOFError('multiplexer is closed')
+   186	
+   187	        try:
+   188	            result = ack_queue.get(timeout=timeout)
+   189	        except queue.Empty:
+   190	            self._discard_open(channel_id, ch)
+   191	            raise TimeoutError('timed out waiting for acknowledgement of channel %d' % channel_id)
+   192	
+   193	        if result is False:
+   194	            self._discard_open(channel_id, ch)
+   195	            if auto:
+   196	                # The remote rejected our auto-allocated id (likely a
+   197	                # simultaneous allocation).  Retry with a fresh id.
+   198	                return self.open_channel(None, timeout=timeout)
+   199	            raise ValueError('remote end rejected channel id %d' % channel_id)
+   200	
+   201	        if result == 'closed':
+   202	            self._discard_open(channel_id, ch)
+   203	            raise EOFError('multiplexer is closed')
+   204	
+   205	        return ch
+   206	
+   207	    def accept_channel(self, timeout=None):
+   208	        """
+   209	        Waits for the remote end to open a channel.
+   210	
+   211	        Arguments:
+   212	            timeout(float): Maximum time in seconds to wait.
+   213	
+   214	        Returns:
+   215	            MuxChannel: The accepted channel, or ``None`` on timeout.
+   216	
+   217	        Raises:
+   218	            EOFError: If the multiplexer is closed.
+   219	        """
+   220	        deadline = None
+   221	        if timeout is not None:
+   222	            deadline = time.monotonic() + timeout
+   223	
+   224	        with self._accept_cond:
+   225	            while not self._pending_accept and not self._closed:
+   226	                if deadline is None:
+   227	                    self._accept_cond.wait()
+   228	                else:
+   229	                    remaining = deadline - time.monotonic()
+   230	                    if remaining <= 0:
+   231	                        return None
+   232	                    self._accept_cond.wait(remaining)
+   233	
+   234	            if self._closed:
+   235	                raise EOFError('multiplexer is closed')
+   236	
+   237	            if not self._pending_accept:
+   238	                return None
+   239	
+   240	            return self._pending_accept.popleft()
+   241	
+   242	    def close(self):
+   243	        """Closes all channels and the underlying tube.  Idempotent."""
+   244	        with self._lock:
+   245	            if self._closed:
+   246	                return
+   247	            self._closed = True
+   248	
+   249	        # Unblock any thread waiting in accept_channel()
+   250	        with self._accept_cond:
+   251	            self._accept_cond.notify_all()
+   252	
+   253	        # Signal EOF to every local channel
+   254	        for ch in list(self.channels.values()):
+   255	            with ch._cond:
+   256	                ch._closed = True
+   257	                ch._send_eof = True
+   258	                ch._recv_eof = True
+   259	                ch._cond.notify_all()
+   260	
+   261	        # Wake any threads waiting for an OPEN acknowledgement
+   262	        with self._lock:
+   263	            for ack_queue in self._open_results.values():
+   264	                try:
+   265	                    ack_queue.put_nowait('closed')
+   266	                except queue.Full:
+   267	                    pass
+   268	            self._open_results.clear()
+   269	
+   270	        try:
+   271	            self._underlying.close()
+   272	        except Exception:
+   273	            pass
+   274	
+   275	        # Give the reader thread a moment to notice the EOF, but do not block
+   276	        # forever if it is stuck.
+   277	        if self._reader_thread.is_alive() and self._reader_thread is not threading.current_thread():
+   278	            self._reader_thread.join(timeout=1.0)
+   279	
+   280	    # ------------------------------------------------------------------
+   281	    # Channel registration helpers
+   282	    # ------------------------------------------------------------------
+   283	    def _validate_channel_id(self, channel_id):
+   284	        if not _is_channel_id(channel_id):
+   285	            raise TypeError('channel id must be an integer, got %r' % type(channel_id).__name__)
+   286	        if not 1 <= channel_id <= 65535:
+   287	            raise ValueError('channel id must be in [1, 65535]')
+   288	        if channel_id > self._max_channels:
+   289	            raise ValueError('channel id %d exceeds max_channels %d' % (channel_id, self._max_channels))
+   290	
+   291	    def _allocate_id(self):
+   292	        for cid in range(1, self._max_channels + 1):
+   293	            if cid not in self.channels and cid not in self._closing_ids:
+   294	                return cid
+   295	        raise ValueError('multiplexer has reached its maximum of %d channels' % self._max_channels)
+   296	
+   297	    def _discard_open(self, channel_id, ch):
+   298	        with self._lock:
+   299	            self._open_results.pop(channel_id, None)
+   300	            if self.channels.get(channel_id) is ch:
+   301	                del self.channels[channel_id]
+   302	        try:
+   303	            self._write_frame(_CLOSE, channel_id)
+   304	        except EOFError:
+   305	            pass
+   306	
+   307	    def _channel_closed(self, ch):
+   308	        """Called when the local user closes a channel."""
+   309	        with self._lock:
+   310	            if self.channels.get(ch.channel_id) is ch:
+   311	                del self.channels[ch.channel_id]
+   312	            self._closing_ids.add(ch.channel_id)
+   313	        try:
+   314	            self._write_frame(_CLOSE, ch.channel_id)
+   315	        except EOFError:
+   316	            pass
+   317	
+   318	    # ------------------------------------------------------------------
+   319	    # Frame protocol
+   320	    # ------------------------------------------------------------------
+   321	    def _write_frame(self, ftype, channel_id, payload=b''):
+   322	        with self._lock:
+   323	            if self._closed:
+   324	                raise EOFError('multiplexer is closed')
+   325	        data = _HEADER.pack(2 + len(payload), ftype, channel_id) + payload
+   326	        with self._send_lock:
+   327	            if self._closed:
+   328	                raise EOFError('multiplexer is closed')
+   329	            try:
+   330	                self._underlying.send(data)

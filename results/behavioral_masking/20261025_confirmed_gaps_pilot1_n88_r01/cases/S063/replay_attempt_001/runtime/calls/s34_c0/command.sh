@@ -1,0 +1,1 @@
+cd /app && sed -i 's/timeout=Timeout\.forever/timeout=Timeout.maximum/g' pwnlib/tubes/mux.py && grep -n "Timeout.maximum" pwnlib/tubes/mux.py

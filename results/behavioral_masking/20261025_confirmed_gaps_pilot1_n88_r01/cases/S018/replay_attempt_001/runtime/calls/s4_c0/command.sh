@@ -1,0 +1,1 @@
+find src -type f -name '*.py' | head -50 && echo '---' && wc -l src/dateutil/rrule.py && echo '---' && git log --oneline -5

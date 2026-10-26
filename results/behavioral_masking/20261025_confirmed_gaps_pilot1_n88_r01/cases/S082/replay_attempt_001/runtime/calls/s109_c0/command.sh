@@ -1,0 +1,1 @@
+cd /app && tail -20 tests/utils/reporter_tests.js

@@ -1,0 +1,1 @@
+cd /app && git diff libs/core/langchain_core/runnables/base.py libs/core/langchain_core/runnables/__init__.py libs/core/tests/unit_tests/runnables/test_imports.py

@@ -1,0 +1,1 @@
+sed -n '300,370p' src/container.ts; echo '=== resolve area ==='; grep -n "throw new AwilixResolutionError(name, resolutionStack)" src/container.ts | head; sed -n '545,575p' src/container.ts

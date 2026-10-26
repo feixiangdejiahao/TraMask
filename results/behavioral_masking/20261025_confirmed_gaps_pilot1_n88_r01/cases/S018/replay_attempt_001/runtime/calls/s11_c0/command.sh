@@ -1,0 +1,1 @@
+grep -n '^class \|^def \|^    def ' src/dateutil/rrule.py

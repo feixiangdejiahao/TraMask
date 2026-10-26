@@ -1,0 +1,1 @@
+cd /app && sed -n '205,225p' tests/unit/core/test_nosec.py

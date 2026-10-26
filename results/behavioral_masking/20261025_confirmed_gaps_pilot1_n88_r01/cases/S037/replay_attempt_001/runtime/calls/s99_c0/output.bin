@@ -1,0 +1,191 @@
+}
+
+/** Remove paths that are ancestors of other recorded paths (e.g. keep `user.name`, drop `user`). */
+function maximalPaths(paths: Iterable<string>): string[] {
+  const list = [...paths]
+  return list.filter((path) => {
+    const prefix = `${path}.`
+    return !list.some((other) => other !== path && other.startsWith(prefix))
+  })
+}
+
+export class AtomicSelectorEngine {
+  logic: BuiltLogic
+  versions = new Map<string, number>()
+  selectors = new Map<string, AtomicSelectorMeta>()
+  currentSession: Session | null = null
+  propsVersion = 0
+
+  constructor(logic: BuiltLogic) {
+    this.logic = logic
+  }
+
+  createReducerSelector(name: string): Selector {
+    const meta: AtomicSelectorMeta = {
+      name,
+      args: [],
+      func: (root: any) => root[name],
+      dependencies: new Set(),
+      depKinds: new Map(),
+      lastDepVersions: new Map(),
+      lastArgResults: [],
+      lastPropsVersion: 0,
+      cached: undefined,
+      hasCached: false,
+      evaluations: 0,
+      dirtyCause: null,
+      inProgress: false,
+      isReducer: true,
+    }
+    this.selectors.set(name, meta)
+    return (state: any = getStoreState(), props: any = this.logic.props) => this.runReducerSelector(name, state, props)
+  }
+
+  createSelector(name: string, args: Selector[], func: (...args: any[]) => any): Selector {
+    const meta: AtomicSelectorMeta = {
+      name,
+      args,
+      func,
+      dependencies: new Set(),
+      depKinds: new Map(),
+      lastDepVersions: new Map(),
+      lastArgResults: [],
+      lastPropsVersion: 0,
+      cached: undefined,
+      hasCached: false,
+      evaluations: 0,
+      dirtyCause: null,
+      inProgress: false,
+    }
+    this.selectors.set(name, meta)
+    return (state: any = getStoreState(), props: any = this.logic.props) => this.runSelector(name, state, props)
+  }
+
+  callSelectorFunction(name: string): Selector {
+    const engine = this
+    const fn = ((state: any, props: any) => engine.callSelector(name, state, props)) as Selector & {
+      _atomicSelectorName: string
+    }
+    fn._atomicSelectorName = name
+    return fn
+  }
+
+  callSelector(name: string, state: any, props: any): any {
+    const session = this.currentSession
+    const meta = this.selectors.get(name)
+    if (!meta) {
+      const value = this.logic.selectors[name](state, props)
+      return session ? session.wrapSelectorResult(name, value) : value
+    }
+    const value = meta.isReducer ? this.runReducerSelector(name, state, props) : this.runSelector(name, state, props)
+    return session ? session.wrapSelectorResult(name, value) : value
+  }
+
+  private runSelector(name: string, state: any, props: any): any {
+    const meta = this.selectors.get(name)
+    if (!meta) {
+      throw new Error(`[KEA] Atomic selector "${name}" not found`)
+    }
+    if (meta.inProgress) {
+      throw new Error('[KEA] Circular dependency detected')
+    }
+    const session = new Session(this, meta)
+    const previousSession = this.currentSession
+    this.currentSession = session
+    meta.inProgress = true
+    try {
+      const argResults = meta.args.map((arg) => {
+        const argName = (arg as any)._atomicSelectorName
+        if (argName) {
+          return this.callSelector(argName, state, props)
+        }
+        return arg(state, props)
+      })
+
+      const { dirty, cause } = this.checkDirty(meta)
+      let finalDirty = dirty
+      let finalCause = cause
+
+      // Selectors that are not part of this engine (e.g. connected values) can not
+      // be tracked leaf-by-leaf, so compare their whole result instead.
+      for (let i = 0; i < meta.args.length; i++) {
+        const argName = (meta.args[i] as any)._atomicSelectorName
+        if (argName && !this.selectors.has(argName)) {
+          if (!Object.is(meta.lastArgResults[i], argResults[i])) {
+            finalDirty = true
+            if (!finalCause) {
+              finalCause = `selector:${argName}`
+            }
+          }
+        }
+      }
+
+      if (!finalDirty && meta.hasCached) {
+        return meta.cached
+      }
+
+      const result = meta.func(...argResults)
+      const rawResult = unwrap(result)
+      this.commitDeps(meta, session)
+      this.propagate(meta, meta.hasCached ? meta.cached : undefined, rawResult)
+      meta.cached = rawResult
+      meta.hasCached = true
+      meta.evaluations += 1
+      meta.dirtyCause = meta.dirtyCause !== null ? meta.dirtyCause : finalCause
+      meta.lastArgResults = argResults.map(unwrap)
+      meta.lastPropsVersion = this.propsVersion
+      for (const dep of meta.dependencies) {
+        meta.lastDepVersions.set(dep, this.versions.get(dep) ?? 0)
+      }
+      return rawResult
+    } finally {
+      meta.inProgress = false
+      this.currentSession = previousSession
+    }
+  }
+
+  private runReducerSelector(name: string, state: any, props: any): any {
+    const meta = this.selectors.get(name)
+    if (!meta) {
+      throw new Error(`[KEA] Atomic reducer selector "${name}" not found`)
+    }
+    if (meta.inProgress) {
+      throw new Error('[KEA] Circular dependency detected')
+    }
+    const session = new Session(this, meta)
+    const previousSession = this.currentSession
+    this.currentSession = session
+    meta.inProgress = true
+    try {
+      const { dirty, cause } = this.checkDirty(meta)
+      if (!dirty && meta.hasCached) {
+        return meta.cached
+      }
+      const rootProxy = session.getRoot(state)
+      const result = rootProxy[name]
+      const rawResult = unwrap(result)
+      this.commitDeps(meta, session)
+      this.propagate(meta, meta.hasCached ? meta.cached : undefined, rawResult)
+      meta.cached = rawResult
+      meta.hasCached = true
+      meta.evaluations += 1
+      meta.dirtyCause = meta.dirtyCause !== null ? meta.dirtyCause : cause
+      meta.lastPropsVersion = this.propsVersion
+      for (const dep of meta.dependencies) {
+        meta.lastDepVersions.set(dep, this.versions.get(dep) ?? 0)
+      }
+      return rawResult
+    } finally {
+      meta.inProgress = false
+      this.currentSession = previousSession
+    }
+  }
+
+  private checkDirty(meta: AtomicSelectorMeta): { dirty: boolean; cause: string | null } {
+    if (!meta.hasCached || meta.lastPropsVersion !== this.propsVersion) {
+      return { dirty: true, cause: null }
+    }
+    for (const dep of meta.dependencies) {
+      const current = this.versions.get(dep) ?? 0
+      const last = meta.lastDepVersions.get(dep)
+      if (last === undefined || current !== last) {

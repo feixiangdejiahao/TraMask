@@ -1,0 +1,1 @@
+cat aiomonitor/utils.py && echo '=====COMMANDS=====' && cat aiomonitor/termui/commands.py

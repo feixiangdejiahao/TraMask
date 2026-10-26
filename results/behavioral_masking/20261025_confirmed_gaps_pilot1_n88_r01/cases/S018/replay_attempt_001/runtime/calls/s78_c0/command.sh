@@ -1,0 +1,1 @@
+cd /app && python -m pytest tests/test_rrule.py /tmp/upstream_like_test.py /tmp/repro2.py -q 2>&1 | tail -6

@@ -1,0 +1,1 @@
+cd /app && python /tmp/repro2.py 2>&1 | grep -E "FAIL|OK:" | tail -25 && echo "=== pytest ===" && python -m pytest tests/test_rrule.py -q 2>&1 | tail -3

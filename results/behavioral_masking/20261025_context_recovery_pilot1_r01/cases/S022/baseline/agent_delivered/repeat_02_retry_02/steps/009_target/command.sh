@@ -1,0 +1,1 @@
+cd /app && cargo test --offline --locked -p boa_engine --lib tests::pilot1_agent::jobs_spawned_under_handle_are_associated_and_skipped -- --exact --nocapture

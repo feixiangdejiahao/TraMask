@@ -1,0 +1,1 @@
+cd /app && ls tests | grep -i "adapter\|client" && echo '---' && grep -rn "Testem" tests/*adapter* tests/*client* 2>/dev/null | head -40

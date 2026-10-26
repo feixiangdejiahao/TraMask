@@ -1,0 +1,1 @@
+find packages/core/src packages/core/test packages/prompts/src packages/prompts/test -type f | sort

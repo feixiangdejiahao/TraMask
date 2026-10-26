@@ -1,0 +1,1 @@
+cd /app && cat backend/resources/migrations/sqlite/038_create_kv_table.up.sql && echo "---DOWN---" && cat backend/resources/migrations/sqlite/038_create_kv_table.down.sql && echo "---PG UP---" && cat backend/resources/migrations/postgres/038_create_kv_table.up.sql && echo "---PG DOWN---" && cat backend/resources/migrations/postgres/038_create_kv_table.down.sql

@@ -1,0 +1,1 @@
+cd /app && grep -n "Async status messages" packages/prompts/src/autocomplete.ts | head; grep -n "No matches message" -A 12 packages/prompts/src/autocomplete.ts | head -20

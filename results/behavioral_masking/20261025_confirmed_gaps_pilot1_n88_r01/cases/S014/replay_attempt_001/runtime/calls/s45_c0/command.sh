@@ -1,0 +1,1 @@
+cd /app && npx tsc --noEmit 2>&1 | grep -v "npm warn" | head -50

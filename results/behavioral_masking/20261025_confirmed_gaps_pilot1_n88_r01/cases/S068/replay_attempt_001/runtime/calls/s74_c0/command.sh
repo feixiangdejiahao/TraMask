@@ -1,0 +1,1 @@
+cd /app && grep -n "def bulk\|@cli.command(name=\"create-database\")" sqlite_utils/cli.py

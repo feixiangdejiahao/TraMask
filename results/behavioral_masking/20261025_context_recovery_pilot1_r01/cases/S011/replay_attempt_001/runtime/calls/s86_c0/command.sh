@@ -1,0 +1,1 @@
+cd /app && sed -n '20,70p' README.md; echo '---DISPOSE---'; sed -n '720,760p' README.md

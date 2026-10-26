@@ -1,0 +1,1 @@
+cd /app/backend && go test ./internal/huma/handlers -run '^TestComplianceRoutes$' -count=1 -v

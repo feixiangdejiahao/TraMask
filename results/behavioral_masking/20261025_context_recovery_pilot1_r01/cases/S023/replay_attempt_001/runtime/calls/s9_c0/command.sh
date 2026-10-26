@@ -1,0 +1,1 @@
+timeout 20 python -m pip download cattrs==25.4.0 -d /tmp/cattrs_dl --no-deps 2>&1 | tail -20 || echo "no internet or failed"

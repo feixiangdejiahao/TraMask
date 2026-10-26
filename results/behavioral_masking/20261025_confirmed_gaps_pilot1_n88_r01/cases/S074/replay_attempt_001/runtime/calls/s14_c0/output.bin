@@ -1,0 +1,525 @@
+package tengo
+
+import (
+	"encoding/gob"
+	"fmt"
+	"io"
+	"reflect"
+
+	"github.com/d5/tengo/v2/parser"
+)
+
+// Bytecode is a compiled instructions and constants.
+type Bytecode struct {
+	FileSet      *parser.SourceFileSet
+	MainFunction *CompiledFunction
+	Constants    []Object
+}
+
+// Size of the bytecode in bytes
+// (as much as we can calculate it without reflection and black magic)
+func (b *Bytecode) Size() int64 {
+	return b.MainFunction.Size() + b.FileSet.Size() + int64(len(b.Constants))
+}
+
+// Encode writes Bytecode data to the writer.
+func (b *Bytecode) Encode(w io.Writer) error {
+	enc := gob.NewEncoder(w)
+	if err := enc.Encode(b.FileSet); err != nil {
+		return err
+	}
+	if err := enc.Encode(b.MainFunction); err != nil {
+		return err
+	}
+	return enc.Encode(b.Constants)
+}
+
+// CountObjects returns the number of objects found in Constants.
+func (b *Bytecode) CountObjects() int {
+	n := 0
+	for _, c := range b.Constants {
+		n += CountObjects(c)
+	}
+	return n
+}
+
+// FormatInstructions returns human readable string representations of
+// compiled instructions.
+func (b *Bytecode) FormatInstructions() []string {
+	return FormatInstructions(b.MainFunction.Instructions, 0)
+}
+
+// FormatConstants returns human readable string representations of
+// compiled constants.
+func (b *Bytecode) FormatConstants() (output []string) {
+	for cidx, cn := range b.Constants {
+		switch cn := cn.(type) {
+		case *CompiledFunction:
+			output = append(output, fmt.Sprintf(
+				"[% 3d] (Compiled Function|%p)", cidx, &cn))
+			for _, l := range FormatInstructions(cn.Instructions, 0) {
+				output = append(output, fmt.Sprintf("     %s", l))
+			}
+		default:
+			output = append(output, fmt.Sprintf("[% 3d] %s (%s|%p)",
+				cidx, cn, reflect.TypeOf(cn).Elem().Name(), &cn))
+		}
+	}
+	return
+}
+
+// Decode reads Bytecode data from the reader.
+func (b *Bytecode) Decode(r io.Reader, modules *ModuleMap) error {
+	if modules == nil {
+		modules = NewModuleMap()
+	}
+
+	dec := gob.NewDecoder(r)
+	if err := dec.Decode(&b.FileSet); err != nil {
+		return err
+	}
+	// TODO: files in b.FileSet.File does not have their 'set' field properly
+	//  set to b.FileSet as it's private field and not serialized by gob
+	//  encoder/decoder.
+	if err := dec.Decode(&b.MainFunction); err != nil {
+		return err
+	}
+	if err := dec.Decode(&b.Constants); err != nil {
+		return err
+	}
+	for i, v := range b.Constants {
+		fv, err := fixDecodedObject(v, modules)
+		if err != nil {
+			return err
+		}
+		b.Constants[i] = fv
+	}
+	return nil
+}
+
+// RemoveDuplicates finds and remove the duplicate values in Constants.
+// Note this function mutates Bytecode.
+func (b *Bytecode) RemoveDuplicates() {
+	var deduped []Object
+
+	indexMap := make(map[int]int) // mapping from old constant index to new index
+	fns := make(map[*CompiledFunction]int)
+	ints := make(map[int64]int)
+	strings := make(map[string]int)
+	floats := make(map[float64]int)
+	chars := make(map[rune]int)
+	immutableMaps := make(map[string]int) // for modules
+
+	for curIdx, c := range b.Constants {
+		switch c := c.(type) {
+		case *CompiledFunction:
+			if newIdx, ok := fns[c]; ok {
+				indexMap[curIdx] = newIdx
+			} else {
+				newIdx = len(deduped)
+				fns[c] = newIdx
+				indexMap[curIdx] = newIdx
+				deduped = append(deduped, c)
+			}
+		case *ImmutableMap:
+			modName := inferModuleName(c)
+			newIdx, ok := immutableMaps[modName]
+			if modName != "" && ok {
+				indexMap[curIdx] = newIdx
+			} else {
+				newIdx = len(deduped)
+				immutableMaps[modName] = newIdx
+				indexMap[curIdx] = newIdx
+				deduped = append(deduped, c)
+			}
+		case *Int:
+			if newIdx, ok := ints[c.Value]; ok {
+				indexMap[curIdx] = newIdx
+			} else {
+				newIdx = len(deduped)
+				ints[c.Value] = newIdx
+				indexMap[curIdx] = newIdx
+				deduped = append(deduped, c)
+			}
+		case *String:
+			if newIdx, ok := strings[c.Value]; ok {
+				indexMap[curIdx] = newIdx
+			} else {
+				newIdx = len(deduped)
+				strings[c.Value] = newIdx
+				indexMap[curIdx] = newIdx
+				deduped = append(deduped, c)
+			}
+		case *Float:
+			if newIdx, ok := floats[c.Value]; ok {
+				indexMap[curIdx] = newIdx
+			} else {
+				newIdx = len(deduped)
+				floats[c.Value] = newIdx
+				indexMap[curIdx] = newIdx
+				deduped = append(deduped, c)
+			}
+		case *Char:
+			if newIdx, ok := chars[c.Value]; ok {
+				indexMap[curIdx] = newIdx
+			} else {
+				newIdx = len(deduped)
+				chars[c.Value] = newIdx
+				indexMap[curIdx] = newIdx
+				deduped = append(deduped, c)
+			}
+		default:
+			panic(fmt.Errorf("unsupported top-level constant type: %s",
+				c.TypeName()))
+		}
+	}
+
+	// replace with de-duplicated constants
+	b.Constants = deduped
+
+	// update CONST instructions with new indexes
+	// main function
+	updateConstIndexes(b.MainFunction.Instructions, indexMap)
+	// other compiled functions in constants
+	for _, c := range b.Constants {
+		switch c := c.(type) {
+		case *CompiledFunction:
+			updateConstIndexes(c.Instructions, indexMap)
+		}
+	}
+}
+
+func fixDecodedObject(
+	o Object,
+	modules *ModuleMap,
+) (Object, error) {
+	switch o := o.(type) {
+	case *Bool:
+		if o.IsFalsy() {
+			return FalseValue, nil
+		}
+		return TrueValue, nil
+	case *Undefined:
+		return UndefinedValue, nil
+	case *Array:
+		for i, v := range o.Value {
+			fv, err := fixDecodedObject(v, modules)
+			if err != nil {
+				return nil, err
+			}
+			o.Value[i] = fv
+		}
+	case *ImmutableArray:
+		for i, v := range o.Value {
+			fv, err := fixDecodedObject(v, modules)
+			if err != nil {
+				return nil, err
+			}
+			o.Value[i] = fv
+		}
+	case *Map:
+		for k, v := range o.Value {
+			fv, err := fixDecodedObject(v, modules)
+			if err != nil {
+				return nil, err
+			}
+			o.Value[k] = fv
+		}
+	case *ImmutableMap:
+		modName := inferModuleName(o)
+		if mod := modules.GetBuiltinModule(modName); mod != nil {
+			return mod.AsImmutableMap(modName), nil
+		}
+
+		for k, v := range o.Value {
+			// encoding of user function not supported
+			if _, isUserFunction := v.(*UserFunction); isUserFunction {
+				return nil, fmt.Errorf("user function not decodable")
+			}
+
+			fv, err := fixDecodedObject(v, modules)
+			if err != nil {
+				return nil, err
+			}
+			o.Value[k] = fv
+		}
+	}
+	return o, nil
+}
+
+func updateConstIndexes(insts []byte, indexMap map[int]int) {
+	i := 0
+	for i < len(insts) {
+		op := insts[i]
+		numOperands := parser.OpcodeOperands[op]
+		_, read := parser.ReadOperands(numOperands, insts[i+1:])
+
+		switch op {
+		case parser.OpConstant:
+			curIdx := int(insts[i+2]) | int(insts[i+1])<<8
+			newIdx, ok := indexMap[curIdx]
+			if !ok {
+				panic(fmt.Errorf("constant index not found: %d", curIdx))
+			}
+			copy(insts[i:], MakeInstruction(op, newIdx))
+		case parser.OpClosure:
+			curIdx := int(insts[i+2]) | int(insts[i+1])<<8
+			numFree := int(insts[i+3])
+			newIdx, ok := indexMap[curIdx]
+			if !ok {
+				panic(fmt.Errorf("constant index not found: %d", curIdx))
+			}
+			copy(insts[i:], MakeInstruction(op, newIdx, numFree))
+		}
+
+		i += 1 + read
+	}
+}
+
+func inferModuleName(mod *ImmutableMap) string {
+	if modName, ok := mod.Value["__module_name__"].(*String); ok {
+		return modName.Value
+	}
+	return ""
+}
+
+func init() {
+	gob.Register(&parser.SourceFileSet{})
+	gob.Register(&parser.SourceFile{})
+	gob.Register(&Array{})
+	gob.Register(&Bool{})
+	gob.Register(&Bytes{})
+	gob.Register(&Char{})
+	gob.Register(&CompiledFunction{})
+	gob.Register(&Error{})
+	gob.Register(&Float{})
+	gob.Register(&ImmutableArray{})
+	gob.Register(&ImmutableMap{})
+	gob.Register(&Int{})
+	gob.Register(&Map{})
+	gob.Register(&String{})
+	gob.Register(&Time{})
+	gob.Register(&Undefined{})
+	gob.Register(&UserFunction{})
+}
+=== VM top ===
+package tengo
+
+import (
+	"fmt"
+	"sync/atomic"
+
+	"github.com/d5/tengo/v2/parser"
+	"github.com/d5/tengo/v2/token"
+)
+
+// frame represents a function call frame.
+type frame struct {
+	fn          *CompiledFunction
+	freeVars    []*ObjectPtr
+	ip          int
+	basePointer int
+}
+
+// VM is a virtual machine that executes the bytecode compiled by Compiler.
+type VM struct {
+	constants   []Object
+	stack       [StackSize]Object
+	sp          int
+	globals     []Object
+	fileSet     *parser.SourceFileSet
+	frames      [MaxFrames]frame
+	framesIndex int
+	curFrame    *frame
+	curInsts    []byte
+	ip          int
+	aborting    int64
+	maxAllocs   int64
+	allocs      int64
+	err         error
+}
+
+// NewVM creates a VM.
+func NewVM(
+	bytecode *Bytecode,
+	globals []Object,
+	maxAllocs int64,
+) *VM {
+	if globals == nil {
+		globals = make([]Object, GlobalsSize)
+	}
+	v := &VM{
+		constants:   bytecode.Constants,
+		sp:          0,
+		globals:     globals,
+		fileSet:     bytecode.FileSet,
+		framesIndex: 1,
+		ip:          -1,
+		maxAllocs:   maxAllocs,
+	}
+	v.frames[0].fn = bytecode.MainFunction
+	v.frames[0].ip = -1
+	v.curFrame = &v.frames[0]
+	v.curInsts = v.curFrame.fn.Instructions
+	return v
+}
+
+// Abort aborts the execution.
+func (v *VM) Abort() {
+	atomic.StoreInt64(&v.aborting, 1)
+}
+
+// Run starts the execution.
+func (v *VM) Run() (err error) {
+	// reset VM states
+	v.sp = 0
+	v.curFrame = &(v.frames[0])
+	v.curInsts = v.curFrame.fn.Instructions
+	v.framesIndex = 1
+	v.ip = -1
+	v.allocs = v.maxAllocs + 1
+
+	v.run()
+	atomic.StoreInt64(&v.aborting, 0)
+	err = v.err
+	if err != nil {
+		filePos := v.fileSet.Position(
+			v.curFrame.fn.SourcePos(v.ip - 1))
+		err = fmt.Errorf("Runtime Error: %w\n\tat %s",
+			err, filePos)
+		for v.framesIndex > 1 {
+			v.framesIndex--
+			v.curFrame = &v.frames[v.framesIndex-1]
+			filePos = v.fileSet.Position(
+				v.curFrame.fn.SourcePos(v.curFrame.ip - 1))
+			err = fmt.Errorf("%w\n\tat %s", err, filePos)
+		}
+		return err
+	}
+	return nil
+}
+
+func (v *VM) run() {
+	for atomic.LoadInt64(&v.aborting) == 0 {
+		v.ip++
+
+		switch v.curInsts[v.ip] {
+		case parser.OpConstant:
+			v.ip += 2
+			cidx := int(v.curInsts[v.ip]) | int(v.curInsts[v.ip-1])<<8
+
+			v.stack[v.sp] = v.constants[cidx]
+			v.sp++
+		case parser.OpNull:
+			v.stack[v.sp] = UndefinedValue
+			v.sp++
+		case parser.OpBinaryOp:
+			v.ip++
+			right := v.stack[v.sp-1]
+			left := v.stack[v.sp-2]
+			tok := token.Token(v.curInsts[v.ip])
+			res, e := left.BinaryOp(tok, right)
+			if e != nil {
+				v.sp -= 2
+				if e == ErrInvalidOperator {
+					v.err = fmt.Errorf("invalid operation: %s %s %s",
+						left.TypeName(), tok.String(), right.TypeName())
+					return
+				}
+				v.err = e
+				return
+			}
+
+			v.allocs--
+			if v.allocs == 0 {
+				v.err = ErrObjectAllocLimit
+				return
+			}
+
+			v.stack[v.sp-2] = res
+			v.sp--
+		case parser.OpEqual:
+			right := v.stack[v.sp-1]
+			left := v.stack[v.sp-2]
+			v.sp -= 2
+			if left.Equals(right) {
+				v.stack[v.sp] = TrueValue
+			} else {
+				v.stack[v.sp] = FalseValue
+			}
+			v.sp++
+		case parser.OpNotEqual:
+			right := v.stack[v.sp-1]
+			left := v.stack[v.sp-2]
+			v.sp -= 2
+			if left.Equals(right) {
+				v.stack[v.sp] = FalseValue
+			} else {
+				v.stack[v.sp] = TrueValue
+			}
+			v.sp++
+		case parser.OpPop:
+			v.sp--
+		case parser.OpTrue:
+			v.stack[v.sp] = TrueValue
+			v.sp++
+		case parser.OpFalse:
+			v.stack[v.sp] = FalseValue
+			v.sp++
+		case parser.OpLNot:
+			operand := v.stack[v.sp-1]
+			v.sp--
+			if operand.IsFalsy() {
+				v.stack[v.sp] = TrueValue
+			} else {
+				v.stack[v.sp] = FalseValue
+			}
+			v.sp++
+		case parser.OpBComplement:
+			operand := v.stack[v.sp-1]
+			v.sp--
+
+			switch x := operand.(type) {
+			case *Int:
+				var res Object = &Int{Value: ^x.Value}
+				v.allocs--
+				if v.allocs == 0 {
+					v.err = ErrObjectAllocLimit
+					return
+				}
+				v.stack[v.sp] = res
+				v.sp++
+			default:
+				v.err = fmt.Errorf("invalid operation: ^%s",
+					operand.TypeName())
+				return
+			}
+		case parser.OpMinus:
+			operand := v.stack[v.sp-1]
+			v.sp--
+
+			switch x := operand.(type) {
+			case *Int:
+				var res Object = &Int{Value: -x.Value}
+				v.allocs--
+				if v.allocs == 0 {
+					v.err = ErrObjectAllocLimit
+					return
+				}
+				v.stack[v.sp] = res
+				v.sp++
+			case *Float:
+				var res Object = &Float{Value: -x.Value}
+				v.allocs--
+				if v.allocs == 0 {
+					v.err = ErrObjectAllocLimit
+					return
+				}
+				v.stack[v.sp] = res
+				v.sp++
+			default:
+				v.err = fmt.Errorf("invalid operation: -%s",
+					operand.TypeName())
+				return
+			}
+		case parser.OpJumpFalsy:

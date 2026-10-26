@@ -1,0 +1,1 @@
+cd /app && git diff --check && echo "diff check clean"

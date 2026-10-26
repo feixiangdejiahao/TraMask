@@ -1,0 +1,1 @@
+cd /app && tail -30 tests/runners/browser_test_runner_tests.js

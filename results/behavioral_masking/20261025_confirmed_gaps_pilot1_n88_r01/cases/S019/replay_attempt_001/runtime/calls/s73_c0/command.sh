@@ -1,0 +1,57 @@
+cd /app && cat >> src/schema/actions/parse/utils.ts <<'EOF'
+
+/**
+ * Enforces `requiredIf` rules on a parsed map/item value.
+ * Only applies in `put` mode: during updates, conditional requirements are
+ * enforced by the database via `attribute_exists` conditions.
+ */
+export const assertRequiredIf = (
+  schema: import('~/schema/index.js').ItemSchema | import('~/schema/index.js').MapSchema,
+  parsedValue: Record<string, unknown>,
+  options: ParseAttrValueOptions = {}
+): void => {
+  const { mode = 'put', valuePath } = options
+
+  if (mode !== 'put') {
+    return
+  }
+
+  for (const [attributeName, attribute] of Object.entries(schema.attributes)) {
+    const { requiredIf } = attribute.props
+
+    if (requiredIf === undefined) {
+      continue
+    }
+
+    for (const [controllingAttributeName, triggerValues] of Object.entries(requiredIf)) {
+      const controllingValue = parsedValue[controllingAttributeName]
+
+      if (controllingValue === undefined || !triggerValues.includes(controllingValue)) {
+        continue
+      }
+
+      if (parsedValue[attributeName] !== undefined) {
+        continue
+      }
+
+      const path =
+        valuePath !== undefined
+          ? formatArrayPath([...valuePath, attributeName])
+          : formatArrayPath([attributeName])
+
+      throw new DynamoDBToolboxError('parsing.conditionalAttributeRequired', {
+        message: `Attribute '${path}' is required when '${controllingAttributeName}' is set to '${String(
+          controllingValue
+        )}'.`,
+        path,
+        payload: {
+          attributeName,
+          controllingAttributeName,
+          triggerValues
+        }
+      })
+    }
+  }
+}
+EOF
+echo done

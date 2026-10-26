@@ -1,0 +1,1 @@
+cd /app/libs/core && which uv && uv run ruff check langchain_core/runnables/coalesce.py 2>&1 | head -60

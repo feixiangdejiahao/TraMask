@@ -1,0 +1,1 @@
+cd /app && npx prettier --write src/schema/actions/requiredIf.unit.test.ts && npx eslint src/schema/actions/requiredIf.unit.test.ts 2>&1 | head -20

@@ -1,0 +1,111 @@
+
+	// Load active records (detected/acknowledged/ignored). Resolved records are
+	// treated as history, so a recurring drift creates a fresh detected record.
+	var existing []models.DriftRecord
+	if err := s.db.WithContext(ctx).
+		Where("baseline_id = ? AND environment_id = ? AND status != ?", baseline.ID, envID, models.DriftStatusResolved).
+		Find(&existing).Error; err != nil {
+		return nil, err
+	}
+
+	existingByKey := make(map[string]models.DriftRecord, len(existing))
+	for _, rec := range existing {
+		existingByKey[driftRecordKey(rec.ContainerName, rec.DriftType, rec.Field)] = rec
+	}
+
+	now := time.Now().UTC()
+
+	// Auto-resolve detected records whose condition has cleared. Acknowledged
+	// and ignored records are never auto-resolved.
+	for key, rec := range existingByKey {
+		if rec.Status != models.DriftStatusDetected {
+			continue
+		}
+		if _, stillPresent := conditionByKey[key]; stillPresent {
+			continue
+		}
+		resolvedAt := now
+		rec.Status = models.DriftStatusResolved
+		rec.ResolvedAt = &resolvedAt
+		if err := s.db.WithContext(ctx).Save(&rec).Error; err != nil {
+			return nil, fmt.Errorf("failed to resolve drift record: %w", err)
+		}
+	}
+
+	// Create records for conditions that do not already have an active record.
+	var newRecords []models.DriftRecord
+	for key, d := range conditionByKey {
+		if _, exists := existingByKey[key]; exists {
+			continue
+		}
+		newRecords = append(newRecords, models.DriftRecord{
+			BaselineID:    baseline.ID,
+			EnvironmentID: envID,
+			ContainerName: d.ContainerName,
+			ContainerID:   d.ContainerID,
+			DriftType:     d.DriftType,
+			Field:         d.Field,
+			ExpectedValue: d.ExpectedValue,
+			ActualValue:   d.ActualValue,
+			Severity:      d.Severity,
+			Status:        models.DriftStatusDetected,
+			DetectedAt:    now,
+		})
+	}
+	if len(newRecords) > 0 {
+		if err := s.db.WithContext(ctx).Create(&newRecords).Error; err != nil {
+			return nil, fmt.Errorf("failed to create drift records: %w", err)
+		}
+	}
+
+	snapshot := s.buildComplianceSnapshot(baseline.ID, envID, baselineConfigs, containers, current)
+	if err := s.db.WithContext(ctx).Create(snapshot).Error; err != nil {
+		return nil, fmt.Errorf("failed to save compliance snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+// GetActiveDrifts returns all currently detected drift records for an environment.
+func (s *DriftDetectionService) GetActiveDrifts(ctx context.Context, envID string) ([]models.DriftRecord, error) {
+	var records []models.DriftRecord
+	err := s.db.WithContext(ctx).
+		Where("environment_id = ? AND status = ?", envID, models.DriftStatusDetected).
+		Order("detected_at DESC, created_at DESC").
+		Find(&records).Error
+	if err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// AcknowledgeDrift marks a drift record as acknowledged.
+func (s *DriftDetectionService) AcknowledgeDrift(ctx context.Context, driftID string) error {
+	return s.updateDriftStatus(ctx, driftID, models.DriftStatusAcknowledged)
+}
+
+// IgnoreDrift marks a drift record as ignored.
+func (s *DriftDetectionService) IgnoreDrift(ctx context.Context, driftID string) error {
+	return s.updateDriftStatus(ctx, driftID, models.DriftStatusIgnored)
+}
+
+func (s *DriftDetectionService) updateDriftStatus(ctx context.Context, driftID, status string) error {
+	var rec models.DriftRecord
+	if err := s.db.WithContext(ctx).First(&rec, "id = ?", driftID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("drift record not found")
+		}
+		return err
+	}
+	return s.db.WithContext(ctx).Model(&rec).Update("status", status).Error
+}
+
+// GetComplianceHistory returns compliance snapshots for an environment, newest first.
+func (s *DriftDetectionService) GetComplianceHistory(ctx context.Context, envID string, limit, offset int) ([]models.ComplianceSnapshot, error) {
+	q := s.db.WithContext(ctx).
+		Where("environment_id = ?", envID).
+		Order("created_at DESC")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if offset > 0 {
+		q = q.Offset(offset)

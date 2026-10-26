@@ -1,0 +1,1 @@
+cd /app && sed -i '84s/"152"/"151"/' zz_repro3_test.go && sed -i '160s/got != 15/got != 25/' zz_repro3_test.go && sed -n '84p;160p' zz_repro3_test.go && go test -run 'TestGoCall' -v . 2>&1 | tail -50

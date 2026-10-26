@@ -1,0 +1,1 @@
+cd /app && grep -rn "FieldByKey\|ToSettingVariableSlice\|ListSettings\|getDefaultSettings" backend/internal --include="*_test.go" | head -20

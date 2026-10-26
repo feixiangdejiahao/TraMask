@@ -1,0 +1,1 @@
+cd /app && ls docs && cat docs/index.md 2>/dev/null | head -60

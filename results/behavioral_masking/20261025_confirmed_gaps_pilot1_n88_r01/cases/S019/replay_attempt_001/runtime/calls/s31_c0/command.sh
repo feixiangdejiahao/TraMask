@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/dto/dto.ts && echo "===GETSCHEMA DTO item/map===" && cat src/schema/actions/dto/getSchemaDTO/item.ts && echo "===map===" && cat src/schema/actions/dto/getSchemaDTO/map.ts && echo "===types===" && cat src/schema/actions/dto/types.ts

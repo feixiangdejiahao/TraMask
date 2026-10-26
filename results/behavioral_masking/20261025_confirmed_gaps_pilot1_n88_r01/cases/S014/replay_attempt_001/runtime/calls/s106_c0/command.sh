@@ -1,0 +1,1 @@
+cd /app && grep -n ")!(" packages/core/test/prompts/async-autocomplete.test.ts packages/prompts/test/async-autocomplete.test.ts

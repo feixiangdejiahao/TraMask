@@ -1,0 +1,1 @@
+cd /app && npx vitest run src/utils src/options src/database src/transformers --reporter=dot 2>&1 | tail -12

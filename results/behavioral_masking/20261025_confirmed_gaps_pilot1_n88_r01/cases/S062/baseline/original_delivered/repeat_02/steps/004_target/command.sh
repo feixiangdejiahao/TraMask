@@ -1,0 +1,1 @@
+python /tmp/pilot1_selected.py

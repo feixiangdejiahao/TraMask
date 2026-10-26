@@ -1,0 +1,1 @@
+GOROOT=$(go env GOROOT); grep -n "syms" "$GOROOT/src/go/doc/doc.go" | head -30

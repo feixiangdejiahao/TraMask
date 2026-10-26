@@ -1,0 +1,1 @@
+cd /app && git diff --stat && echo '---' && git diff lib/utils/reporter.js

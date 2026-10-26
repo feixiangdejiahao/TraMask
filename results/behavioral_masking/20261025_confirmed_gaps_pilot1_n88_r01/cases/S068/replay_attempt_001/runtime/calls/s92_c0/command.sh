@@ -1,0 +1,1 @@
+cd /app && awk 'length > 120 {print FILENAME":"NR": "length" chars: "$0}' sqlite_utils/db.py sqlite_utils/cli.py tests/test_safe_import.py docs/cli.rst docs/python-api.rst | head -30

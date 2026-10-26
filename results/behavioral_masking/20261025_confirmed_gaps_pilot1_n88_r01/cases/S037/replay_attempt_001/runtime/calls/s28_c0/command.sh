@@ -1,0 +1,1 @@
+cd /app && sed -n '62,80p' src/kea/context.ts

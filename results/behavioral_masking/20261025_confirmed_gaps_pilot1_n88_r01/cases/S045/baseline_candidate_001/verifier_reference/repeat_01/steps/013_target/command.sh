@@ -1,0 +1,1 @@
+python -m pytest tests/unit_tests/runnables/test_coalesce.py::test_batch_per_item_coalescing -vv -p no:cacheprovider

@@ -1,0 +1,12 @@
+cd /app && python - <<'EOF'
+from typing import Annotated
+from attrs import define
+from cattrs._compat import get_origin, has, is_typeddict
+from cattrs.partial import _is_partial_type
+@define
+class Inner:
+    x: int
+t = Annotated[Inner, "meta"]
+print("origin:", get_origin(t), "has origin:", has(get_origin(t) or t))
+print("_is_partial_type:", _is_partial_type(t))
+EOF

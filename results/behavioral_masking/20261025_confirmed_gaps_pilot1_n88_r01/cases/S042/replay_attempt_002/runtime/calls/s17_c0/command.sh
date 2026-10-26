@@ -1,0 +1,1 @@
+cat packages/core/src/entity/entity.ts && echo '---patch---' && cat packages/core/src/entity/entity-methods-patch.ts && echo '---types---' && cat packages/core/src/entity/types.ts

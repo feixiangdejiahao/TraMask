@@ -1,0 +1,1 @@
+cd /app && sed -n '20,110p' /root/go/pkg/mod/github.com/moby/moby/api@v1.54.0/types/network/port.go && grep -n "PortBindings\|ExposedPorts" /root/go/pkg/mod/github.com/moby/moby/api@v1.54.0/types/container/hostconfig.go /root/go/pkg/mod/github.com/moby/moby/api/types/container/config.go 2>/dev/null | head

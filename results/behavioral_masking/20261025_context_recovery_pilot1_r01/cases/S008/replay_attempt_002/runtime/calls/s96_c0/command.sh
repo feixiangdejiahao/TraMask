@@ -1,0 +1,1 @@
+cd /app && sed -n '360,410p' backend/internal/services/drift_detection_service.go && echo "=====BUILD LOG=====" && cat /tmp/build3.log

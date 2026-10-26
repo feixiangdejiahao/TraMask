@@ -1,0 +1,1 @@
+cd /app && git checkout -b feat/initialize-async && git branch --show-current

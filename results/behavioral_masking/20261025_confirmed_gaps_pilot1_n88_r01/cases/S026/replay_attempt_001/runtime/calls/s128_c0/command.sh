@@ -1,0 +1,1 @@
+cd /app && cat checkers/internal/astwalk/doc_link_walker.go && echo "===== checker head =====" && sed -n '1,120p' checkers/brokenDocLink_checker.go

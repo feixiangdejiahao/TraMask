@@ -1,0 +1,1 @@
+cd /app && sed -n '1,300p' lib/reporters/tap_reporter.js

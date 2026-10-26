@@ -1,0 +1,1 @@
+sed -n '1,80p' tests/test_docs.py

@@ -1,0 +1,1 @@
+cd /app && python -m testtools.run tests.unit.core.test_nosec_directives.NosecDirectiveTests.test_071_metrics_specific_next_line_counts_as_skipped_test

@@ -1,0 +1,1 @@
+cd /app && python -m pytest tests/functional/test_incremental.py::IncrementalTests::test_warm_cache -q

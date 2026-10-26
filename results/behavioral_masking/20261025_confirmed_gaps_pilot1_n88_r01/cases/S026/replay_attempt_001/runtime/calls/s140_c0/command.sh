@@ -1,0 +1,1 @@
+which golangci-lint 2>/dev/null; cd /app && gofmt -l checkers/ | head; echo "--- gofmt done ---"

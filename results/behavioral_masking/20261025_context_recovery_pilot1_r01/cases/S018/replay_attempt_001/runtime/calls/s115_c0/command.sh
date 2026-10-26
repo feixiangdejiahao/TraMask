@@ -1,0 +1,1 @@
+cd /app && sed -i '210,213s/^$//' tests/unit/core/test_nosec.py && sed -i '212,213d' tests/unit/core/test_nosec.py && python -m flake8 tests/unit/core/test_nosec.py && python -m testtools.run tests.unit.core.test_nosec 2>&1 | tail -4

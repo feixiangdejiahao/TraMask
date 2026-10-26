@@ -1,0 +1,1 @@
+cd /app && wc -l bandit/core/nosec.py tests/unit/core/test_nosec.py examples/nosec-directives.py && git show --stat HEAD | tail -15

@@ -1,0 +1,1 @@
+cd /app && sed -i 's/--ignore-nosec        do not skip lines with # nosec comments/--ignore-nosec        do not skip lines with # nosec comments or directives/' doc/source/man/bandit.rst && grep -n 'ignore-nosec' doc/source/man/bandit.rst

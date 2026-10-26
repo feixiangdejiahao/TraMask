@@ -1,0 +1,1 @@
+cd /app && git diff --name-only -- '*.ts' && git ls-files --others --exclude-standard -- '*.ts' | grep -v node_modules

@@ -1,0 +1,1 @@
+find / -path '*/pwnlib/tubes/mux.py' 2>/dev/null; find / -name '*.whl' -o -name '*pwntools*' 2>/dev/null | grep -v /app | head; pip show pwntools 2>/dev/null | head

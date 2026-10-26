@@ -1,0 +1,1 @@
+cd /app && npx jest src/__tests__/debug.test.ts --no-coverage 2>&1 | tail -20

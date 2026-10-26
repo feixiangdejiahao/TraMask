@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm build 2>&1 | tail -5 && cd /app && npx tsc --noEmit --project tsconfig.json 2>&1 | head -40

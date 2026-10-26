@@ -1,0 +1,1 @@
+cd /app && cat backend/internal/bootstrap/jobs_bootstrap.go && echo "=====BUILDABLES=====" && cat backend/internal/bootstrap/buildables_router_bootstrap.go && echo "=====DB BOOTSTRAP=====" && cat backend/internal/bootstrap/db_bootstrap.go

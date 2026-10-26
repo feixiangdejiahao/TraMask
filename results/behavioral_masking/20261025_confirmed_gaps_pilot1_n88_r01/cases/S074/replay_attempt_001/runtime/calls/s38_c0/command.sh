@@ -1,0 +1,1 @@
+cd /app && sed -n '160,200p' vm.go && grep -n "OpConstant\|OpClosure\|OpSetGlobal\|OpGetGlobal" vm.go

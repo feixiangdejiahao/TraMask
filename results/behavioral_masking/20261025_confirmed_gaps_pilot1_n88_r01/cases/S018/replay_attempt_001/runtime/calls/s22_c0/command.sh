@@ -1,0 +1,1 @@
+cd /app && grep -n "def test" tests/test_rrule.py | grep -iE "str|rdate|exdate|rruleset|tz|ical|repr|eq|hash|union|subtract|copy|count|until|dtstart|freq|property" 

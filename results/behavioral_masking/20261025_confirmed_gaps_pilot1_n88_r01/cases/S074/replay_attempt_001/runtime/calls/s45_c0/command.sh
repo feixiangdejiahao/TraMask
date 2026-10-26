@@ -1,0 +1,1 @@
+cd /app && grep -n "func (o \*Undefined) Copy\|func (o \*Time) Copy\|func (o \*Char) Copy\|func (o \*Float) Copy\|func (o \*Bool) Copy" objects.go

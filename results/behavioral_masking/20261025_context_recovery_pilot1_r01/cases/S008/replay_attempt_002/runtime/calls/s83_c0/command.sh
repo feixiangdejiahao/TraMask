@@ -1,0 +1,1 @@
+cd /app && grep -n "DriftDetection" backend/internal/models/settings.go && grep -n "type Settings struct" backend/internal/models/settings.go

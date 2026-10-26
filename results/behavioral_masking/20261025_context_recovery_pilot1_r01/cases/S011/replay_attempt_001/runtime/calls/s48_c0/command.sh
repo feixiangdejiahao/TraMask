@@ -1,0 +1,1 @@
+find / -name "*.tgz" 2>/dev/null | head -20; find / -path "*awilix*" -name "*.js" 2>/dev/null | grep -v "/app" | head

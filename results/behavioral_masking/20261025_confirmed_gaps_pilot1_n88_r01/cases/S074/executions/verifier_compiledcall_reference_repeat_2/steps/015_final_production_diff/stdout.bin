@@ -1,0 +1,142 @@
+diff --git a/objects.go b/objects.go
+index ef9185f..11ba394 100644
+--- a/objects.go
++++ b/objects.go
+@@ -576,6 +576,8 @@ type CompiledFunction struct {
+ 	VarArgs       bool
+ 	SourceMap     map[int]parser.Pos
+ 	Free          []*ObjectPtr
++	env           *compiledFunctionEnv
++	template      *CompiledFunction
+ }
+ 
+ // TypeName returns the name of the type.
+@@ -600,7 +602,10 @@ func (o *CompiledFunction) Copy() Object {
+ 		NumLocals:     o.NumLocals,
+ 		NumParameters: o.NumParameters,
+ 		VarArgs:       o.VarArgs,
+-		Free:          append([]*ObjectPtr{}, o.Free...), // DO NOT Copy() of elements; these are variable pointers
++		Free:          append([]*ObjectPtr{}, o.Free...),
++		SourceMap:     o.SourceMap,
++		env:           o.env,
++		template:      o.template,
+ 	}
+ }
+ 
+diff --git a/script.go b/script.go
+index d2023c4..663997b 100644
+--- a/script.go
++++ b/script.go
+@@ -262,15 +262,9 @@ func (c *Compiled) Clone() *Compiled {
+ 	clone := &Compiled{
+ 		globalIndexes: c.globalIndexes,
+ 		bytecode:      c.bytecode,
+-		globals:       make([]Object, len(c.globals)),
++		globals:       cloneCompiledGlobals(c.bytecode, c.globals, c.maxAllocs),
+ 		maxAllocs:     c.maxAllocs,
+ 	}
+-	// copy global objects
+-	for idx, g := range c.globals {
+-		if g != nil {
+-			clone.globals[idx] = g.Copy()
+-		}
+-	}
+ 	return clone
+ }
+ 
+@@ -338,6 +332,9 @@ func (c *Compiled) Set(name string, value interface{}) error {
+ 	if err != nil {
+ 		return err
+ 	}
++	if requiresRuntimeClone(obj) {
++		obj = cloneObjectIntoCompiled(c.bytecode, c.globals, c.maxAllocs, obj)
++	}
+ 	idx, ok := c.globalIndexes[name]
+ 	if !ok {
+ 		return fmt.Errorf("'%s' is not defined", name)
+diff --git a/vm.go b/vm.go
+index 74b7742..19d48f1 100644
+--- a/vm.go
++++ b/vm.go
+@@ -32,6 +32,7 @@ type VM struct {
+ 	maxAllocs   int64
+ 	allocs      int64
+ 	err         error
++	env         *compiledFunctionEnv
+ }
+ 
+ // NewVM creates a VM.
+@@ -51,6 +52,7 @@ func NewVM(
+ 		framesIndex: 1,
+ 		ip:          -1,
+ 		maxAllocs:   maxAllocs,
++		env:         newCompiledFunctionEnv(bytecode, globals, maxAllocs),
+ 	}
+ 	v.frames[0].fn = bytecode.MainFunction
+ 	v.frames[0].ip = -1
+@@ -66,7 +68,6 @@ func (v *VM) Abort() {
+ 
+ // Run starts the execution.
+ func (v *VM) Run() (err error) {
+-	// reset VM states
+ 	v.sp = 0
+ 	v.curFrame = &(v.frames[0])
+ 	v.curInsts = v.curFrame.fn.Instructions
+@@ -76,19 +77,8 @@ func (v *VM) Run() (err error) {
+ 
+ 	v.run()
+ 	atomic.StoreInt64(&v.aborting, 0)
+-	err = v.err
++	err = v.formatRuntimeError()
+ 	if err != nil {
+-		filePos := v.fileSet.Position(
+-			v.curFrame.fn.SourcePos(v.ip - 1))
+-		err = fmt.Errorf("Runtime Error: %w\n\tat %s",
+-			err, filePos)
+-		for v.framesIndex > 1 {
+-			v.framesIndex--
+-			v.curFrame = &v.frames[v.framesIndex-1]
+-			filePos = v.fileSet.Position(
+-				v.curFrame.fn.SourcePos(v.curFrame.ip - 1))
+-			err = fmt.Errorf("%w\n\tat %s", err, filePos)
+-		}
+ 		return err
+ 	}
+ 	return nil
+@@ -103,7 +93,11 @@ func (v *VM) run() {
+ 			v.ip += 2
+ 			cidx := int(v.curInsts[v.ip]) | int(v.curInsts[v.ip-1])<<8
+ 
+-			v.stack[v.sp] = v.constants[cidx]
++			val := v.constants[cidx]
++			if fn, ok := val.(*CompiledFunction); ok && v.env != nil {
++				val = v.env.bindFunction(fn)
++			}
++			v.stack[v.sp] = val
+ 			v.sp++
+ 		case parser.OpNull:
+ 			v.stack[v.sp] = UndefinedValue
+@@ -748,9 +742,10 @@ func (v *VM) run() {
+ 			v.ip += 3
+ 			constIndex := int(v.curInsts[v.ip-1]) | int(v.curInsts[v.ip-2])<<8
+ 			numFree := int(v.curInsts[v.ip])
+-			fn, ok := v.constants[constIndex].(*CompiledFunction)
++			value := v.constants[constIndex]
++			fn, ok := value.(*CompiledFunction)
+ 			if !ok {
+-				v.err = fmt.Errorf("not function: %s", fn.TypeName())
++				v.err = fmt.Errorf("not function: %s", value.TypeName())
+ 				return
+ 			}
+ 			free := make([]*ObjectPtr, numFree)
+@@ -772,6 +767,10 @@ func (v *VM) run() {
+ 				VarArgs:       fn.VarArgs,
+ 				SourceMap:     fn.SourceMap,
+ 				Free:          free,
++				env:           v.env,
++			}
++			if v.env != nil {
++				cl.template = v.env.templateFor(fn)
+ 			}
+ 			v.allocs--
+ 			if v.allocs == 0 {

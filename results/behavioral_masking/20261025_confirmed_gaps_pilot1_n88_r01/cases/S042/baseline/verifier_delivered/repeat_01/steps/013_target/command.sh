@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec vitest run tests/pair-tracking.test.ts -t 'should match non-last pair removals when entity retains other pairs' --maxWorkers 1 --minWorkers 1 --reporter=verbose

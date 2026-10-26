@@ -1,0 +1,1 @@
+cd /app && for f in any anyOf binary boolean list map null number record set string; do echo "=== $f ==="; grep -n "from '../types/index.js'" "src/schema/$f/schema_.ts"; grep -n "class .*Schema_" "src/schema/$f/schema_.ts" | head -2; done

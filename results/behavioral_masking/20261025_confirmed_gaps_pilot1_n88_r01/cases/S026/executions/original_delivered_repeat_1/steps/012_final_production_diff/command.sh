@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary 9aea378c4dccd6f4394196ad8f0873b3e84678c8 -- checkers/brokenDocLink_checker.go checkers/internal/astwalk/doc_link_walker.go checkers/internal/astwalk/visitor.go checkers/internal/astwalk/walker.go

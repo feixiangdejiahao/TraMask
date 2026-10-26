@@ -1,0 +1,1 @@
+cd /app && grep -rn "nameCursors\|tokens" src/schema/actions/parseCondition --include="*.ts" | grep -v test | head -20 && echo "===" && grep -rn "#c_" src --include="*.ts" | grep -v test | head

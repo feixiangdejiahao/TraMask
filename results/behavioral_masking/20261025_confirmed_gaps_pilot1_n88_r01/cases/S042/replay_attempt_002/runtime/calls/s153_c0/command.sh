@@ -1,0 +1,1 @@
+cd /app && grep -rn "console.log\|DEBUG\|TODO\|FIXME" packages/core/src packages/core/tests/pair-tracking-modifiers.test.ts README.md docs/api/relations.md skills/koota/references/queries.md skills/koota/references/relations.md | grep -v "console.warn" || true

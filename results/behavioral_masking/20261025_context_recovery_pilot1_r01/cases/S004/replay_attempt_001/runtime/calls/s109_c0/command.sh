@@ -1,0 +1,1 @@
+cd /app && git diff aiomonitor/termui/completion.py aiomonitor/task.py aiomonitor/types.py | head -260

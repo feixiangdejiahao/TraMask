@@ -1,0 +1,1 @@
+cd /app && git diff --stat && echo "=== manager diff ===" && git diff bandit/core/manager.py | head -250

@@ -1,0 +1,1 @@
+cd /app/backend && ls /root/go/pkg/mod/github.com/ 2>/dev/null | head -20; echo "---"; go version

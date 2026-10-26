@@ -1,0 +1,1 @@
+cd /app && git diff script.go && echo "=== objects.go diff (tail) ===" && git diff objects.go | tail -120

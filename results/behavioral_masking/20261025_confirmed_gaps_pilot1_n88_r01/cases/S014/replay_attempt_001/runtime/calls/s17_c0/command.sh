@@ -1,0 +1,1 @@
+grep -rn "this.render()" packages/core/src packages/prompts/src | head; echo "---"; grep -rn "\.render(" packages/core/src | head; echo "---"; cat packages/core/tsconfig.json 2>/dev/null; cat tsconfig.json

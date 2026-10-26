@@ -1,0 +1,1 @@
+cd /app && grep -n "requiredIf" -A14 src/schema/map/schema_.ts | head -22 && echo "===string===" && grep -n "requiredIf" -A14 src/schema/string/schema_.ts | head -20

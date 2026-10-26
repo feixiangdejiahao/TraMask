@@ -1,0 +1,1 @@
+cd /app && python /tmp/repro2.py 2>&1 | grep -E "FAIL|OK:" && echo "---" && python /tmp/upstream_like_test.py >/dev/null 2>&1; python -m pytest /tmp/upstream_like_test.py -q 2>&1 | tail -2

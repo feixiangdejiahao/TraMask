@@ -1,0 +1,1 @@
+cd /app && find tests -maxdepth 2 -type d | sort && echo '---' && ls tests/unit

@@ -1,0 +1,1 @@
+cd /app && sed -i 's/)!(/)?.(/g' packages/core/test/prompts/async-autocomplete.test.ts && npx biome check packages/core/test/prompts/async-autocomplete.test.ts packages/prompts/test/async-autocomplete.test.ts 2>&1 | tail -5

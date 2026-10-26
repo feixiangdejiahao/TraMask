@@ -1,0 +1,1 @@
+cd /app && cat docs/reference/monitor.rst docs/reference/termui.rst docs/reference/webui.rst

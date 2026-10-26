@@ -1,0 +1,1 @@
+cd /app && git status && echo "===== diff stat =====" && git diff --stat && echo "===== new files =====" && git status --porcelain

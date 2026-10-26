@@ -1,0 +1,1 @@
+cd /app && git diff src/transformer.ts | sed -n '250,400p'

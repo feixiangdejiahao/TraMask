@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary 010c4bdb4b8758844fd44eacf38e42b22eba8aea -- src/error-class-registry.ts src/error-options.ts src/error-sanitizer.ts src/error-stack.ts src/index.ts src/is.ts src/transformer.ts src/types.ts src/util.ts

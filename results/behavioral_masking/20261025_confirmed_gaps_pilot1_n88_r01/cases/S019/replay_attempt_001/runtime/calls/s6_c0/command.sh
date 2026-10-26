@@ -1,0 +1,1 @@
+cd /app && ls src/schema && echo "---" && cat src/schema/index.ts && echo "---TYPES---" && cat src/schema/types.ts 2>/dev/null; cat src/schema/schema.ts 2>/dev/null | head -100

@@ -1,0 +1,1 @@
+cd /app && ls packages/core/tests && git status --short | grep zz || true

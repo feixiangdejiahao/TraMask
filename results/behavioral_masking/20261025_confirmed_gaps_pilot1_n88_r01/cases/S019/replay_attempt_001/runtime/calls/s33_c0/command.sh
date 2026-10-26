@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/fromDTO/fromSchemaDTO/attribute.ts && echo "===map===" && cat src/schema/actions/fromDTO/fromSchemaDTO/map.ts && echo "===index===" && cat src/schema/actions/fromDTO/fromSchemaDTO/index.ts && echo "===anyOf===" && cat src/schema/actions/fromDTO/fromSchemaDTO/anyOf.ts

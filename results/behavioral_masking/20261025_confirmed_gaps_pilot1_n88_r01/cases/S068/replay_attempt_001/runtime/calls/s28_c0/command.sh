@@ -1,0 +1,1 @@
+sed -n '1505,1564p' docs/cli.rst && echo "=== enable_counts ===" && sed -n '2610,2635p' docs/cli.rst && echo "=== python bulk ===" && sed -n '792,860p' docs/python-api.rst

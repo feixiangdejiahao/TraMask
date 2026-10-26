@@ -1,0 +1,1 @@
+cd /app && ls checkers/testdata/ | head -20 && echo "--- count debug.go ---" && find checkers/testdata -maxdepth 2 -name debug.go | wc -l && echo "--- example new checker dir with only positive/negative ---" && ls checkers/testdata/builtinShadowDecl/ && ls checkers/testdata/codegenComment/

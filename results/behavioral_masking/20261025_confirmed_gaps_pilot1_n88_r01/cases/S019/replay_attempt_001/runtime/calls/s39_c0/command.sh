@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/zodSchemer/formatter/utils.ts && echo "===UTILS top===" && cat src/schema/actions/zodSchemer/utils.ts && echo "===PARSER ITEM===" && cat src/schema/actions/zodSchemer/parser/item.ts && echo "===PARSER MAP===" && cat src/schema/actions/zodSchemer/parser/map.ts

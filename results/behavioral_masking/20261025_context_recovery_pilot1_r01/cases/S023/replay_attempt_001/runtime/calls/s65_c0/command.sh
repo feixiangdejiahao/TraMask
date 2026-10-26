@@ -1,0 +1,1 @@
+cd /app && sed -n '1,260p' src/cattrs/partial.py

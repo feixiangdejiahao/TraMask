@@ -1,0 +1,1 @@
+sed -n '1,271p' bandit/core/config.py

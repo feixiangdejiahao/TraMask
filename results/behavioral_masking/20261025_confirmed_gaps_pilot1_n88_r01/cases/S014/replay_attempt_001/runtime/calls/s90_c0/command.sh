@@ -1,0 +1,1 @@
+cd /app && grep -n "loadError is cleared when typing" packages/core/test/prompts/async-autocomplete.test.ts && sed -n '634,700p' packages/core/test/prompts/async-autocomplete.test.ts

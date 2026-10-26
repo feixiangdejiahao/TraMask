@@ -1,0 +1,1 @@
+grep -n "def cli\|@cli.command\|def insert\|def upsert\|def bulk\|def create_table\|def enable_counts\|def disable\|def add_\|def list_\|def validate" sqlite_utils/cli.py | head -100

@@ -1,0 +1,1 @@
+nl -ba packages/core/src/world/world.ts | sed -n '1,260p'

@@ -1,0 +1,196 @@
+   185	
+   186		constructor(opts: AutocompleteOptions<T>) {
+   187			super(opts);
+   188	
+   189			this.#placeholder = opts.placeholder;
+   190			this.#filterFn = opts.filter ?? defaultFilter;
+   191			this.#debounceMs = opts.debounceMs ?? 200;
+   192			this.#minSearchLength = opts.minSearchLength ?? 1;
+   193			this.#cacheResults = opts.cacheResults ?? false;
+   194			this.#maxCacheSize = opts.maxCacheSize ?? 100;
+   195			this.#staleWhileRevalidate = opts.staleWhileRevalidate ?? false;
+   196			this.#maxRetries = opts.maxRetries ?? 0;
+   197			this.#retryDelay = opts.retryDelay ?? 0;
+   198			this.#retryBackoff = opts.retryBackoff ?? 'linear';
+   199			this.#fallbackOptions = opts.fallbackOptions;
+   200			this.#loadingMinDuration = opts.loadingMinDuration ?? 0;
+   201			this.#initialValue = Array.isArray(opts.initialValue) ? opts.initialValue : undefined;
+   202			this.multiple = opts.multiple === true;
+   203	
+   204			if (Array.isArray(opts.options)) {
+   205				const options = opts.options;
+   206				this.#resolver = function (_search: string) {
+   207					return options;
+   208				};
+   209				this.#options = options;
+   210				this.filteredOptions = [...options];
+   211				this.#setupInitialValues();
+   212			} else {
+   213				this.#resolver = opts.options;
+   214				this.#options = [];
+   215				this.filteredOptions = [];
+   216				// The first invocation doubles as async detection: if the return value is
+   217				// thenable the resolver is asynchronous and this result is the first fetch.
+   218				this.#startFetch('');
+   219			}
+   220	
+   221			this.on('key', (char, key) => this.#onKey(char, key));
+   222			this.on('userInput', (value) => this.#onUserInputChanged(value));
+   223		}
+   224	
+   225		protected override _isActionKey(char: string | undefined, key: Key): boolean {
+   226			return (
+   227				char === '\t' ||
+   228				(this.multiple &&
+   229					this.isNavigating &&
+   230					key.name === 'space' &&
+   231					char !== undefined &&
+   232					char !== '')
+   233			);
+   234		}
+   235	
+   236		#onKey(_char: string | undefined, key: Key): void {
+   237			const isUpKey = key.name === 'up';
+   238			const isDownKey = key.name === 'down';
+   239			const isReturnKey = key.name === 'return';
+   240	
+   241			// Tab with empty input and placeholder: fill input with placeholder to trigger autocomplete
+   242			// Only when the placeholder matches at least one (non-disabled) option so the value remains selectable
+   243			const isEmptyOrOnlyTab = this.userInput === '' || this.userInput === '\t';
+   244			const placeholder = this.#placeholder;
+   245			const options = this.options;
+   246			const placeholderMatchesOption =
+   247				placeholder !== undefined &&
+   248				placeholder !== '' &&
+   249				options.some((opt) => !opt.disabled && this.#filterFn(placeholder, opt));
+   250			if (key.name === 'tab' && isEmptyOrOnlyTab && placeholderMatchesOption) {
+   251				if (this.userInput === '\t') {
+   252					this._clearUserInput();
+   253				}
+   254				this._setUserInput(placeholder, true);
+   255				this.isNavigating = false;
+   256				return;
+   257			}
+   258	
+   259			// Start navigation mode with up/down arrows
+   260			if (isUpKey || isDownKey) {
+   261				this.#cursor = findCursor(this.#cursor, isUpKey ? -1 : 1, this.filteredOptions);
+   262				this.focusedValue = this.filteredOptions[this.#cursor]?.value;
+   263				if (!this.multiple) {
+   264					this.selectedValues = [this.focusedValue];
+   265				}
+   266				this.isNavigating = true;
+   267			} else if (isReturnKey) {
+   268				this.value = normalisedValue(this.multiple, this.selectedValues);
+   269			} else {
+   270				if (this.multiple) {
+   271					if (
+   272						this.focusedValue !== undefined &&
+   273						(key.name === 'tab' || (this.isNavigating && key.name === 'space'))
+   274					) {
+   275						this.toggleSelected(this.focusedValue);
+   276					} else {
+   277						this.isNavigating = false;
+   278					}
+   279				} else {
+   280					if (this.focusedValue) {
+   281						this.selectedValues = [this.focusedValue];
+   282					}
+   283					this.isNavigating = false;
+   284				}
+   285			}
+   286		}
+   287	
+   288		deselectAll() {
+   289			this.selectedValues = [];
+   290		}
+   291	
+   292		toggleSelected(value: T['value']) {
+   293			if (this.filteredOptions.length === 0) {
+   294				return;
+   295			}
+   296	
+   297			if (this.multiple) {
+   298				if (this.selectedValues.includes(value)) {
+   299					this.selectedValues = this.selectedValues.filter((v) => v !== value);
+   300				} else {
+   301					this.selectedValues = [...this.selectedValues, value];
+   302				}
+   303			} else {
+   304				this.selectedValues = [value];
+   305			}
+   306		}
+   307	
+   308		clearCache() {
+   309			this.#cache.clear();
+   310		}
+   311	
+   312		#onUserInputChanged(value: string): void {
+   313			if (value === this.#lastUserInput) {
+   314				return;
+   315			}
+   316			this.#lastUserInput = value;
+   317	
+   318			if (!this.#isAsync) {
+   319				this.#fetchSync(value);
+   320				return;
+   321			}
+   322	
+   323			if (value !== '' && value.length < this.#minSearchLength) {
+   324				this.searchTooShort = true;
+   325				this.loadError = undefined;
+   326				this.filteredOptions = [];
+   327				this.#invalidateInFlight();
+   328				this.#updateCursorAndSelection();
+   329				this.#renderIfActive();
+   330				return;
+   331			}
+   332	
+   333			this.searchTooShort = false;
+   334	
+   335			if (this.#cacheResults) {
+   336				const cached = this.#cache.get(value);
+   337				if (cached !== undefined) {
+   338					if (!this.#staleWhileRevalidate) {
+   339						// Non-SWR cache hit: apply immediately and invalidate any in-flight fetch.
+   340						this.#invalidateInFlight();
+   341						this.loading = false;
+   342						this.loadError = undefined;
+   343						this.retryCount = 0;
+   344						this.#options = cached;
+   345						this.filteredOptions = cached;
+   346						this.#updateCursorAndSelection();
+   347						this.#renderIfActive();
+   348						return;
+   349					}
+   350					// SWR: serve cached immediately, then refetch in the background.
+   351					this.#options = cached;
+   352					this.filteredOptions = cached;
+   353					this.#updateCursorAndSelection();
+   354					this.#renderIfActive();
+   355					this.#startFetch(value);
+   356					return;
+   357				}
+   358			}
+   359	
+   360			this.#scheduleDebouncedFetch(value);
+   361		}
+   362	
+   363		#fetchSync(search: string): void {
+   364			this.#clearTimers();
+   365			this.#abortCurrentFetch();
+   366			const id = ++this.#fetchId;
+   367			const controller = new AbortController();
+   368			this.#abortController = controller;
+   369			const options = this.#resolver.call(this, search, { signal: controller.signal }) as T[];
+   370			this.#abortController = undefined;
+   371			this.#options = options;
+   372			this.filteredOptions = this.#filterOptions(options, search);
+   373			this.#updateCursorAndSelection();
+   374			this.#setupInitialValues();
+   375			if (id !== this.#fetchId) {
+   376				return;
+   377			}
+   378			this.#renderIfActive();
+   379		}
+   380	

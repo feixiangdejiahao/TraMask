@@ -1,0 +1,1 @@
+cd /app && cat src/react/hooks.ts && echo '=== reducer tail ===' && sed -n '120,220p' src/kea/reducer.ts

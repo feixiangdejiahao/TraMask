@@ -1,0 +1,1 @@
+git checkout -b incremental-cache && sed -n '1,260p' tests/unit/cli/test_main.py

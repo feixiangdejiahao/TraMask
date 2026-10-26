@@ -1,0 +1,1 @@
+cd /app && python -m flake8 bandit/core/cache.py bandit/core/manager.py bandit/core/metrics.py bandit/formatters/json.py bandit/formatters/text.py bandit/cli/main.py tests/functional/test_incremental.py tests/unit/core/test_cache.py tests/unit/core/test_manager_cache.py 2>&1 | head -50

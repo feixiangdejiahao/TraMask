@@ -1,0 +1,1 @@
+cd /app && npx prettier --write CHANGELOG.md >/dev/null 2>&1 && head -8 CHANGELOG.md && git diff --stat

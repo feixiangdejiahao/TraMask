@@ -1,0 +1,1 @@
+cd /app && go vet ./... 2>&1 | head -20 && go test ./... 2>&1 | tail -15

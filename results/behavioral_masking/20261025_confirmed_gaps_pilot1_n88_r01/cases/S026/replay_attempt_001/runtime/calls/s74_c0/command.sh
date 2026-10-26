@@ -1,0 +1,1 @@
+cd /app && cat checkers/brokenDocLink_checker.go

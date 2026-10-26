@@ -1,0 +1,1 @@
+cd /app && sed -n '1,360p' public/testem/mocha_adapter.js

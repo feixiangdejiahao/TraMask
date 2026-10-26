@@ -1,0 +1,1 @@
+cd /app && cat cmd/makedocs/main.go | head -120 && grep -rn "makedocs\|overview.md" Makefile .github/ 2>/dev/null | head -20

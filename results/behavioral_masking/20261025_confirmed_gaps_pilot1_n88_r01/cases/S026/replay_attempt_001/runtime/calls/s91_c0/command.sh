@@ -1,0 +1,1 @@
+cd /app && git diff checkers/internal/astwalk/visitor.go checkers/internal/astwalk/walker.go

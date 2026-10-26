@@ -1,0 +1,1 @@
+cd /app && git diff --stat && echo "=== context diff ===" && git diff src/kea/context.ts src/kea/kea.ts src/kea/build.ts src/kea/store.ts src/core/reducers.ts src/types.ts

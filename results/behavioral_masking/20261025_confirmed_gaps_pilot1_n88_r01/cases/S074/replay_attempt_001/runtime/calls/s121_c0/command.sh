@@ -1,0 +1,1 @@
+cd /app && gofmt -l . 2>/dev/null | grep -v "^$" ; echo "exit: $?" && git status --short

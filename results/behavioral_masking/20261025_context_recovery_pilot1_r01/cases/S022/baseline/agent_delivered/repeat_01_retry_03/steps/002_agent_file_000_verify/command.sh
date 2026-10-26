@@ -1,0 +1,6 @@
+python3 -I -c '
+import hashlib,json,sys
+data=open(sys.argv[1],'"'"'rb'"'"').read();actual=hashlib.sha256(data).hexdigest()
+print(json.dumps({'"'"'path'"'"':sys.argv[1],'"'"'bytes'"'"':len(data),'"'"'sha256'"'"':actual}))
+if actual!=sys.argv[2]:raise RuntimeError('"'"'docker_copy_bytes_changed'"'"')
+' /app/core/engine/src/tests/pilot1_agent.rs d401d9f52aaa3d8690693699d1f15bfe0a8af3a09e1b89f630133a174bfa83d2

@@ -1,0 +1,1 @@
+cd /app && cat examples/nosec.py examples/skip.py && echo '=====FUNC TESTS=====' && sed -n '380,460p' tests/functional/test_functional.py && sed -n '700,790p' tests/functional/test_functional.py

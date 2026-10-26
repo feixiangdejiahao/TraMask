@@ -1,0 +1,1 @@
+cd /app && nl -ba examples/nosec-directives.py && echo '---' && python -m bandit -f json examples/nosec-directives.py 2>/dev/null | python -c "import json,sys; d=json.load(sys.stdin); print(d['metrics']['_totals']); [print(r['line_number'], r['test_id']) for r in d['results']]"

@@ -1,0 +1,1 @@
+cd /app && sed -n '1,220p' src/entity/actions/update/updateItemParams/updateItemParams.unit.test.ts

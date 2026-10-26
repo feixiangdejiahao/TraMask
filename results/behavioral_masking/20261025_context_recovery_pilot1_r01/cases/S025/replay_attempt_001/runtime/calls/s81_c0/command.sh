@@ -1,0 +1,1 @@
+cd /app && pnpm types 2>&1 | grep -v 'npm warn' | tail -20 && echo "TYPES DONE"

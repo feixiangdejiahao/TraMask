@@ -1,0 +1,1 @@
+./node_modules/.bin/jest --runTestsByPath test/jest/atomic.js --runInBand --no-coverage --no-cache -t 'hybrid engine can be enabled and disabled'

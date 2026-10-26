@@ -1,0 +1,1 @@
+cat packages/core/src/entity/utils/entity-index.ts && echo '---world---' && cat packages/core/src/world/world.ts

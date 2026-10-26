@@ -1,0 +1,1 @@
+python3 --version && python3 -m pytest -q tests/test_upsert.py tests/test_cli_bulk.py -q 2>&1 | tail -20

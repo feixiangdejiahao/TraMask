@@ -1,0 +1,1 @@
+cd /tmp && rm -rf defaultcachetest && mkdir defaultcachetest && cd defaultcachetest && printf 'import os\nos.system("ls")\n' > a.py && bandit a.py --incremental -f json --exit-zero 2>/dev/null >/dev/null; ls -d .bandit_cache && bandit --cache-summary 2>/dev/null

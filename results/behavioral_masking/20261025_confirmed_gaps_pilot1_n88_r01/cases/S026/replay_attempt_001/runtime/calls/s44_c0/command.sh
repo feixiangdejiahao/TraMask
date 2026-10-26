@@ -1,0 +1,1 @@
+cd /app && head -50 checkers/testdata/builtinShadowDecl/positive_tests.go && echo "===== neg =====" && cat checkers/testdata/builtinShadowDecl/negative_tests.go

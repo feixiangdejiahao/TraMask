@@ -1,0 +1,1 @@
+cd /app && go test -run 'TestEdgeNestedClosureCapture|TestEdgeRecursiveClosureTransfer' -v . 2>&1 | tail -30

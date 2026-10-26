@@ -1,0 +1,447 @@
+===== src/core/index.ts =====
+import { CreateStoreOptions, KeaPlugin } from '../types'
+import { listeners, ListenersPluginContext, sharedListeners } from './listeners'
+import { getPluginContext, setPluginContext } from '../kea/context'
+import { connect } from './connect'
+import { actions } from './actions'
+import { defaults } from './defaults'
+import { reducers } from './reducers'
+import { selectors } from './selectors'
+import { events } from './events'
+import { runPlugins } from '../kea/plugins'
+
+export { actions } from './actions'
+export { connect } from './connect'
+export { defaults } from './defaults'
+export { events, afterMount, beforeUnmount, propsChanged } from './events'
+export { listeners, sharedListeners } from './listeners'
+export { reducers } from './reducers'
+export { selectors } from './selectors'
+export { key } from './key'
+export { props } from './props'
+export { path } from './path'
+
+export const corePlugin: KeaPlugin = {
+  name: 'core',
+
+  // assign defaults values to the logic
+  defaults: () => ({
+    actionCreators: {},
+    actionKeys: {},
+    actionTypes: {},
+    actions: {},
+    asyncActions: {},
+    cache: {},
+    connections: {},
+    defaults: {},
+    listeners: undefined,
+    reducers: {},
+    reducer: undefined,
+    reducerOptions: {},
+    selector: undefined,
+    selectors: {},
+    sharedListeners: undefined,
+    values: {},
+    events: {},
+  }),
+
+  events: {
+    // setup defaults for listeners
+    afterPlugin(): void {
+      setPluginContext<ListenersPluginContext>('listeners', {
+        byAction: {},
+        byPath: {},
+        pendingPromises: new Map(),
+        pendingDispatches: new Map(),
+      })
+    },
+
+    // add listeners middleware
+    beforeReduxStore(options: CreateStoreOptions): void {
+      options.middleware.push((store) => (next) => (action) => {
+        const previousState = store.getState()
+        const response = next(action)
+        const { byAction } = getPluginContext<ListenersPluginContext>('listeners')
+        const listeners = byAction[action.type]
+        if (listeners) {
+          for (const listenerArray of Object.values(listeners)) {
+            for (const innerListener of listenerArray) {
+              innerListener(action, previousState)
+            }
+          }
+        }
+        return response
+      })
+    },
+
+    // support kea 2.0 style object building
+    legacyBuild: (logic, input) => {
+      'connect' in input && input.connect && connect(input.connect)(logic)
+      runPlugins('legacyBuildAfterConnect', logic, input)
+      'actions' in input && input.actions && actions(input.actions)(logic)
+      'defaults' in input && input.defaults && defaults(input.defaults)(logic)
+      runPlugins('legacyBuildAfterDefaults', logic, input)
+      'reducers' in input && input.reducers && reducers(input.reducers)(logic)
+      'selectors' in input && input.selectors && selectors(input.selectors)(logic)
+      'sharedListeners' in input && sharedListeners(input.sharedListeners)(logic)
+      'listeners' in input && input.listeners && listeners(input.listeners)(logic)
+      'events' in input && input.events && events(input.events)(logic)
+    },
+  },
+}
+===== src/core/selectors.ts =====
+import { Logic, LogicBuilder, LogicPropSelectors, Selector, SelectorDefinition, SelectorDefinitions } from '../types'
+import { createSelector, createSelectorCreator, defaultMemoize, ParametricSelector } from 'reselect'
+import { getStoreState } from '../kea/context'
+
+/**
+  Logic builder:
+      props({} as { id: number })
+      selectors({
+        duckAndChicken: [
+          (s, p) => [s.duckId, s.chickenId, p.id],
+          (duckId, chickenId, id) => duckId + chickenId + id,
+          (a: any, b: any) => bool, // custom isEquals, defaults to `a === b`
+        ],
+      })
+
+  Adds:
+
+      logic.selector = state => state.scenes.farm // memoized via reselect
+      logic.selectors = {
+        duckAndChicken: state => logic.selector(state).duckAndChicken // memoized via reselect
+      }
+*/
+export function selectors<L extends Logic = Logic>(
+  input: SelectorDefinitions<L> | ((logic: L) => SelectorDefinitions<L>),
+): LogicBuilder<L> {
+  return (logic) => {
+    const selectorInputs = typeof input === 'function' ? input(logic) : input
+
+    // small cache so the order would not count
+    const builtSelectors: Record<string, Selector> = {}
+    for (const key of Object.keys(selectorInputs)) {
+      if (typeof logic.selectors[key] !== 'undefined') {
+        throw new Error(`[KEA] Logic "${logic.pathString}" selector "${key}" already exists`)
+      }
+      addSelectorAndValue(logic, key, (...args) => builtSelectors[key](...args))
+    }
+
+    const propSelectors =
+      typeof Proxy !== 'undefined'
+        ? new Proxy(logic.props, {
+            get(target, prop) {
+              if (!(prop in target)) {
+                throw new Error(
+                  `[KEA] Prop "${String(prop)}" not found for logic "${
+                    logic.pathString
+                  }". Attempted to use in a selector. Please specify a default via props({ ${String(
+                    prop,
+                  )}: '' }) to resolve.`,
+                )
+              }
+              return () => target[prop]
+            },
+          })
+        : (Object.fromEntries(
+            Object.keys(logic.props).map((key) => [key, () => logic.props[key]]),
+          ) as LogicPropSelectors<L>)
+
+    for (const entry of Object.entries(selectorInputs)) {
+      const [key, arr]: [string, SelectorDefinition<L['selectors'], LogicPropSelectors<L>, any> | undefined] = entry
+      if (!arr) {
+        throw new Error(`[KEA] Logic "${logic.pathString}" selector "${key}" is undefined`)
+      }
+      const [input, func, memoizeOptions] = arr
+      const args: ParametricSelector<any, any, any>[] = input(logic.selectors, propSelectors)
+
+      if (args.filter((a) => typeof a !== 'function').length > 0) {
+        const argTypes = args.map((a) => typeof a).join(', ')
+        const msg = `[KEA] Logic "${logic.pathString}", selector "${key}" has incorrect input: [${argTypes}].`
+        throw new Error(msg)
+      }
+      builtSelectors[key] = createSelector(args, func, { memoizeOptions })
+
+      addSelectorAndValue(logic, key, (state = getStoreState(), props = logic.props) =>
+        builtSelectors[key](state, props),
+      )
+
+      if (!logic.values.hasOwnProperty(key)) {
+        Object.defineProperty(logic.values, key, {
+          get: function () {
+            return logic.selectors[key](getStoreState(), logic.props)
+          },
+          enumerable: true,
+        })
+      }
+    }
+  }
+}
+
+export function addSelectorAndValue<L extends Logic = Logic>(logic: L, key: string, selector: Selector): void {
+  logic.selectors[key] = selector
+  if (!logic.values.hasOwnProperty(key)) {
+    Object.defineProperty(logic.values, key, {
+      get: function () {
+        return logic.selectors[key](getStoreState(), logic.props)
+      },
+      enumerable: true,
+    })
+  }
+}
+===== src/core/reducers.ts =====
+/**
+  Logic builder:
+
+  reducers({
+    duckId: [10, {
+      [actions.setDuckId]: (_, { duckId }) => duckId
+    }]
+  })
+
+  This builder:
+  - sets a default for the value if not already set
+  - for each key, adds to the logic a reducer, a selector and a value
+*/
+import { Logic, LogicBuilder, PathType, ReducerDefinitions } from '../types'
+import type { AnyAction } from 'redux'
+import { combineKeaReducers } from '../kea/reducer'
+import { getStoreState } from '../kea/context'
+import { createSelector } from 'reselect'
+import { getContextDefaults } from './defaults'
+import { addSelectorAndValue } from './selectors'
+
+export function rootReducer<L extends Logic = Logic>(): LogicBuilder<L> {
+  return (logic) => {
+    logic.reducer = (state, action, fullState) => combineKeaReducers(logic.reducers)(state, action, fullState)
+    if (!logic.selector) {
+      rootSelector()(logic)
+    }
+  }
+}
+export function rootSelector<L extends Logic = Logic>(): LogicBuilder<L> {
+  return (logic) => {
+    logic.selector = (state = getStoreState()) => pathSelector(logic.path, state)
+  }
+}
+
+export function reducers<L extends Logic = Logic>(
+  input: ReducerDefinitions<L> | ((logic: L) => ReducerDefinitions<L>),
+): LogicBuilder<L> {
+  return (logic) => {
+    const reducers = typeof input === 'function' ? input(logic) : input
+
+    if (!logic.reducer) {
+      rootReducer()(logic)
+    }
+    if (!logic.selector) {
+      rootSelector()(logic)
+    }
+    const contextDefaults = getContextDefaults(logic)
+
+    for (const [key, object] of Object.entries(reducers)) {
+      let initialValue: any
+      let reducerOptions: Record<string, any> | undefined
+      let reducer
+
+      if (Array.isArray(object)) {
+        // s = [ value, reducer ]
+        initialValue = object[0] ?? null
+        reducer = object[Math.max(1, object.length - 1)] ?? {}
+        if (object.length === 3) {
+          reducerOptions = object[1]
+        }
+      } else if (typeof object === 'object') {
+        initialValue = null
+        reducer = object
+      } else {
+        throw new Error(`[KEA] Logic "${logic.pathString}" reducer "${key}" is set to unsupported value`)
+      }
+
+      if (reducerOptions) {
+        logic.reducerOptions[key] = { ...(logic.reducerOptions[key] ?? {}), ...reducerOptions }
+      }
+
+      // provide a default value if none previously provided
+      if (typeof logic.defaults[key] === 'undefined') {
+        if (contextDefaults && typeof contextDefaults[key] !== 'undefined') {
+          logic.defaults[key] = contextDefaults[key]
+        } else if (typeof logic.defaults['*'] === 'function') {
+          // there is a root default selector. use it and try to get the key, fallback to initialValue
+          logic.defaults[key] = (state: any, props: any) => {
+            const v = logic.defaults['*'](state, props)[key]
+            return typeof v === 'undefined' ? initialValue : typeof v === 'function' ? v(state, props) : v
+          }
+        } else {
+          logic.defaults[key] = initialValue
+        }
+      }
+
+      // cache the reducer keys so we can merge them when new reducer({}) calls are added on top
+      logic.cache.reducers ??= {}
+      logic.cache.reducers[key] ??= {}
+      const mapping = logic.cache.reducers[key]
+      for (const key of Object.keys(reducer ?? {})) {
+        const mappingKey = logic.actions[key] ? logic.actions[key].toString() : key
+        mapping[mappingKey] = reducer[key]
+      }
+
+      if (typeof mapping['undefined'] !== 'undefined' && typeof logic.actions['undefined'] === 'undefined') {
+        throw new Error(
+          `[KEA] Logic "${
+            logic.pathString
+          }" reducer "${key}" is waiting for an action that is undefined: [${Object.keys(mapping).join(', ')}]`,
+        )
+      }
+
+      // first time adding a reducer, but already a selector (having reducer + selector both is ok)
+      if (!logic.reducers[key] && logic.selectors[key]) {
+        throw new Error(
+          `[KEA] Logic "${logic.pathString}" can't add reducer "${key}" because a selector with the same name exists.`,
+        )
+      }
+
+      // create reducer for mapping
+      if (Object.keys(mapping).length === 0) {
+        logic.reducers[key] = () => logic.defaults[key]
+      } else {
+        logic.reducers[key] = (state: any, action: AnyAction, fullState: any) => {
+          if (typeof state === 'undefined') {
+            state = getDefaultState(logic.defaults[key], fullState, key, logic)
+          }
+
+          if (mapping[action.type]) {
+            return mapping[action.type](state, action.payload, action.meta)
+          } else if (logic.actionKeys[action.type] && mapping[logic.actionKeys[action.type]]) {
+            return mapping[logic.actionKeys[action.type]](state, action.payload, action.meta)
+          } else {
+            return state
+          }
+        }
+      }
+
+      // create selector for reducer
+      if (!logic.selectors[key]) {
+        addSelectorAndValue(
+          logic,
+          key,
+          createSelector(logic.selector!, (state) => state[key]),
+        )
+      }
+    }
+  }
+}
+
+function getDefaultState(
+  defaultValue: any | ((state: any, props: any) => any),
+  fullState: any,
+  key: any,
+  logic: Logic,
+) {
+  if (typeof defaultValue === 'function') {
+    if (fullState) {
+      return defaultValue(fullState, logic.props)
+    } else {
+      console.error(`[KEA] Store not initialized and can't get default value of "${key}" in "${logic.pathString}"`)
+      return undefined
+    }
+  }
+  return defaultValue
+}
+
+// input: ['scenes', 'something', 'other'], state
+// output: state.scenes.something.other
+function pathSelector(path: PathType, state: any) {
+  return [state].concat(path).reduce((v, a) => {
+    if (a in v) {
+      return v[a]
+    }
+    throw new Error(`[KEA] Can not find path "${path.join('.')}" in the store.`)
+  })
+}
+===== src/core/defaults.ts =====
+import { BuiltLogic, Logic, LogicBuilder } from '../types'
+import { getContext } from '../kea/context'
+
+export function defaults<L extends Logic = Logic>(
+  input:
+    | ((logic: L) => (state: any, props: L['props']) => Partial<{ [T in keyof L['values']]: L['values'][T] }>)
+    | ((logic: L) => Partial<{ [T in keyof L['values']]: L['values'][T] }>)
+    | Partial<{ [T in keyof L['values']]: L['values'][T] }>,
+): LogicBuilder<L> {
+  return (logic) => {
+    const defaults = typeof input === 'function' ? input(logic) : input
+
+    if (typeof defaults === 'function') {
+      logic.defaults['*'] = defaults
+    } else if (typeof defaults === 'object') {
+      const contextDefaults = getContextDefaults(logic)
+      for (const [key, value] of Object.entries(defaults)) {
+        logic.defaults[key] =
+          contextDefaults && typeof contextDefaults[key] !== 'undefined' ? contextDefaults[key] : value
+      }
+    } else {
+      throw new Error(`[KEA] Unknown defaults of type "${typeof defaults}" for logic "${logic.pathString}"`)
+    }
+  }
+}
+
+export function getContextDefaults(logic: BuiltLogic): Record<string, any> | void {
+  let { reducerDefaults } = getContext()
+  if (reducerDefaults && !('_keaAutomaticPath' in logic.path)) {
+    if (getContext().options.flatDefaults) {
+      if (reducerDefaults[logic.pathString]) {
+        return reducerDefaults[logic.pathString]
+      }
+    } else {
+      for (const part of logic.path) {
+        reducerDefaults = reducerDefaults[part.toString()]
+        if (typeof reducerDefaults !== 'object') {
+          return
+        }
+      }
+      return reducerDefaults
+    }
+  }
+}
+===== src/core/events.ts =====
+import { EventDefinitions, Logic, LogicBuilder } from '../types'
+
+export function events<L extends Logic = Logic>(
+  input: EventDefinitions<L> | ((logic: L) => EventDefinitions<L>),
+): LogicBuilder<L> {
+  return (logic) => {
+    const events = typeof input === 'function' ? input(logic) : input
+
+    for (const key of Object.keys(events) as (keyof typeof events)[]) {
+      const event = events[key]
+      const newEvent = Array.isArray(event)
+        ? (props: any, oldProps: any) => event.forEach((e: any) => e(props, oldProps))
+        : event
+
+      if (logic.events[key]) {
+        const oldEvent = logic.events[key]
+        logic.events[key] = ((props: any, oldProps: any) => {
+          oldEvent?.(props, oldProps)
+          newEvent?.(props, oldProps)
+        }) as any
+      } else if (newEvent) {
+        logic.events[key] = newEvent as any
+      }
+    }
+  }
+}
+
+export function afterMount<L extends Logic = Logic>(input: (logic: L) => void): LogicBuilder<L> {
+  return events((logic) => ({ afterMount: () => input(logic) }))
+}
+
+export function beforeUnmount<L extends Logic = Logic>(input: (logic: L) => void): LogicBuilder<L> {
+  return events((logic) => ({ beforeUnmount: () => input(logic) }))
+}
+
+export function propsChanged<L extends Logic = Logic>(
+  input: (logic: L, oldProps: L['props']) => void,
+): LogicBuilder<L> {
+  return events((logic) => ({ propsChanged: (props, oldProps) => input(logic, oldProps) }))
+}

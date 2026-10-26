@@ -1,0 +1,1 @@
+cd /app && for cmd in enable-safe-import disable-safe-import add-import-invariant remove-import-invariant list-import-invariants validate-import-invariants; do echo "===== $cmd ====="; PYTHONPATH=/app python3 -m sqlite_utils "$cmd" --help 2>&1; echo; done

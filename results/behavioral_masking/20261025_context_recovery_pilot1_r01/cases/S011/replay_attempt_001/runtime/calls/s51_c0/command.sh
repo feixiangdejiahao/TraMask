@@ -1,0 +1,1 @@
+cd /app && sed -n '1040,1070p' src/container.ts; echo '---RESOLVER OPTIONS---'; sed -n '76,100p' src/resolvers.ts

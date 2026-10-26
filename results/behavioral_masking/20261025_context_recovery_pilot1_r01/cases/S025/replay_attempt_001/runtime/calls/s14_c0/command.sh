@@ -1,0 +1,1 @@
+cat -n packages/prompts/test/test-utils.ts && echo "=====CORE PACKAGE=====" && cat packages/core/package.json && echo "=====PROMPTS PACKAGE=====" && cat packages/prompts/package.json && echo "=====COMMON=====" && cat -n packages/prompts/src/common.ts

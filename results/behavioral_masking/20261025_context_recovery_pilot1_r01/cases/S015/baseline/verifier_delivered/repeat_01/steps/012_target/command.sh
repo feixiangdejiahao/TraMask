@@ -1,0 +1,1 @@
+cd /app && python -m pytest tests/functional/test_incremental_cli.py::TestWarmCacheCLI::test_warm_cache_does_not_report_issues -q

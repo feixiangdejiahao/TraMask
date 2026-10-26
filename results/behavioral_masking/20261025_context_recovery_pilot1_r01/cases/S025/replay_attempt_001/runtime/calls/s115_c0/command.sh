@@ -1,0 +1,1 @@
+cd /app && sed -n '295,340p' packages/core/src/prompts/autocomplete.ts && echo "===REPRO===" && node /tmp/async_repro.mjs

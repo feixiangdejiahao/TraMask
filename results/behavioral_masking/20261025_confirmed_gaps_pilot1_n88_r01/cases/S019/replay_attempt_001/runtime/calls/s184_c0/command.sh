@@ -1,0 +1,1 @@
+cd /app && rm -f .tmp-final.ts && npx tsc --noEmit 2>&1 | head -5; echo "TSC: $?" && npx prettier --check $(git diff --name-only -- '*.ts') $(git ls-files --others --exclude-standard -- '*.ts' | grep -v node_modules) 2>&1 | tail -3

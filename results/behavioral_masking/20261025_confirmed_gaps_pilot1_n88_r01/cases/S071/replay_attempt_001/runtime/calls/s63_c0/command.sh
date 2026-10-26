@@ -1,0 +1,1 @@
+cd /app && cat .gitignore && echo "=====" && npm run build >/dev/null 2>&1 && npx vitest run 2>&1 | tail -12

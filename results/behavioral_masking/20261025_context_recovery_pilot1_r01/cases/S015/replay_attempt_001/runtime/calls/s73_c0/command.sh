@@ -1,0 +1,1 @@
+cd /app && python -m bandit --help 2>&1 | grep -E "incremental|cache|warm|force-rescan|prune|clear|export|import|list-cached|stats" | head -30

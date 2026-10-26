@@ -1,0 +1,1 @@
+cd /app/libs/core && grep -n "class RunnableWithFallbacks\|class RunnableEach\|is_lc_serializable\|get_lc_namespace" langchain_core/runnables/fallbacks.py langchain_core/runnables/base.py | head -40

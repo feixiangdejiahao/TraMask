@@ -1,0 +1,1 @@
+cd /app && pnpm exec biome check --write packages/core/src/prompts/autocomplete.ts packages/core/src/prompts/prompt.ts packages/prompts/src/autocomplete.ts packages/core/test/prompts/autocomplete.test.ts packages/prompts/test/autocomplete.test.ts 2>&1 | tail -30

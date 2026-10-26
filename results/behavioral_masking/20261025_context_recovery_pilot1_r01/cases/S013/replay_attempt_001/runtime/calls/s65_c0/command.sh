@@ -1,0 +1,1 @@
+cd /app && npx jest src/__tests__/container.initialize.test.ts 2>&1 | tail -25

@@ -1,0 +1,1 @@
+head -80 docs/cli-reference.rst && echo "=== cli.rst ===" && head -60 docs/cli.rst && echo "=== index ===" && head -80 docs/index.rst

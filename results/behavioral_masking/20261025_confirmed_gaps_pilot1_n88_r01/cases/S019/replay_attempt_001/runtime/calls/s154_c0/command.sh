@@ -1,0 +1,1 @@
+cd /app && npx eslint $(git diff --name-only -- '*.ts') $(git ls-files --others --exclude-standard -- '*.ts' | grep -v node_modules) 2>&1 | head -40

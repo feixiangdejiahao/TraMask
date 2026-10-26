@@ -1,0 +1,1 @@
+cat package.json && cat pnpm-workspace.yaml && cat AGENTS.md

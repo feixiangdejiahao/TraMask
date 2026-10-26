@@ -1,0 +1,1 @@
+cd /app && git diff aiomonitor/monitor.py | sed -n '100,230p'

@@ -1,0 +1,1 @@
+cd /app/packages/prompts && npx vitest run test/path.test.ts 2>&1 | sed -n '1,120p'

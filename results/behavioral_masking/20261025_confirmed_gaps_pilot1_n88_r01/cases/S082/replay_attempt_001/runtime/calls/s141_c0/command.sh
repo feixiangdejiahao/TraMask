@@ -1,0 +1,1 @@
+cd /app && node testem.js ci --help 2>&1 | grep -A2 bail && echo '---' && node testem.js ci --bail_on_test_failure 3 --no-single-run 2>&1 | head -3 || true

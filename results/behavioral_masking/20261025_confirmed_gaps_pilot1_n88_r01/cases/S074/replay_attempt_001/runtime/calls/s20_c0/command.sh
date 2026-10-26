@@ -1,0 +1,1 @@
+cd /app && cat instructions.go && grep -n "OpImmutable\|OpSetModule\|OpMap\|module" vm.go

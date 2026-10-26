@@ -1,0 +1,1 @@
+cd /app && wc -l pwnlib/tubes/mux.py && grep -n "print\|DBG\|debug" pwnlib/tubes/mux.py | head

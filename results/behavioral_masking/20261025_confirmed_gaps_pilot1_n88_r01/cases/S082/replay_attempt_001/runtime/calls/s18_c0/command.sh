@@ -1,0 +1,1 @@
+cd /app && sed -n '480,620p' lib/config.js

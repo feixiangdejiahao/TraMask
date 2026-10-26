@@ -1,0 +1,1 @@
+cd /app/libs/core && timeout 300 python -m pytest tests/unit_tests/runnables/ -q 2>&1 | tail -5

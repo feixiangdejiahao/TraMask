@@ -1,1 +1,0 @@
-../experiments/related_work/research/stars_abstraction_review.md

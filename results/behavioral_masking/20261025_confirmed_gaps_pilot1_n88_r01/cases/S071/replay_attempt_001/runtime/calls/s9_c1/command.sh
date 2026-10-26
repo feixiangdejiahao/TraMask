@@ -1,0 +1,1 @@
+cd /app && grep -rn "allowErrorProps\|errorStack\|stackFrames\|registerErrorStackProcessor\|processStack\|sanitizeMessage" src docs README.md 2>/dev/null | head -80

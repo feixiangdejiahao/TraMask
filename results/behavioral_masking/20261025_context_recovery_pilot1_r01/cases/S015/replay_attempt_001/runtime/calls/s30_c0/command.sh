@@ -1,0 +1,257 @@
+cd /app && python - <<'PY'
+path = 'bandit/core/manager.py'
+src = open(path).read()
+
+marker = "def _get_files_from_dir("
+idx = src.index(marker)
+insert = '''    def _prepare_cache(self, cache, force_rescan):
+        """Decide which files to scan and load valid cached results.
+
+        :param cache: The :class:`BanditCache` to consult
+        :param force_rescan: If True, ignore cached results for every file
+        :return: A tuple of ``(files_to_scan, cached_scores)``
+        """
+        files_to_scan = []
+        cached_scores = {}
+        path_to_fname = {}
+        fname_to_path = {}
+
+        for fname in self.files_list:
+            path = os.path.abspath(fname)
+            path_to_fname[path] = fname
+            fname_to_path[fname] = path
+
+        statuses = {}
+        for fname in self.files_list:
+            path = fname_to_path[fname]
+            if fname in ("-", "<stdin>"):
+                statuses[path] = "not_cached"
+                continue
+            if force_rescan:
+                statuses[path] = "not_cached"
+                continue
+            entry = cache.get(path)
+            if entry is None:
+                statuses[path] = "not_cached"
+                continue
+            if entry.get("cache_key") != cache.cache_key:
+                statuses[path] = "config_changed"
+                continue
+            if self._cache_entry_expired(entry, cache.expiry_days):
+                statuses[path] = "expired"
+                continue
+            if not self._file_unchanged(path, entry):
+                statuses[path] = "file_changed"
+                continue
+            statuses[path] = "valid"
+
+        # Build a reverse dependency graph and propagate invalidation through
+        # it.  A visited set makes circular imports safe.
+        dependents = collections.defaultdict(list)
+        for entry_path, entry in cache.entries.items():
+            for dep in entry.get("dependencies") or []:
+                dependents[dep].append(entry_path)
+
+        invalid_paths = set()
+
+        def _invalidate(path):
+            if path in invalid_paths:
+                return
+            invalid_paths.add(path)
+            for dependent in dependents.get(path, []):
+                _invalidate(dependent)
+
+        for path, status in statuses.items():
+            if status != "valid":
+                _invalidate(path)
+
+        paths_to_remove = []
+        for fname in self.files_list:
+            path = fname_to_path[fname]
+            if fname in ("-", "<stdin>"):
+                files_to_scan.append(fname)
+                self._record_cache_miss("not_cached")
+                continue
+            status = statuses[path]
+            if status == "valid" and path not in invalid_paths:
+                entry = cache.get(path)
+                if entry.get("skipped"):
+                    # Restore the skipped status but keep the file out of the
+                    # active file list, matching non-incremental behavior.
+                    self.skipped.append(
+                        (fname, entry.get("skip_reason") or "cached skipped")
+                    )
+                    self.files_cached.append(fname)
+                    self.cache_hits += 1
+                    paths_to_remove.append(fname)
+                else:
+                    self._load_cached_file(fname, path, entry, cached_scores)
+            else:
+                reason = status if status != "valid" else "file_changed"
+                files_to_scan.append(fname)
+                self._record_cache_miss(reason)
+
+        for fname in paths_to_remove:
+            self.files_list.remove(fname)
+
+        self.cache_total_files = len(self.files_list) + len(paths_to_remove)
+        return files_to_scan, cached_scores
+
+    @staticmethod
+    def _cache_entry_expired(entry, expiry_days):
+        """Return True if a cache entry is older than ``expiry_days``.
+
+        A value of ``0`` expires every entry.
+        """
+        if expiry_days == 0:
+            return True
+        cached_at = entry.get("cached_at", 0)
+        return time.time() - cached_at > expiry_days * 86400
+
+    @staticmethod
+    def _file_unchanged(path, entry):
+        """Return True if the file's current hash matches the entry."""
+        try:
+            return b_cache.file_hash(path) == entry.get("file_hash")
+        except OSError:
+            return False
+
+    def _record_cache_miss(self, reason):
+        """Record a cache miss and its invalidation reason."""
+        self.cache_misses += 1
+        if reason in self.invalidation_counts:
+            self.invalidation_counts[reason] += 1
+        else:
+            self.invalidation_counts["not_cached"] += 1
+        self.invalidation_reasons[reason] = (
+            self.invalidation_reasons.get(reason, 0) + 1
+        )
+
+    def _load_cached_file(self, fname, path, entry, cached_scores):
+        """Load results for a file from the cache."""
+        self.files_cached.append(fname)
+        self.cache_hits += 1
+
+        issue_dicts = entry.get("issues") or []
+        for issue_dict in issue_dicts:
+            try:
+                self.results.append(issue.issue_from_dict(issue_dict))
+            except Exception:
+                LOG.debug(
+                    "Discarding invalid cached issue for %s", fname
+                )
+
+        metrics_data = entry.get("metrics")
+        if isinstance(metrics_data, dict):
+            self.metrics.data[fname] = metrics_data
+
+        cached_scores[fname] = self._score_from_issues(issue_dicts)
+
+    @staticmethod
+    def _empty_score():
+        """Return an all-zero score dict."""
+        return {
+            "SEVERITY": [0] * len(b_constants.RANKING),
+            "CONFIDENCE": [0] * len(b_constants.RANKING),
+        }
+
+    @staticmethod
+    def _score_from_issues(issue_dicts):
+        """Reconstruct a score dict from cached issue dictionaries."""
+        score = {
+            "SEVERITY": [0] * len(b_constants.RANKING),
+            "CONFIDENCE": [0] * len(b_constants.RANKING),
+        }
+        for idict in issue_dicts:
+            try:
+                sev = idict["issue_severity"]
+                conf = idict["issue_confidence"]
+                sev_idx = b_constants.RANKING.index(sev)
+                conf_idx = b_constants.RANKING.index(conf)
+                score["SEVERITY"][sev_idx] += b_constants.RANKING_VALUES[sev]
+                score["CONFIDENCE"][conf_idx] += b_constants.RANKING_VALUES[conf]
+            except (KeyError, ValueError):
+                continue
+        return score
+
+    def _store_cache_entries(self, cache, scan_cache_data):
+        """Store results for files that were scanned during this run."""
+        issues_by_file = collections.defaultdict(list)
+        for res in self.results:
+            issues_by_file[res.fname].append(res)
+
+        known_paths = {os.path.abspath(f) for f in self.files_list}
+        known_paths.update(cache.entries.keys())
+
+        for fname, info in scan_cache_data.items():
+            if fname == "<stdin>":
+                continue
+            path = os.path.abspath(fname)
+            try:
+                with open(fname, "rb") as fdata:
+                    data = fdata.read()
+            except OSError:
+                continue
+
+            deps = self._resolve_import_dependencies(fname, data, known_paths)
+            try:
+                mtime = os.path.getmtime(fname)
+            except OSError:
+                mtime = time.time()
+
+            entry = {
+                "path": path,
+                "cache_key": cache.cache_key,
+                "file_hash": b_cache.hash_bytes(data),
+                "file_size": len(data),
+                "mtime": mtime,
+                "cached_at": time.time(),
+                "dependencies": sorted(deps),
+                "skipped": bool(info.get("skipped")),
+                "skip_reason": info.get("skip_reason"),
+                "issues": [
+                    i.as_dict(with_code=True)
+                    for i in issues_by_file.get(fname, [])
+                ],
+                "metrics": self.metrics.data.get(fname, {}),
+            }
+            cache.store(path, entry)
+
+    def _resolve_import_dependencies(self, fname, data, known_paths):
+        """Resolve a scanned file's imports to cached file paths."""
+        imports = _get_imports_from_source(data)
+        deps = set()
+        for module_name in imports:
+            rel = module_name.replace(".", "/")
+            for known in known_paths:
+                if known.endswith("/" + rel + ".py") or known.endswith(
+                    "/" + rel + "/__init__.py"
+                ):
+                    deps.add(known)
+                    break
+        return deps
+
+
+def _get_imports_from_source(data):
+    """Return the set of module names imported by the given source bytes."""
+    imports = set()
+    try:
+        tree = ast.parse(data)
+    except (SyntaxError, ValueError):
+        return imports
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imports.add(node.module)
+    return imports
+
+
+'''
+src = src[:idx] + insert + src[idx:]
+open(path, 'w').write(src)
+PY
+python -m py_compile bandit/core/manager.py && echo COMPILED

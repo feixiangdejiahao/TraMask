@@ -1,0 +1,1 @@
+cd /app && cat backend/pkg/scheduler/drift_detection_job.go && echo "=====HANDLER=====" && cat backend/internal/huma/handlers/compliance.go

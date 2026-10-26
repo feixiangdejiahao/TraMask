@@ -1,0 +1,1 @@
+sed -n '50,110p' /app/skills/koota/references/queries.md && echo '---relations---' && sed -n '1,160p' /app/skills/koota/references/relations.md

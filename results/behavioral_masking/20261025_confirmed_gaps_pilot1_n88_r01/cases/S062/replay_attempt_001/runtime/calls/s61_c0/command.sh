@@ -1,0 +1,1 @@
+cd /app && git show main:pwnlib/tubes/tube.py > /tmp/orig_tube.py && timeout 120 python -m doctest /tmp/orig_tube.py 2>&1 | tail -8

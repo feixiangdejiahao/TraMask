@@ -1,0 +1,1 @@
+cd /app && grep -n "    def __str__\|    def replace\|    def _iter" src/dateutil/rrule.py | head

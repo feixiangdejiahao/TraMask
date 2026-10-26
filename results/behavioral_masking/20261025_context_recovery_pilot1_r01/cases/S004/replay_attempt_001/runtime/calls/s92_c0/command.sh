@@ -1,0 +1,1 @@
+cd /app && find docs -type f | sort | head -50

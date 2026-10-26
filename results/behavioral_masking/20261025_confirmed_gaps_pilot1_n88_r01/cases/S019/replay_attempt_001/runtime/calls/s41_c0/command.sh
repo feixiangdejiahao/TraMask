@@ -1,0 +1,1 @@
+cd /app && cat src/schema/types/validValue.type.test.ts | head -120 && echo "===SCHEMA TYPE TEST===" && ls src/schema/map/*.test.ts && head -80 src/schema/map/*.test.ts 2>/dev/null | head -120

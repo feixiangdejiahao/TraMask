@@ -1,0 +1,176 @@
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: maxWorkers }, () => worker()),
+    )
+
+    if (firstError !== null) {
+      throw firstError
+    }
+  }
+
+  /**
+   * Resolves and initializes a single service, recording its metrics.
+   */
+  async function initializeService(
+    name: string | symbol,
+    resolver: Resolver<any>,
+    metrics: Record<string, ServiceMetrics>,
+    levelIndex: number,
+  ): Promise<void> {
+    const startTime = performance.now()
+
+    // Mark as initialized before resolving so the resolve-not-initialized
+    // guard does not reject the service currently being initialized.
+    initializedRegistrations.add(name)
+
+    let value
+    try {
+      value = resolve(name)
+      const initializer = getInitializer(resolver)
+      if (initializer) {
+        value = await initializer(value)
+      }
+
+      updateCacheEntry(name, resolver, value)
+      initializedServices.push({ name, resolver, value })
+      metrics[name.toString()] = {
+        duration: performance.now() - startTime,
+        level: levelIndex,
+      }
+    } catch (err) {
+      initializedRegistrations.delete(name)
+      throw new AwilixInitializationError(
+        `Failed to initialize '${name.toString()}': ${getErrorMessage(err)}`,
+        err,
+      )
+    }
+  }
+
+  /**
+   * Updates the cached value after an initializer returns a replacement.
+   */
+  function updateCacheEntry(
+    name: string | symbol,
+    resolver: Resolver<any>,
+    value: any,
+  ): void {
+    const lifetime = resolver.lifetime || Lifetime.TRANSIENT
+    if (lifetime === Lifetime.SINGLETON) {
+      const entry = rootContainer.cache.get(name)
+      if (entry) {
+        entry.value = value
+      }
+    } else if (lifetime === Lifetime.SCOPED) {
+      const entry = container.cache.get(name)
+      if (entry) {
+        entry.value = value
+      }
+    }
+  }
+
+  /**
+   * Rolls back a failed initialization by disposing all successfully
+   * initialized services in reverse order. Disposer errors are swallowed so
+   * they never override the original initialization error.
+   */
+  async function rollback(): Promise<void> {
+    const services = initializedServices.slice().reverse()
+    for (const { name, resolver, value } of services) {
+      const disposable = resolver as DisposableResolver<any>
+      if (disposable.dispose) {
+        try {
+          await disposable.dispose(value)
+        } catch {
+          // Swallow disposer errors during rollback.
+        }
+      }
+      rootContainer.cache.delete(name)
+      container.cache.delete(name)
+    }
+
+    initializedServices.length = 0
+    initializedRegistrations.clear()
+  }
+
+  /**
+   * Builds the dependency levels for all registrations that have an
+   * initializer. Level 0 contains services with no dependencies on other
+   * initializable services; every level N depends only on levels < N.
+   *
+   * Throws AwilixResolutionError if a cycle is detected.
+   */
+  function buildInitializationLevels(): Array<Array<string | symbol>> {
+    const names = Object.keys(registrations).filter(
+      (name) => getInitializer(registrations[name]),
+    )
+
+    if (names.length === 0) {
+      return []
+    }
+
+    const nameSet = new Set<string | symbol>(names)
+    const graph = new Map<string | symbol, Set<string | symbol>>()
+
+    for (const name of names) {
+      const resolver = registrations[name]
+      const edges = getDependencies(resolver).filter((dependency) =>
+        nameSet.has(dependency),
+      )
+      graph.set(name, new Set(edges))
+    }
+
+    const inDegree = new Map<string | symbol, number>()
+    for (const [name, deps] of graph) {
+      inDegree.set(name, deps.size)
+    }
+
+    const levels: Array<Array<string | symbol>> = []
+    let current: Array<string | symbol> = names.filter(
+      (name) => (inDegree.get(name) ?? 0) === 0,
+    )
+
+    while (current.length > 0) {
+      levels.push(current)
+      const next: Array<string | symbol> = []
+
+      for (const name of current) {
+        for (const [dependent, deps] of graph) {
+          if (deps.has(name)) {
+            const degree = (inDegree.get(dependent) ?? 0) - 1
+            inDegree.set(dependent, degree)
+            if (degree === 0) {
+              next.push(dependent)
+            }
+          }
+        }
+      }
+
+      current = next
+    }
+
+    const remaining = names.filter((name) => (inDegree.get(name) ?? 0) > 0)
+    if (remaining.length > 0) {
+      throw new AwilixResolutionError(
+        remaining[0],
+        findCyclePath(graph, remaining),
+        'Cyclic dependencies detected during initialization.',
+      )
+    }
+
+    return levels
+  }
+
+  /**
+   * Finds a cycle path among the given nodes for error reporting.
+   */
+  function findCyclePath(
+    graph: Map<string | symbol, Set<string | symbol>>,
+    remaining: Array<string | symbol>,
+  ): ResolutionStack {
+    const remainingSet = new Set<string | symbol>(remaining)
+    const visited = new Set<string | symbol>()
+    const path: Array<string | symbol> = []
+

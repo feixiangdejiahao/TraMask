@@ -1,0 +1,1 @@
+tail -20 /tmp/checkers_test.log; echo "---"; ps aux | grep 'go test' | grep -v grep | head

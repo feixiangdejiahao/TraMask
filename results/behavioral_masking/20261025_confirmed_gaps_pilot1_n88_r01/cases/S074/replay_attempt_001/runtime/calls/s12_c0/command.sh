@@ -1,0 +1,1 @@
+cd /app && git diff master v3.0.0 -- bytecode.go objects.go script.go parser/source_file.go

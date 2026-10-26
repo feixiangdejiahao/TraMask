@@ -1,0 +1,1 @@
+sed -n '150,200p' packages/core/src/prompts/prompt.ts && echo "=====PROMPTS AUTCOMP=====" && cat -n packages/prompts/src/autocomplete.ts

@@ -1,0 +1,1 @@
+find docs -type f | sort && echo "---" && grep -rn "safe-import\|safe_import\|import_invariant\|checkpoint" docs tests sqlite_utils README.md | head -50

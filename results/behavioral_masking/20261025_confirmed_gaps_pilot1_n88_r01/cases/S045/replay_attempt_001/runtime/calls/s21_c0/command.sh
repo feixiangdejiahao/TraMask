@@ -1,0 +1,1 @@
+cd /app/libs/core && grep -n "version" pyproject.toml | head -10 && python -c "import langchain_core; print(langchain_core.__version__)" 2>/dev/null || true

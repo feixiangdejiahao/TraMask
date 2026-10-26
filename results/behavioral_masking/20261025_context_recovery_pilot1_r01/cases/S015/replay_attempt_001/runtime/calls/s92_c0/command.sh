@@ -1,0 +1,1 @@
+cd /app && grep -rn "_parse_file" tests/ | grep -v pyc

@@ -1,0 +1,286 @@
+diff --git a/script.go b/script.go
+index d2023c4..9211949 100644
+--- a/script.go
++++ b/script.go
+@@ -133,12 +133,26 @@ func (s *Script) Compile() (*Compiled, error) {
+ 			return nil, fmt.Errorf("exceeding constant objects limit: %d", cnt)
+ 		}
+ 	}
+-	return &Compiled{
++	compiled := &Compiled{
+ 		globalIndexes: globalIndexes,
+ 		bytecode:      bytecode,
+ 		globals:       globals,
+ 		maxAllocs:     s.maxAllocs,
+-	}, nil
++	}
++	compiled.ctx = &functionContext{
++		bytecode:  bytecode,
++		globals:   globals,
++		maxAllocs: s.maxAllocs,
++	}
++
++	// bind any callable values provided by the user to this compiled
++	// instance so they execute against this instance's globals.
++	for idx, g := range globals {
++		if g != nil {
++			globals[idx] = bindObject(g, compiled.ctx)
++		}
++	}
++	return compiled, nil
+ }
+ 
+ // Run compiles and runs the scripts. Use returned compiled object to access
+@@ -199,6 +213,7 @@ type Compiled struct {
+ 	bytecode      *Bytecode
+ 	globals       []Object
+ 	maxAllocs     int64
++	ctx           *functionContext
+ 	lock          sync.RWMutex
+ }
+ 
+@@ -265,10 +280,19 @@ func (c *Compiled) Clone() *Compiled {
+ 		globals:       make([]Object, len(c.globals)),
+ 		maxAllocs:     c.maxAllocs,
+ 	}
+-	// copy global objects
++	clone.ctx = &functionContext{
++		bytecode:  c.bytecode,
++		globals:   clone.globals,
++		maxAllocs: c.maxAllocs,
++	}
++	// copy global objects and rebind any callable values to the clone's
++	// execution context. Captured free variables are snapshotted at clone
++	// time so the clone is fully isolated from the source instance.
+ 	for idx, g := range c.globals {
+ 		if g != nil {
+-			clone.globals[idx] = g.Copy()
++			if cp := g.Copy(); cp != nil {
++				clone.globals[idx] = bindObject(cp, clone.ctx)
++			}
+ 		}
+ 	}
+ 	return clone
+@@ -342,6 +366,10 @@ func (c *Compiled) Set(name string, value interface{}) error {
+ 	if !ok {
+ 		return fmt.Errorf("'%s' is not defined", name)
+ 	}
+-	c.globals[idx] = obj
++	// bind the value (and any callable values reachable inside arrays/maps)
++	// to this compiled instance. Callables are rebound to this instance's
++	// globals while their captured free variables are snapshotted, isolating
++	// this instance from the value's source instance.
++	c.globals[idx] = bindObject(obj, c.ctx)
+ 	return nil
+ }
+diff --git a/vm.go b/vm.go
+index 74b7742..6676297 100644
+--- a/vm.go
++++ b/vm.go
+@@ -14,24 +14,30 @@ type frame struct {
+ 	freeVars    []*ObjectPtr
+ 	ip          int
+ 	basePointer int
++	bytecode    *Bytecode
++	ctx         *functionContext
+ }
+ 
+ // VM is a virtual machine that executes the bytecode compiled by Compiler.
+ type VM struct {
+-	constants   []Object
+-	stack       [StackSize]Object
+-	sp          int
+-	globals     []Object
+-	fileSet     *parser.SourceFileSet
+-	frames      [MaxFrames]frame
+-	framesIndex int
+-	curFrame    *frame
+-	curInsts    []byte
+-	ip          int
+-	aborting    int64
+-	maxAllocs   int64
+-	allocs      int64
+-	err         error
++	constants    []Object
++	bytecode     *Bytecode
++	stack        [StackSize]Object
++	sp           int
++	globals      []Object
++	fileSet      *parser.SourceFileSet
++	frames       [MaxFrames]frame
++	framesIndex  int
++	curFrame     *frame
++	curInsts     []byte
++	ip           int
++	aborting     int64
++	maxAllocs    int64
++	allocs       int64
++	err          error
++	ctx          *functionContext
++	stopOnReturn bool
++	returnValue  Object
+ }
+ 
+ // NewVM creates a VM.
+@@ -45,6 +51,7 @@ func NewVM(
+ 	}
+ 	v := &VM{
+ 		constants:   bytecode.Constants,
++		bytecode:    bytecode,
+ 		sp:          0,
+ 		globals:     globals,
+ 		fileSet:     bytecode.FileSet,
+@@ -52,8 +59,15 @@ func NewVM(
+ 		ip:          -1,
+ 		maxAllocs:   maxAllocs,
+ 	}
++	v.ctx = &functionContext{
++		bytecode:  bytecode,
++		globals:   v.globals,
++		maxAllocs: maxAllocs,
++	}
+ 	v.frames[0].fn = bytecode.MainFunction
+ 	v.frames[0].ip = -1
++	v.frames[0].bytecode = bytecode
++	v.frames[0].ctx = v.ctx
+ 	v.curFrame = &v.frames[0]
+ 	v.curInsts = v.curFrame.fn.Instructions
+ 	return v
+@@ -78,22 +92,69 @@ func (v *VM) Run() (err error) {
+ 	atomic.StoreInt64(&v.aborting, 0)
+ 	err = v.err
+ 	if err != nil {
+-		filePos := v.fileSet.Position(
+-			v.curFrame.fn.SourcePos(v.ip - 1))
+-		err = fmt.Errorf("Runtime Error: %w\n\tat %s",
+-			err, filePos)
+-		for v.framesIndex > 1 {
+-			v.framesIndex--
+-			v.curFrame = &v.frames[v.framesIndex-1]
+-			filePos = v.fileSet.Position(
+-				v.curFrame.fn.SourcePos(v.curFrame.ip - 1))
+-			err = fmt.Errorf("%w\n\tat %s", err, filePos)
+-		}
+-		return err
++		return v.formatError(err)
+ 	}
+ 	return nil
+ }
+ 
++// runFunction runs a single compiled function with the given arguments and
++// returns its return value. It is used to support invoking compiled functions
++// from Go code (CompiledFunction.Call).
++func (v *VM) runFunction(fn *CompiledFunction, args []Object) (
++	Object, error) {
++	v.stopOnReturn = true
++	v.returnValue = UndefinedValue
++	v.frames[0].fn = fn
++	v.frames[0].freeVars = fn.Free
++	v.frames[0].ip = -1
++	v.frames[0].basePointer = 0
++	if fn.ctx != nil {
++		v.frames[0].bytecode = fn.ctx.bytecode
++		v.frames[0].ctx = fn.ctx
++	} else {
++		v.frames[0].bytecode = v.bytecode
++		v.frames[0].ctx = v.ctx
++	}
++	v.curFrame = &v.frames[0]
++	v.curInsts = fn.Instructions
++	v.framesIndex = 1
++	v.ip = -1
++	v.sp = 0
++	for i, arg := range args {
++		v.stack[i] = arg
++	}
++	v.sp = fn.NumLocals
++	v.allocs = v.maxAllocs + 1
++
++	v.run()
++	atomic.StoreInt64(&v.aborting, 0)
++	if v.err != nil {
++		return nil, v.formatError(v.err)
++	}
++	ret := v.returnValue
++	if ret == nil {
++		ret = UndefinedValue
++	}
++	return ret, nil
++}
++
++// formatError wraps a runtime error with the runtime error message and the
++// source position / call stack.
++func (v *VM) formatError(err error) error {
++	filePos := v.fileSet.Position(
++		v.curFrame.fn.SourcePos(v.ip - 1))
++	err = fmt.Errorf("Runtime Error: %w\n\tat %s",
++		err, filePos)
++	for v.framesIndex > 1 {
++		v.framesIndex--
++		v.curFrame = &v.frames[v.framesIndex-1]
++		filePos = v.fileSet.Position(
++			v.curFrame.fn.SourcePos(v.curFrame.ip - 1))
++		err = fmt.Errorf("%w\n\tat %s", err, filePos)
++	}
++	return err
++}
++
+ func (v *VM) run() {
+ 	for atomic.LoadInt64(&v.aborting) == 0 {
+ 		v.ip++
+@@ -103,7 +164,11 @@ func (v *VM) run() {
+ 			v.ip += 2
+ 			cidx := int(v.curInsts[v.ip]) | int(v.curInsts[v.ip-1])<<8
+ 
+-			v.stack[v.sp] = v.constants[cidx]
++			obj := v.curFrame.bytecode.Constants[cidx]
++			if fn, ok := obj.(*CompiledFunction); ok {
++				obj = fn.attachContext(v.curFrame.ctx)
++			}
++			v.stack[v.sp] = obj
+ 			v.sp++
+ 		case parser.OpNull:
+ 			v.stack[v.sp] = UndefinedValue
+@@ -626,6 +691,13 @@ func (v *VM) run() {
+ 				v.curFrame.fn = callee
+ 				v.curFrame.freeVars = callee.Free
+ 				v.curFrame.basePointer = v.sp - numArgs
++				if callee.ctx != nil {
++					v.curFrame.bytecode = callee.ctx.bytecode
++					v.curFrame.ctx = callee.ctx
++				} else {
++					v.curFrame.bytecode = v.bytecode
++					v.curFrame.ctx = v.ctx
++				}
+ 				v.curInsts = callee.Instructions
+ 				v.ip = -1
+ 				v.framesIndex++
+@@ -675,6 +747,11 @@ func (v *VM) run() {
+ 			} else {
+ 				retVal = UndefinedValue
+ 			}
++			if v.stopOnReturn && v.framesIndex == 1 {
++				v.returnValue = retVal
++				v.sp = 0
++				return
++			}
+ 			//v.sp--
+ 			v.framesIndex--
+ 			v.curFrame = &v.frames[v.framesIndex-1]
+@@ -748,7 +825,7 @@ func (v *VM) run() {
+ 			v.ip += 3
+ 			constIndex := int(v.curInsts[v.ip-1]) | int(v.curInsts[v.ip-2])<<8
+ 			numFree := int(v.curInsts[v.ip])
+-			fn, ok := v.constants[constIndex].(*CompiledFunction)
++			fn, ok := v.curFrame.bytecode.Constants[constIndex].(*CompiledFunction)
+ 			if !ok {
+ 				v.err = fmt.Errorf("not function: %s", fn.TypeName())
+ 				return
+@@ -772,6 +849,7 @@ func (v *VM) run() {
+ 				VarArgs:       fn.VarArgs,
+ 				SourceMap:     fn.SourceMap,
+ 				Free:          free,
++				ctx:           v.curFrame.ctx,
+ 			}
+ 			v.allocs--
+ 			if v.allocs == 0 {

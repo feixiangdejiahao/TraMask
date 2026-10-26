@@ -1,0 +1,1 @@
+cd /app && sed -n '220,420p' linter/linter.go

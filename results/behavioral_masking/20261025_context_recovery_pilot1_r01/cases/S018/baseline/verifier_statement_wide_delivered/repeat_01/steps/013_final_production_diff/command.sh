@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary b46fa3a2723635aa29cc012538df4867ac2ac006 -- bandit/cli/main.py bandit/core/manager.py bandit/core/nosec.py bandit/core/tester.py bandit/core/utils.py bandit/core/nosec_parse.py bandit/core/nosec_selector.py bandit/core/test_set.py

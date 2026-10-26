@@ -1,0 +1,1 @@
+cd /app && ls -la changes/ && cat changes/*.rst 2>/dev/null | head -30

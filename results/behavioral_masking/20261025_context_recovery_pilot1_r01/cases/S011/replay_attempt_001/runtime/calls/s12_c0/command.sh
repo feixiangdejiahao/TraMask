@@ -1,0 +1,1 @@
+sed -n '1,120p' src/__tests__/container.test.ts; echo '=== DISPOSING ==='; sed -n '1,120p' src/__tests__/container.disposing.test.ts

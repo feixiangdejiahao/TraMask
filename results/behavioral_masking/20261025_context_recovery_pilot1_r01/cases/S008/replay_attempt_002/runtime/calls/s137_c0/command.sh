@@ -1,0 +1,1 @@
+cd /app && sed -n '1,80p' backend/internal/services/drift_detection_service.go && echo "..." && sed -n '410,560p' backend/internal/services/drift_detection_service.go

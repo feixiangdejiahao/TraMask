@@ -1,0 +1,1 @@
+cd /app && grep -n "export interface Option" -A 10 packages/prompts/src/select.ts

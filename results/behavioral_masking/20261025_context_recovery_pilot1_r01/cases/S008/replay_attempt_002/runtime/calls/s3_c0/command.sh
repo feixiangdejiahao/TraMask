@@ -1,0 +1,1 @@
+cd /workspace 2>/dev/null || cd $(find / -maxdepth 2 -name go.mod -path '*backend*' 2>/dev/null | head -1 | xargs dirname 2>/dev/null); pwd && ls -la && find . -maxdepth 2 -type d | head -50

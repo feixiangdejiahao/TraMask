@@ -1,0 +1,1 @@
+cd /app && grep -n "func (o \*Int) Copy\|func (o \*String) Copy\|func (o \*Bytes) Copy\|func (o \*Map) Copy\|func (o \*ImmutableMap) Copy\|func (o \*ImmutableArray) Copy" objects.go

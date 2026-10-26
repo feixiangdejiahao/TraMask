@@ -1,0 +1,1 @@
+cd /app && cat src/entity/actions/update/updateItemParams/parseUpdateItemOptions.ts && cat src/entity/actions/update/options.ts

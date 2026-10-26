@@ -1,0 +1,1 @@
+cd /app && sed -n '95,115p' vm.go && sed -n '240,280p' vm.go && sed -n '735,775p' vm.go

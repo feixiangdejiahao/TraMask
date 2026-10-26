@@ -1,0 +1,374 @@
+cd /app && cat > src/cattrs/partial.py <<'PYEOF'
+"""Partial structuring support.
+
+This module provides :class:`PartialResult` and the machinery for
+partially structuring attrs classes, dataclasses and TypedDicts from
+incomplete input mappings.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, TypeVar
+
+from attrs import NOTHING, Factory
+
+from ._compat import adapted_fields, get_origin, has, is_typeddict
+from .errors import AttributeValidationNote, ClassValidationError, ForbiddenExtraKeysError
+from .gen.typeddicts import _adapted_fields as typeddict_adapted_fields
+from .gen.typeddicts import _required_keys
+
+if TYPE_CHECKING:
+    from .converters import BaseConverter
+
+T = TypeVar("T")
+
+__all__ = ["PartialResult", "partial_structure"]
+
+
+class PartialResult:
+    """The result of partially structuring data.
+
+    Attributes:
+        value: The partially structured value, or `None` if a value could not
+            be produced.
+        is_complete: Whether all fields were structured successfully.
+        structured_fields: A frozenset of field names successfully structured
+            from the input.
+        failed_fields: A frozenset of field names that were not structured.
+        errors: An exception describing the failures, or `None`.
+        error_map: A mapping of field names to the exception raised while
+            structuring that field.
+    """
+
+    __slots__ = (
+        "value",
+        "is_complete",
+        "structured_fields",
+        "failed_fields",
+        "errors",
+        "error_map",
+        "_converter",
+        "_type",
+        "_data",
+    )
+
+    def __init__(
+        self,
+        value: Any,
+        is_complete: bool,
+        structured_fields: frozenset[str] = frozenset(),
+        failed_fields: frozenset[str] = frozenset(),
+        errors: Exception | None = None,
+        error_map: Mapping[str, Exception] | None = None,
+        *,
+        _converter: BaseConverter | None = None,
+        _type: Any = None,
+        _data: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.value = value
+        self.is_complete = is_complete
+        self.structured_fields = frozenset(structured_fields)
+        self.failed_fields = frozenset(failed_fields)
+        self.errors = errors
+        self.error_map = dict(error_map) if error_map is not None else {}
+        self._converter = _converter
+        self._type = _type
+        self._data = _data
+
+    def refine(self, data: Mapping[str, Any]) -> PartialResult:
+        """Return a new `PartialResult`, fixing failed fields with `data`.
+
+        Fields already structured are preserved; failed fields are attempted
+        again with the new data (merged with the original data for nested
+        structures).
+        """
+        if self._converter is None or self._type is None or self._data is None:
+            raise ValueError("This PartialResult cannot be refined.")
+
+        merged = _merge_for_refine(self._converter, self._type, self._data, data, self)
+        return self._converter.partial_structure(merged, self._type)
+
+    def __repr__(self) -> str:
+        return (
+            f"PartialResult(value={self.value!r}, is_complete={self.is_complete!r}, "
+            f"structured_fields={self.structured_fields!r}, "
+            f"failed_fields={self.failed_fields!r}, errors={self.errors!r}, "
+            f"error_map={self.error_map!r})"
+        )
+
+
+def partial_structure(
+    converter: BaseConverter, obj: Mapping[str, Any], cl: type[T]
+) -> PartialResult:
+    """Partially structure `obj` as `cl`.
+
+    :param converter: The converter to use.
+    :param obj: The input mapping.
+    :param cl: The type to structure into.
+    """
+    if has(get_origin(cl) or cl):
+        return _partial_structure_attrs(converter, obj, cl)
+    if is_typeddict(get_origin(cl) or cl):
+        return _partial_structure_typeddict(converter, obj, cl)
+
+    # Not a class we know how to partially structure; fall back to regular
+    # structuring, which is atomic.
+    value = converter.structure(obj, cl)
+    return PartialResult(
+        value,
+        True,
+        _converter=converter,
+        _type=cl,
+        _data=obj if isinstance(obj, Mapping) else None,
+    )
+
+
+def _is_partial_type(t: Any) -> bool:
+    """Is this a type we partially structure recursively?"""
+    origin = get_origin(t) or t
+    return has(origin) or is_typeddict(origin)
+
+
+def _unwrap_type(t: Any) -> Any:
+    """Return the concrete class to partially structure."""
+    return get_origin(t) or t
+
+
+def _field_key(converter: BaseConverter, a: Any) -> str:
+    """The input mapping key for a field."""
+    if getattr(converter, "use_alias", False):
+        return a.alias
+    return a.name
+
+
+def _get_default(a: Any) -> Any:
+    """Return the default value for an attrs-style field."""
+    d = a.default
+    if isinstance(d, Factory):
+        return d.factory()
+    return d
+
+
+def _has_default(a: Any) -> bool:
+    return a.default is not NOTHING
+
+
+def _partial_structure_attrs(
+    converter: BaseConverter, obj: Mapping[str, Any], cl: type[T]
+) -> PartialResult:
+    attrs = adapted_fields(_unwrap_type(cl))
+    return _partial_structure_fields(
+        converter, obj, cl, attrs, required=lambda a: a.init and not _has_default(a)
+    )
+
+
+def _partial_structure_typeddict(
+    converter: BaseConverter, obj: Mapping[str, Any], cl: type[T]
+) -> PartialResult:
+    origin = _unwrap_type(cl)
+    attrs = typeddict_adapted_fields(origin)
+    req_keys = _required_keys(origin)
+    return _partial_structure_fields(
+        converter, obj, origin, attrs, required=lambda a: a.name in req_keys
+    )
+
+
+def _partial_structure_fields(
+    converter: BaseConverter,
+    obj: Mapping[str, Any],
+    cl: type,
+    attrs: list[Any],
+    *,
+    required: Any,
+) -> PartialResult:
+    structured_fields: set[str] = set()
+    failed_fields: set[str] = set()
+    error_map: dict[str, Exception] = {}
+    errors: list[Exception] = []
+    kwargs: dict[str, Any] = {}
+    missing_required = False
+
+    detailed_validation = converter.detailed_validation
+
+    for a in attrs:
+        if not a.init:
+            # Exclude init=False fields entirely.
+            continue
+
+        name = a.name
+        key = _field_key(converter, a)
+
+        if key not in obj:
+            failed_fields.add(name)
+            if required(a):
+                missing_required = True
+            continue
+
+        t = a.type
+        try:
+            if _is_partial_type(t):
+                sub = converter.partial_structure(obj[key], _unwrap_type(t))
+                if sub.is_complete:
+                    kwargs[a.alias] = sub.value
+                    structured_fields.add(name)
+                elif sub.value is not None:
+                    # Use the partial value but mark the field as failed.
+                    kwargs[a.alias] = sub.value
+                    failed_fields.add(name)
+                    if sub.errors is not None:
+                        exc = sub.errors
+                        _add_note(detailed_validation, exc, cl, name, t)
+                        error_map[name] = exc
+                        errors.append(exc)
+                    else:
+                        exc = ClassValidationError(
+                            f"While structuring {_unwrap_type(t)!r}", [], _unwrap_type(t)
+                        )
+                        _add_note(detailed_validation, exc, cl, name, t)
+                        error_map[name] = exc
+                        errors.append(exc)
+                else:
+                    # No value can be produced at all; normal field failure.
+                    failed_fields.add(name)
+                    if sub.errors is not None:
+                        exc = sub.errors
+                        _add_note(detailed_validation, exc, cl, name, t)
+                        error_map[name] = exc
+                        errors.append(exc)
+                    else:
+                        exc = ClassValidationError(
+                            f"While structuring {_unwrap_type(t)!r}", [], _unwrap_type(t)
+                        )
+                        _add_note(detailed_validation, exc, cl, name, t)
+                        error_map[name] = exc
+                        errors.append(exc)
+                    if required(a):
+                        missing_required = True
+            else:
+                value = converter.structure(obj[key], t)
+                kwargs[a.alias] = value
+                structured_fields.add(name)
+        except Exception as exc:
+            failed_fields.add(name)
+            _add_note(detailed_validation, exc, cl, name, t)
+            error_map[name] = exc
+            errors.append(exc)
+            if required(a):
+                missing_required = True
+
+    # Use defaults for failed fields that have them.
+    for a in attrs:
+        if not a.init or a.name in kwargs or a.name not in failed_fields:
+            continue
+        if _has_default(a):
+            kwargs[a.alias] = _get_default(a)
+
+    # Check for extra keys.
+    forbid_extra_keys = getattr(converter, "forbid_extra_keys", False)
+    allowed_keys = {_field_key(converter, a) for a in attrs if a.init}
+    unknown_fields = set(obj) - allowed_keys
+    if forbid_extra_keys and unknown_fields:
+        extra_exc = ForbiddenExtraKeysError("", cl, unknown_fields)
+        errors.append(extra_exc)
+
+    is_complete = not failed_fields and not (forbid_extra_keys and unknown_fields)
+
+    if missing_required:
+        value = None
+    else:
+        if is_typeddict(get_origin(cl) or cl):
+            # TypedDicts are dicts; only include structured/failed-with-value keys.
+            value = kwargs
+        else:
+            try:
+                value = cl(**kwargs)
+            except Exception as exc:
+                value = None
+                _add_note(detailed_validation, exc, cl, None, None)
+                errors.append(exc)
+
+    result_errors = _make_errors(errors, cl, detailed_validation)
+
+    return PartialResult(
+        value,
+        is_complete,
+        structured_fields,
+        failed_fields,
+        result_errors,
+        error_map,
+        _converter=converter,
+        _type=cl,
+        _data=obj,
+    )
+
+
+def _add_note(
+    detailed_validation: bool,
+    exc: Exception,
+    cl: type,
+    name: str | None,
+    t: Any,
+) -> None:
+    if detailed_validation and name is not None:
+        note = AttributeValidationNote(
+            f"Structuring class {cl.__qualname__} @ attribute {name}", name, t
+        )
+        exc.__notes__ = [*getattr(exc, "__notes__", []), note]
+
+
+def _make_errors(
+    errors: list[Exception], cl: type, detailed_validation: bool
+) -> Exception | None:
+    if not errors:
+        return None
+    if detailed_validation:
+        return ClassValidationError(f"While structuring {cl!r}", errors, cl)
+    return errors[0]
+
+
+def _merge_for_refine(
+    converter: BaseConverter,
+    cl: type,
+    old_data: Mapping[str, Any],
+    new_data: Mapping[str, Any],
+    prev: PartialResult,
+) -> dict[str, Any]:
+    """Merge new data into old data for refinement.
+
+    Fields already structured are preserved. For failed nested fields, the
+    new data is merged recursively into the nested data.
+    """
+    merged = dict(old_data)
+
+    if has(get_origin(cl) or cl):
+        attrs = adapted_fields(_unwrap_type(cl))
+    elif is_typeddict(get_origin(cl) or cl):
+        attrs = typeddict_adapted_fields(_unwrap_type(cl))
+    else:
+        attrs = []
+
+    fields_by_name = {a.name: a for a in attrs}
+
+    for name, value in new_data.items():
+        if name in prev.structured_fields:
+            # Preserve already structured fields.
+            continue
+
+        a = fields_by_name.get(name)
+        if (
+            a is not None
+            and _is_partial_type(a.type)
+            and isinstance(old_data.get(name), Mapping)
+            and isinstance(value, Mapping)
+        ):
+            sub_prev = converter.partial_structure(old_data[name], _unwrap_type(a.type))
+            merged[name] = _merge_for_refine(
+                converter, _unwrap_type(a.type), old_data[name], value, sub_prev
+            )
+        else:
+            merged[name] = value
+
+    return merged
+PYEOF
+echo "created"

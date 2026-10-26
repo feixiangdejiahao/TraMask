@@ -1,0 +1,1 @@
+cd /app && npx biome check packages/core/test/prompts/async-autocomplete.test.ts 2>&1 | sed -n '1,40p'

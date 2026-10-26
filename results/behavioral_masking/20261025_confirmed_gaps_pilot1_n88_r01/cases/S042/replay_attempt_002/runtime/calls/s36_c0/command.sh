@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec vitest run tests/query-modifiers.test.ts -t "Removed on a relation" 2>&1 | tail -40

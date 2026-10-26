@@ -1,0 +1,1 @@
+cd /app && sed -n '1,280p' lib/server/index.js

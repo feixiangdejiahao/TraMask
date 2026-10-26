@@ -1,0 +1,1 @@
+go doc go/token.IsIdentifier 2>/dev/null; grep -n "func IsIdentifier" "$(go env GOROOT)/src/go/token/token.go"; go doc go/doc/comment.Heading 2>/dev/null

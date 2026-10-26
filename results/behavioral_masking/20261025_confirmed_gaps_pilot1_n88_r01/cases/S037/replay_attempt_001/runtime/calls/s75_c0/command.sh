@@ -1,0 +1,1 @@
+cd /app && grep -n "props: any" src/core/atomic-selectors.ts

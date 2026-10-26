@@ -1,0 +1,1 @@
+cd /app && sed -i 's/  bail_on_uncaught_error: true,/  bail_on_uncaught_error: true,\n  bail_on_test_failure: false,/' lib/config.js && sed -n '520,527p' lib/config.js

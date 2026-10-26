@@ -1,0 +1,1 @@
+cd /app/libs/core && grep -n "DEBUG\|INSIDE register\|STORED\|pre barrier\|post barrier" langchain_core/runnables/coalesce.py tests/unit_tests/runnables/test_coalesce.py | head || echo "no debug remnants"

@@ -1,0 +1,1 @@
+cd /app && wc -l backend/internal/services/*.go | sort -n | tail -20 && echo "=====" && head -80 backend/internal/services/settings_service.go

@@ -1,0 +1,1 @@
+cd /app && rm -f check_bail_tmp.js check_bail_tmp2.js check_bail_tmp3.js && git status --short

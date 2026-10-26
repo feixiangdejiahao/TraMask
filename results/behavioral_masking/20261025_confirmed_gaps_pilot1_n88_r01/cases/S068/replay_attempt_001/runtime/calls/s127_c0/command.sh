@@ -1,0 +1,1 @@
+cd /app && git status --short && git branch --show-current && python3 -m pytest -q 2>&1 | tail -3

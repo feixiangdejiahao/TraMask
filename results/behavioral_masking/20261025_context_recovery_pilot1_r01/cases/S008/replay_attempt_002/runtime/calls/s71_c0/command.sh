@@ -1,0 +1,1 @@
+cd /app && sed -n '1,120p' backend/internal/huma/handlers/settings_validation_test.go

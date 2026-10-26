@@ -1,0 +1,1 @@
+cd /app && git add src/error-options.ts src/error-stack.ts src/error-sanitizer.ts src/error-class-registry.ts src/error-stack.test.ts src/index.ts src/transformer.ts && git status

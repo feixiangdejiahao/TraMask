@@ -1,0 +1,1 @@
+cd /app && sed -n '825,845p' docs/python-api.rst

@@ -1,0 +1,1 @@
+cd /app && timeout 25 npx eslint lib/utils/reporter.js lib/app.js lib/server/index.js lib/runners/*.js lib/reporters/*.js public/testem/testem_client.js public/testem/testem_connection.js public/testem/*_adapter.js testem.js 2>&1 | tail -50

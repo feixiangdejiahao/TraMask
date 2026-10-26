@@ -1,0 +1,1 @@
+cd /app && node /tmp/spec_check.js && echo "--- final test count ---" && npx jest src/__tests__/initialize.test.ts --no-coverage 2>&1 | tail -6

@@ -1,14 +1,5 @@
-# 任务与轨迹数据准备
+# 任务与轨迹数据
 
-[返回实验总览](../README.md) · [全部结果目录](../INVENTORY.md)
+[结果入口](results/)保存 DeepSWE 任务索引、原始采集数据及 replay 输入。211 条失败轨迹的原始任务材料位于 [failure_analysis](../failure_analysis/README.md)，TraMask Pilot 的具体来源和 SHA256 见各轮 `source_inventory.json` 或执行索引。
 
-- [本主题的结果入口](results/)
-- [方案与研究记录](research/)
-
-## 其他结果与材料
-
-| 类型 | 位置 |
-|---|---|
-| 历史结果或支撑材料 | [expanded_trial_dataset_20260926](../../results/benchmark_datasets/expanded_trial_dataset_20260926) |
-
-本主题与 results/ 中的同名主题对应。旧路径见 results/path_map.json。各轮结果按自己的协议和评价版本读取。历史支撑材料、准备运行和实现检查不自动计入主要 pilot 的效果。
+[统一 trial 索引](results/expanded_trial_dataset_20260926/index/trials.json) · [保留的 replay 输入](results/deepswe_replay_inputs_20261025/)

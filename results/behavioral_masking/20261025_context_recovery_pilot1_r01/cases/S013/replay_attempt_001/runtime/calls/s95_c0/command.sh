@@ -1,0 +1,1 @@
+cd /app && npx prettier --write src/errors.ts && npm test 2>&1 | tail -22 && npm run build 2>&1 | tail -3

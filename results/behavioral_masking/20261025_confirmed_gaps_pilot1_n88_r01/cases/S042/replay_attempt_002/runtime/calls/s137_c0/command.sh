@@ -1,0 +1,1 @@
+sed -n '225,245p' /app/docs/api/relations.md && echo '---readme---' && sed -n '360,378p' /app/README.md

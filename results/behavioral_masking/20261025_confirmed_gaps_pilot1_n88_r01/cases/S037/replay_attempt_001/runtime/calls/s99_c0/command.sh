@@ -1,0 +1,1 @@
+cd /app && sed -n '280,470p' src/core/atomic-selectors.ts

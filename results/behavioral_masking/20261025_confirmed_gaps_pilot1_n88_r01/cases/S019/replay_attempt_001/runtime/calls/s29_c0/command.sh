@@ -1,0 +1,1 @@
+cd /app && ls src/schema/actions && echo "===DTO===" && find src/schema/actions/dto -type f | grep -v test && echo "===JSONSCHEMA===" && find src/schema/actions/jsonSchema -type f | grep -v test

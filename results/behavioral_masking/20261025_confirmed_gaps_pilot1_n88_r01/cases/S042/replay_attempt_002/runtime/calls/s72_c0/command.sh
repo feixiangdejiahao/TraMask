@@ -1,0 +1,1 @@
+cat /app/packages/core/src/query/query-result.ts

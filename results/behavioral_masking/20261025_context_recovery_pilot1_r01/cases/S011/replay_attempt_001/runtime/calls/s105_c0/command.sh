@@ -1,0 +1,1 @@
+cd /app && npx eslint src/container.ts src/resolvers.ts src/errors.ts src/awilix.ts src/__tests__/initialize.test.ts 2>&1 | head -30; echo "ESLINT EXIT: $?"; npx prettier --check src/container.ts src/resolvers.ts src/errors.ts src/awilix.ts src/__tests__/initialize.test.ts README.md CHANGELOG.md 2>&1 | tail -10

@@ -1,0 +1,1 @@
+cd /app && git add -A && git status --short && git commit -m "feat: add per-target pair tracking to query modifiers" 2>&1 | tail -20

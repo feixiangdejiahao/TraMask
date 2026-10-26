@@ -1,0 +1,1 @@
+cd /app && node /tmp/repro2.js && node /tmp/repro.js

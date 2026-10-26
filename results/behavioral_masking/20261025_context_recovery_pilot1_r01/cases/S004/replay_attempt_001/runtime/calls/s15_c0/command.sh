@@ -1,0 +1,1 @@
+cat aiomonitor/termui/completion.py && echo '=====WEBAPP=====' && cat aiomonitor/webui/app.py && echo '=====WEBUI INIT=====' && cat aiomonitor/webui/__init__.py

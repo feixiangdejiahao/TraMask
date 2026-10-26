@@ -1,0 +1,141 @@
+    def max_channels(self):
+        return self._max_channels
+
+    @property
+    def high_water_mark(self):
+        return self._high_water_mark
+
+    @high_water_mark.setter
+    def high_water_mark(self, value):
+        self._high_water_mark = value
+
+    @property
+    def low_water_mark(self):
+        return self._low_water_mark
+
+    @low_water_mark.setter
+    def low_water_mark(self, value):
+        self._low_water_mark = value
+
+    @property
+    def closed(self):
+        return self._closed
+
+    # ------------------------------------------------------------------
+    # Channel management
+    # ------------------------------------------------------------------
+    def open_channel(self, channel_id=None, timeout=None):
+        """Open a new logical channel and wait for remote acknowledgement.
+
+        Arguments:
+            channel_id(int): Explicit channel ID, or None to auto-allocate.
+            timeout(float): Maximum time in seconds to wait for the remote
+                acknowledgement.  ``None`` waits forever.
+
+        Returns:
+            The newly created :class:`MuxChannel`.
+
+        Raises:
+            TypeError: If ``channel_id`` is not an integer.
+            ValueError: If ``channel_id`` is out of range, already in use, or
+                exceeds the multiplexer capacity.
+            TimeoutError: If the remote does not acknowledge in time.
+            EOFError: If the multiplexer is closed.
+        """
+        if self._closed:
+            raise EOFError("multiplexer is closed")
+
+        if channel_id is None:
+            channel_id = self._allocate_channel_id()
+        else:
+            if not isinstance(channel_id, int) or isinstance(channel_id, bool):
+                raise TypeError("channel_id must be an integer")
+            if channel_id < 1 or channel_id > _MAX_CHANNEL_ID:
+                raise ValueError("channel_id must be in [1, 65535]")
+            if channel_id > self._max_channels:
+                raise ValueError("channel_id exceeds max_channels")
+            with self._channels_lock:
+                if channel_id in self.channels:
+                    raise ValueError("channel_id already in use")
+                if len(self.channels) >= self._max_channels:
+                    raise ValueError("max_channels exceeded")
+
+        channel = MuxChannel(self, channel_id)
+
+        with self._channels_lock:
+            if self._closed:
+                raise EOFError("multiplexer is closed")
+            if channel_id in self.channels:
+                raise ValueError("channel_id already in use")
+            if len(self.channels) >= self._max_channels:
+                raise ValueError("max_channels exceeded")
+            self.channels[channel_id] = channel
+
+        try:
+            self._send_frame(channel_id, _MSG_OPEN)
+        except EOFError:
+            self._remove_channel(channel_id)
+            raise
+
+        if not channel._open_event.wait(self._resolve_timeout(timeout)):
+            # Clean up the failed channel and tell the remote side to forget it.
+            self._remove_channel(channel_id)
+            try:
+                self._send_frame(channel_id, _MSG_CLOSE)
+            except EOFError:
+                pass
+            raise TimeoutError("timed out waiting for channel acknowledgement")
+
+        if self._closed:
+            self._remove_channel(channel_id)
+            raise EOFError("multiplexer is closed")
+
+        if channel._open_failed:
+            self._remove_channel(channel_id)
+            raise EOFError("remote refused to open channel")
+
+        return channel
+
+    def _allocate_channel_id(self):
+        with self._channels_lock:
+            if len(self.channels) >= self._max_channels:
+                raise ValueError("max_channels exceeded")
+            start = self._next_channel_id
+            cid = start
+            for _ in range(self._max_channels):
+                if cid not in self.channels:
+                    self._next_channel_id = cid + 1
+                    if self._next_channel_id > self._max_channels:
+                        self._next_channel_id = 1
+                    return cid
+                cid += 1
+                if cid > self._max_channels:
+                    cid = 1
+                if cid == start:
+                    break
+            raise ValueError("max_channels exceeded")
+
+    def _remove_channel(self, channel_id):
+        with self._channels_lock:
+            self.channels.pop(channel_id, None)
+
+    def accept_channel(self, timeout=None):
+        """Wait for the remote side to open a channel.
+
+        Arguments:
+            timeout(float): Maximum time in seconds to wait.  ``None`` waits
+                forever.
+
+        Returns:
+            The accepted :class:`MuxChannel`, or ``None`` if the timeout
+            expired before a channel was opened.
+
+        Raises:
+            EOFError: If the multiplexer is closed.
+        """
+        timeout = self._resolve_timeout(timeout)
+        deadline = None if timeout is None else time.time() + timeout
+
+        with self._accept_cond:
+            while not self._accept_queue and not self._closed:
+                if deadline is None:

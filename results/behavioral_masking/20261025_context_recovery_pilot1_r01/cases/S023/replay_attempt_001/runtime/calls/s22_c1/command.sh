@@ -1,0 +1,1 @@
+cd /app && python -c "import sys; print(sys.version); import cattrs; print(cattrs.__file__)" && pip list 2>/dev/null | grep -i -E "attrs|pytest|hypothesis"

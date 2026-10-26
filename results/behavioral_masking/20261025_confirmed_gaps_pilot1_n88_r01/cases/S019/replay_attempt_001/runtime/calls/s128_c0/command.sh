@@ -1,0 +1,1 @@
+cd /app && tail -8 src/schema/actions/zodSchemer/formatter/utils.ts && echo "===PARSER===" && tail -8 src/schema/actions/zodSchemer/parser/utils.ts && npx tsc --noEmit 2>&1 | head -20

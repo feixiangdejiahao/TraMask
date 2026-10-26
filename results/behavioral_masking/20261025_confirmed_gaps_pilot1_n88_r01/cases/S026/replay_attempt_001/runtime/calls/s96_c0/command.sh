@@ -1,0 +1,1 @@
+cd /app && cat checkers/internal/linttest/integration.go && echo "===== _integration =====" && find checkers/testdata/_integration -maxdepth 2 -type f | head -20

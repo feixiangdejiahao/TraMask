@@ -1,0 +1,1 @@
+cd /app && ls public && ls tests/runners tests/utils tests/ui 2>/dev/null && ls public/testem

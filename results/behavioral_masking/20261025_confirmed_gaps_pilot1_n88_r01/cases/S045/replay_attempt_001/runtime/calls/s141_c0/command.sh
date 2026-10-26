@@ -1,0 +1,1 @@
+cd /app/libs/core && timeout 90 python /tmp/test_coalesce.py 2>&1 | tail -3

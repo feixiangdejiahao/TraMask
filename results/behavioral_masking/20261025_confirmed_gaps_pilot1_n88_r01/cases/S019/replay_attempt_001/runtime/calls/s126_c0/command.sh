@@ -1,0 +1,1 @@
+cd /app && npx vitest run src/schema --reporter=dot 2>&1 | tail -40

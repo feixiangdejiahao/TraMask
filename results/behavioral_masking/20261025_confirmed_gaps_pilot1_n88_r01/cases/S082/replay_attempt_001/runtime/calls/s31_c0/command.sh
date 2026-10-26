@@ -1,0 +1,1 @@
+cd /app && git fsck --full --unreachable 2>/dev/null | head -30 && git count-objects -v

@@ -1,0 +1,1 @@
+nl -ba /app/packages/core/src/query/query.ts | sed -n '130,250p'

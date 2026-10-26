@@ -1,0 +1,1 @@
+python --version && cd /app/libs/core && grep -n "requires-python" pyproject.toml

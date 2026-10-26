@@ -1,0 +1,1 @@
+nl -ba packages/core/src/world/world.ts | sed -n '100,185p' && echo '---world-types---' && cat packages/core/src/world/types.ts

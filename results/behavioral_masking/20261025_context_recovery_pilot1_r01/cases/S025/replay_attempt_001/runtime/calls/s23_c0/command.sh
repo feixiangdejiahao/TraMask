@@ -1,0 +1,1 @@
+cd packages/prompts && npx vitest run 2>&1 | tail -25

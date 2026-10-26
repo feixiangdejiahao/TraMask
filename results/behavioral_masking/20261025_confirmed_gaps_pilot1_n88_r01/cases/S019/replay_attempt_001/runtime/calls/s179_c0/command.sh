@@ -1,0 +1,1 @@
+cd /app && npx vitest run src/schema/actions/requiredIf.unit.test.ts --reporter=verbose 2>&1 | grep -A15 "FAIL\|✕"

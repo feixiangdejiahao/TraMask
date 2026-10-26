@@ -1,0 +1,1 @@
+cd /app && pnpm --filter @clack/core run build 2>&1 | tail -20 && pnpm --filter @clack/prompts run build 2>&1 | tail -10

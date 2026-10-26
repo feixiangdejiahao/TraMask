@@ -1,0 +1,1 @@
+cd /app && sed -n '55,85p' docs/config_file.md

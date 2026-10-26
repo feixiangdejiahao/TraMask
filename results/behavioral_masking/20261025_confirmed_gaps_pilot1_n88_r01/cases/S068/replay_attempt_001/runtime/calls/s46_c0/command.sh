@@ -1,0 +1,1 @@
+cd /app && python3 -m py_compile sqlite_utils/db.py && PYTHONPATH=/app python3 /tmp/repro.py

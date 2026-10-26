@@ -1,0 +1,1 @@
+find / -path /proc -prune -o -name "autocomplete*" -print 2>/dev/null | grep -v '/app/packages' | head -50

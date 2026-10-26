@@ -1,0 +1,1 @@
+cd /app && python -m black --version 2>/dev/null || echo "no black"; python -m autopep8 --version 2>/dev/null || echo "no autopep8"

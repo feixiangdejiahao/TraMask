@@ -1,0 +1,1 @@
+cd /app && python -c "from aiomonitor.monitor import Monitor, get_default_args; print(get_default_args(Monitor.__init__)['max_snapshots'])"

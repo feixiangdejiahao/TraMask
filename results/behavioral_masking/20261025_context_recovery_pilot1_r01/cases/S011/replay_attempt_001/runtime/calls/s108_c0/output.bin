@@ -1,0 +1,176 @@
+      ).then(() => container)
+    } else {
+      realLoadModules(_loadModulesDeps, globPatterns, opts)
+      return container
+    }
+  }
+
+  /**
+   * Initializes all registrations in this container that have an initializer,
+   * respecting the dependency graph by organizing services into levels.
+   *
+   * If initialization fails, all successfully initialized services are disposed
+   * in reverse order. The container is then marked as failed and cannot be
+   * re-initialized.
+   */
+  function initialize(
+    options: InitializeOptions = {},
+  ): Promise<InitializationResult> {
+    if (initializationResult) {
+      return Promise.resolve(initializationResult)
+    }
+
+    if (initializationError) {
+      return Promise.reject(
+        new AwilixInitializationError(
+          `Cannot re-initialize container after a previous initialization failed: ${getErrorMessage(
+            initializationError,
+          )}`,
+          initializationError,
+        ),
+      )
+    }
+
+    // Build the dependency graph synchronously. Graph construction failures
+    // (e.g. circular dependencies) must NOT transition the container into a
+    // failed state, so initialize() can be retried after fixing the graph.
+    let levels: Array<Array<InitializationEntry>>
+    try {
+      levels = buildInitializationLevels()
+    } catch (err) {
+      return Promise.reject(err)
+    }
+
+    if (!initializationPromise) {
+      initializationPromise = doInitialize(levels, options)
+    }
+
+    return initializationPromise
+  }
+
+  /**
+   * Returns the container that owns the registration with the given name.
+   */
+  function getOwnerContainer(
+    name: string | symbol,
+  ): AwilixContainer<any> | null {
+    if (registrations[name]) {
+      return container
+    }
+
+    for (const ancestor of familyTree.slice(1)) {
+      if ((ancestor as any)[HAS_OWN_REGISTRATION]?.(name)) {
+        return ancestor
+      }
+    }
+
+    return null
+  }
+
+  /**
+   * Marks or unmarks the given registration as initialized for the container
+   * that owns its instance. Singletons are tracked on the owning container
+   * (shared across the family tree), while scoped/transient instances are
+   * tracked on the current container.
+   */
+  function markInitialized(
+    name: string | symbol,
+    resolver: Resolver<any>,
+    initialized: boolean,
+  ): void {
+    const owner =
+      resolver.lifetime === Lifetime.SINGLETON
+        ? (getOwnerContainer(name) ?? container)
+        : container
+
+    ;(owner as any)[SET_INITIALIZED]?.(name, initialized)
+    if (initialized) {
+      initializedRegistrations.add(name)
+    } else {
+      initializedRegistrations.delete(name)
+    }
+  }
+
+  /**
+   * Returns true if the registration's instance for this container has been
+   * initialized. Singletons are considered initialized if the owning ancestor
+   * initialized them; scoped/transient instances are only considered
+   * initialized when the current container initialized them.
+   */
+  function isInitialized(
+    name: string | symbol,
+    resolver: Resolver<any>,
+  ): boolean {
+    if (resolver.lifetime === Lifetime.SINGLETON) {
+      const owner = getOwnerContainer(name)
+      return owner ? !!(owner as any)[IS_INITIALIZED]?.(name) : false
+    }
+
+    return initializedRegistrations.has(name)
+  }
+
+  /**
+   * Runs the actual initialization once the dependency levels are known.
+   */
+  async function doInitialize(
+    levels: Array<Array<InitializationEntry>>,
+    options: InitializeOptions,
+  ): Promise<InitializationResult> {
+    const startTime = now()
+    const metrics: Record<string, ServiceMetrics> = {}
+
+    try {
+      for (let level = 0; level < levels.length; level++) {
+        await initializeLevel(
+          levels[level],
+          level,
+          options.concurrency,
+          metrics,
+        )
+      }
+    } catch (err) {
+      // Roll back all already-initialized services in reverse order. Other
+      // in-flight initializers in the failing level have already completed
+      // because initializeLevel waits for all workers to settle.
+      await rollback()
+      initializationError = err
+      throw err
+    }
+
+    const result: InitializationResult = {
+      totalDuration: now() - startTime,
+      metrics,
+    }
+
+    initializationResult = result
+    return result
+  }
+
+  /**
+   * Initializes every service in a level in parallel, honoring the concurrency
+   * limit. If a service fails, no new services are started, but in-flight
+   * initializers are allowed to complete before the failure is propagated.
+   */
+  async function initializeLevel(
+    level: Array<InitializationEntry>,
+    levelIndex: number,
+    concurrency: number | undefined,
+    metrics: Record<string, ServiceMetrics>,
+  ): Promise<void> {
+    const queue = [...level]
+    const maxWorkers = Math.max(
+      1,
+      Math.min(concurrency ?? level.length, level.length),
+    )
+
+    let firstError: unknown = null
+    let stopped = false
+
+    async function worker() {
+      while (!stopped) {
+        const task = queue.shift()
+        if (!task) {
+          break
+        }
+
+        try {

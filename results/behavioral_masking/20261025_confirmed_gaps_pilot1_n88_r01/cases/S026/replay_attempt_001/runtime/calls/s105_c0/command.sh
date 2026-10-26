@@ -1,0 +1,1 @@
+cd /app && go test ./checkers/ -run 'TestCheckers/brokenDocLink/sanity' -count=1 -v 2>&1 | tail -20

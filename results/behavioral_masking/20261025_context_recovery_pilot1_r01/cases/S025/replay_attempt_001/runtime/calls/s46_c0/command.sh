@@ -1,0 +1,1 @@
+cd /app && grep -n '▊\|u258a\|u2588' packages/core/src/prompts/autocomplete.ts

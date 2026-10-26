@@ -1,0 +1,1 @@
+cd /app && cat src/schema/utils/resetLinks.ts && echo "===LIGHT===" && cat src/schema/utils/light.ts

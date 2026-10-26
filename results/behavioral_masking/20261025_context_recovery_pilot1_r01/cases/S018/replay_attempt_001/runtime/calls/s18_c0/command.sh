@@ -1,0 +1,1 @@
+cd /app && cat bandit/core/test_set.py && echo '=====EXT LOADER=====' && sed -n '1,120p' bandit/core/extension_loader.py

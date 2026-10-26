@@ -1,0 +1,1 @@
+cd /app && rm -f test_requiredif.script.ts test_check.script.ts test_default.script.ts test_update_inspect.script.ts && npx tsc --noEmit 2>&1 | head -40

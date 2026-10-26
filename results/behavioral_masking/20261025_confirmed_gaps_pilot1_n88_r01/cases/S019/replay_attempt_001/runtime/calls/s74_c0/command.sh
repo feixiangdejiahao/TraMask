@@ -1,0 +1,1 @@
+cd /app && head -12 src/schema/actions/parse/utils.ts && grep -n "formatArrayPath" src/schema/actions/parse/utils.ts

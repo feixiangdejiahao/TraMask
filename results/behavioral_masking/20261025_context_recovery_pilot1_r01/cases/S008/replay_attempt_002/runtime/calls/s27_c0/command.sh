@@ -1,0 +1,1 @@
+cd /app && sed -n '741,830p' backend/internal/services/container_service.go && echo "=====ENV LIST=====" && sed -n '256,300p' backend/internal/services/environment_service.go

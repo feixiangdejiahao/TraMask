@@ -1,0 +1,1 @@
+cd /app && sed -n '604,680p' bandit/plugins/injection_shell.py

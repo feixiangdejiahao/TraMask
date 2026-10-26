@@ -1,0 +1,1 @@
+cd /app && rm -f zz_repro_test.go zz_repro2_test.go zz_repro3_test.go zz_repro4_test.go zz_repro5_test.go && ls zz_* 2>/dev/null; echo done

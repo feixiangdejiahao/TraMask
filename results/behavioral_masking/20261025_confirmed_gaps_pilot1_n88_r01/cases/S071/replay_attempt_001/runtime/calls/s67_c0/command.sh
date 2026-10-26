@@ -1,0 +1,1 @@
+cd /app && git branch --show-current && git status --short && ls src/*.ts | sort && echo "=====" && npx vitest run 2>&1 | tail -14

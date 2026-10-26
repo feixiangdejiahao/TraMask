@@ -1,0 +1,1 @@
+cd /app && grep -n "runTests\|reporter" tests/app_tests.js | head -40

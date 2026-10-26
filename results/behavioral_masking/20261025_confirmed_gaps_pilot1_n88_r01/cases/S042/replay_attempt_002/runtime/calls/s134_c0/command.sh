@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec tsc --noEmit -p tsconfig.json 2>&1 | head -20 && pnpm exec vitest run 2>&1 | tail -40

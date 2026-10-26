@@ -1,0 +1,1 @@
+cd /app/libs/core && timeout 120 python -m pytest tests/unit_tests/runnables/test_coalesce.py tests/unit_tests/runnables/test_imports.py -q 2>&1 | grep -E "passed|failed|error" | tail -2

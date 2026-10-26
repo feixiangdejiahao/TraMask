@@ -1,0 +1,1 @@
+cd /app && find $(go env GOPATH 2>/dev/null)/pkg/mod/github.com/moby -maxdepth 3 -name "*.go" 2>/dev/null | xargs grep -ln "type Summary struct" 2>/dev/null | head -3; echo "---"; grep -rn "moby/moby" backend/go.mod

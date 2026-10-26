@@ -1,0 +1,1 @@
+sleep 15; echo "=== svc ==="; cat /tmp/f_svc.log | tail -8; echo "=== handlers ==="; cat /tmp/f_hand.log | tail -8; echo "=== job ==="; cat /tmp/f_job.log | tail -8

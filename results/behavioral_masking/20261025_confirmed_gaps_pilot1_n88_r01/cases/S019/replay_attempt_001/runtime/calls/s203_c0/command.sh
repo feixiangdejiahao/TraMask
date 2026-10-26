@@ -1,0 +1,1 @@
+cd /app && git status --short && echo "---" && git log --oneline -1 && echo "---" && npx tsc --noEmit 2>&1 | head -3; echo "TSC OK"

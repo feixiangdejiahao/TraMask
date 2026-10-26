@@ -1,0 +1,1 @@
+cd /app && grep -rn -i 'nosec' doc/ | head -40 && ls doc/source

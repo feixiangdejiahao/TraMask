@@ -1,0 +1,1 @@
+cd /app && ls dist | sort && echo "=====" && grep -n "errorStack\|ErrorStackOptions\|registerErrorStackProcessor\|errorClassRegistry" dist/index.d.ts | head -30

@@ -1,0 +1,281 @@
+   220	                forever.
+   221	
+   222	        Returns:
+   223	            The accepted :class:`MuxChannel`, or ``None`` if the timeout
+   224	            expired before a channel was opened.
+   225	
+   226	        Raises:
+   227	            EOFError: If the multiplexer is closed.
+   228	        """
+   229	        deadline = None if timeout is None else time.time() + timeout
+   230	
+   231	        with self._accept_cond:
+   232	            while not self._accept_queue and not self._closed:
+   233	                if deadline is None:
+   234	                    self._accept_cond.wait()
+   235	                else:
+   236	                    remaining = deadline - time.time()
+   237	                    if remaining <= 0:
+   238	                        return None
+   239	                    self._accept_cond.wait(remaining)
+   240	
+   241	            if self._closed:
+   242	                raise EOFError("multiplexer is closed")
+   243	
+   244	            if self._accept_queue:
+   245	                return self._accept_queue.popleft()
+   246	
+   247	            return None
+   248	
+   249	    # ------------------------------------------------------------------
+   250	    # Closing
+   251	    # ------------------------------------------------------------------
+   252	    def close(self):
+   253	        """Close the multiplexer and all channels.
+   254	
+   255	        Signals EOF to every channel, closes the underlying tube, and is
+   256	        idempotent.  Threads blocked in :meth:`accept_channel` are woken up
+   257	        with :class:`EOFError`.
+   258	        """
+   259	        with self._closed_cond:
+   260	            if self._closed:
+   261	                return
+   262	
+   263	        # Tell the peer that the entire multiplexer is closing, so that it
+   264	        # can detect the closure even if the underlying tube's EOF is delayed.
+   265	        try:
+   266	            self._send_frame(0, _MSG_MUX_CLOSE)
+   267	        except Exception:
+   268	            pass
+   269	
+   270	        with self._closed_cond:
+   271	            if self._closed:
+   272	                return
+   273	            self._closed = True
+   274	            self._closed_cond.notify_all()
+   275	
+   276	        with self._channels_lock:
+   277	            channels = list(self.channels.values())
+   278	            self.channels.clear()
+   279	
+   280	        for channel in channels:
+   281	            channel._mux_closed()
+   282	
+   283	        with self._accept_cond:
+   284	            self._accept_cond.notify_all()
+   285	
+   286	        # Wake our own reader thread and signal EOF to the peer.  A blocked
+   287	        # recv() is woken by shutting down the socket, whereas merely calling
+   288	        # close() may leave the reader thread stuck in recv().
+   289	        try:
+   290	            self._underlying.shutdown("send")
+   291	        except Exception:
+   292	            pass
+   293	        try:
+   294	            self._underlying.shutdown("recv")
+   295	        except Exception:
+   296	            pass
+   297	        try:
+   298	            self._underlying.close()
+   299	        except Exception:
+   300	            pass
+   301	
+   302	    # ------------------------------------------------------------------
+   303	    # Reader thread
+   304	    # ------------------------------------------------------------------
+   305	    def _reader_loop(self):
+   306	        try:
+   307	            while True:
+   308	                try:
+   309	                    header = self._underlying.recvn(_HDRLEN, timeout=_POLL_INTERVAL)
+   310	                except EOFError:
+   311	                    break
+   312	                if not header:
+   313	                    # recvn() timed out with no data.  Check whether the
+   314	                    # underlying tube has been closed out from under us, and
+   315	                    # if not keep polling.
+   316	                    if self._closed or self._underlying_dead():
+   317	                        break
+   318	                    continue
+   319	                if len(header) < _HDRLEN:
+   320	                    break
+   321	
+   322	                channel_id, length = struct.unpack(_HDR_FMT, header)
+   323	                while True:
+   324	                    payload = self._underlying.recvn(length, timeout=_POLL_INTERVAL)
+   325	                    if payload and len(payload) >= length:
+   326	                        break
+   327	                    if self._closed or self._underlying_dead():
+   328	                        raise EOFError("underlying tube closed while reading frame")
+   329	
+   330	                self._dispatch(channel_id, payload)
+   331	        except Exception:
+   332	            log.debug("TubeMultiplexer reader thread died", exc_info=True)
+   333	        finally:
+   334	            self._handle_underlying_eof()
+   335	
+   336	    def _underlying_dead(self):
+   337	        """Best-effort check for whether the underlying tube has been closed."""
+   338	        underlying = self._underlying
+   339	        closed = getattr(underlying, "closed", None)
+   340	        if isinstance(closed, dict):
+   341	            return bool(closed.get("recv") or closed.get("send"))
+   342	        if closed is True:
+   343	            return True
+   344	        try:
+   345	            if hasattr(underlying, "proc"):
+   346	                return not underlying.connected()
+   347	        except Exception:
+   348	            pass
+   349	        return False
+   350	
+   351	    def _dispatch(self, channel_id, payload):
+   352	        if not payload:
+   353	            return
+   354	
+   355	        msgtype = payload[0]
+   356	        body = payload[1:]
+   357	
+   358	        if msgtype == _MSG_OPEN:
+   359	            self._handle_open(channel_id)
+   360	        elif msgtype == _MSG_ACK:
+   361	            self._handle_ack(channel_id)
+   362	        elif msgtype == _MSG_NACK:
+   363	            self._handle_nack(channel_id)
+   364	        elif msgtype == _MSG_DATA:
+   365	            self._handle_data(channel_id, body)
+   366	        elif msgtype == _MSG_CLOSE:
+   367	            self._handle_close(channel_id)
+   368	        elif msgtype == _MSG_FIN:
+   369	            self._handle_fin(channel_id)
+   370	        elif msgtype == _MSG_PAUSE:
+   371	            self._handle_pause(channel_id)
+   372	        elif msgtype == _MSG_RESUME:
+   373	            self._handle_resume(channel_id)
+   374	        elif msgtype == _MSG_MUX_CLOSE:
+   375	            self._handle_underlying_eof()
+   376	        else:
+   377	            log.debug("Unknown multiplexer message type %r on channel %r",
+   378	                      msgtype, channel_id)
+   379	
+   380	    def _handle_open(self, channel_id):
+   381	        if self._closed:
+   382	            return
+   383	
+   384	        already_open = False
+   385	        with self._channels_lock:
+   386	            if channel_id in self.channels:
+   387	                # Both sides independently opened this channel.  Acknowledge
+   388	                # the peer's request using the channel we already have.
+   389	                already_open = True
+   390	            elif len(self.channels) >= self._max_channels:
+   391	                # Cannot accept another channel; reject the open request.
+   392	                try:
+   393	                    self._send_frame(channel_id, _MSG_NACK)
+   394	                except EOFError:
+   395	                    pass
+   396	                return
+   397	            else:
+   398	                channel = MuxChannel(self, channel_id)
+   399	                self.channels[channel_id] = channel
+   400	
+   401	        if already_open:
+   402	            try:
+   403	                self._send_frame(channel_id, _MSG_ACK)
+   404	            except EOFError:
+   405	                pass
+   406	            return
+   407	
+   408	        try:
+   409	            self._send_frame(channel_id, _MSG_ACK)
+   410	        except EOFError:
+   411	            return
+   412	
+   413	        with self._accept_cond:
+   414	            self._accept_queue.append(channel)
+   415	            self._accept_cond.notify_all()
+   416	
+   417	    def _handle_ack(self, channel_id):
+   418	        with self._channels_lock:
+   419	            channel = self.channels.get(channel_id)
+   420	        if channel is not None:
+   421	            channel._open_event.set()
+   422	
+   423	    def _handle_nack(self, channel_id):
+   424	        with self._channels_lock:
+   425	            channel = self.channels.get(channel_id)
+   426	        if channel is not None:
+   427	            channel._open_failed = True
+   428	            channel._open_event.set()
+   429	
+   430	    def _handle_data(self, channel_id, data):
+   431	        with self._channels_lock:
+   432	            channel = self.channels.get(channel_id)
+   433	        if channel is not None:
+   434	            channel._recv_data(data)
+   435	
+   436	    def _handle_close(self, channel_id):
+   437	        with self._channels_lock:
+   438	            channel = self.channels.pop(channel_id, None)
+   439	        if channel is not None:
+   440	            channel._remote_closed()
+   441	
+   442	    def _handle_fin(self, channel_id):
+   443	        with self._channels_lock:
+   444	            channel = self.channels.get(channel_id)
+   445	        if channel is not None:
+   446	            channel._remote_fin()
+   447	
+   448	    def _handle_pause(self, channel_id):
+   449	        with self._channels_lock:
+   450	            channel = self.channels.get(channel_id)
+   451	        if channel is not None:
+   452	            channel._remote_pause()
+   453	
+   454	    def _handle_resume(self, channel_id):
+   455	        with self._channels_lock:
+   456	            channel = self.channels.get(channel_id)
+   457	        if channel is not None:
+   458	            channel._remote_resume()
+   459	
+   460	    def _handle_underlying_eof(self):
+   461	        """Propagate death of the underlying tube to all channels."""
+   462	        with self._closed_cond:
+   463	            if self._closed:
+   464	                return
+   465	            self._closed = True
+   466	            self._closed_cond.notify_all()
+   467	
+   468	        with self._channels_lock:
+   469	            channels = list(self.channels.values())
+   470	            self.channels.clear()
+   471	
+   472	        for channel in channels:
+   473	            channel._mux_closed()
+   474	
+   475	        with self._accept_cond:
+   476	            self._accept_cond.notify_all()
+   477	
+   478	        try:
+   479	            self._underlying.close()
+   480	        except Exception:
+   481	            pass
+   482	
+   483	    # ------------------------------------------------------------------
+   484	    # Frame I/O
+   485	    # ------------------------------------------------------------------
+   486	    def _make_frame(self, channel_id, msgtype, body=b''):
+   487	        payload = bytes((msgtype,)) + body
+   488	        return struct.pack(_HDR_FMT, channel_id, len(payload)) + payload
+   489	
+   490	    def _send_frame(self, channel_id, msgtype, body=b''):
+   491	        if self._closed:
+   492	            raise EOFError("multiplexer is closed")
+   493	
+   494	        frame = self._make_frame(channel_id, msgtype, body)
+   495	        try:
+   496	            with self._write_lock:
+   497	                self._underlying.send(frame)
+   498	        except EOFError:
+   499	            self._handle_underlying_eof()
+   500	            raise

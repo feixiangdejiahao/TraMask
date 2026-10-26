@@ -1,0 +1,1 @@
+cd /app && git checkout -b atomic-selector-engine && git branch -a && echo '--- run existing tests ---' && BABEL_ENV=test npx jest test/jest/selectors.js test/jest/events.js test/jest/values.js 2>&1 | tail -40

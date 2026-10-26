@@ -1,0 +1,1 @@
+cd /app && sed -n '80,135p' doc/source/config.rst && sed -n '240,270p' doc/source/config.rst

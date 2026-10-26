@@ -1,0 +1,1 @@
+cd /app && git diff src/container.ts | head -300

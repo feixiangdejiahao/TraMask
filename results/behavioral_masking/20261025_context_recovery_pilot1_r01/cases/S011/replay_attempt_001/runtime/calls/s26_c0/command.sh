@@ -1,0 +1,1 @@
+cd /workspace 2>/dev/null || cd .; npx tsc -p tsconfig.json --noEmit --pretty false 2>&1 | head -50

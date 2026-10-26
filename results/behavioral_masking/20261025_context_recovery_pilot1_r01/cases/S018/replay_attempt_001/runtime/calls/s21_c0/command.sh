@@ -1,0 +1,1 @@
+cd /app && grep -rn 'badtoken\|not a test\|invalid.*nosec\|nosec.*invalid' tests examples doc bandit | head -20

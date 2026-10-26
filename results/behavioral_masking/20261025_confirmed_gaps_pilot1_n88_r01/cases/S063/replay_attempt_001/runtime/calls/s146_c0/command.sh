@@ -1,0 +1,3 @@
+cd /app && timeout 60 python -m doctest pwnlib/tubes/buffer.py >/tmp/buf_doctest.log 2>&1 && echo "buffer doctest ok" || (echo "buffer doctest FAIL"; tail /tmp/buf_doctest.log)
+timeout 30 python /tmp/test_mux_validation.py >/tmp/val.log 2>&1 && echo "validation ok" || (echo "validation FAIL"; tail /tmp/val.log)
+timeout 30 python /tmp/test_mux_ids.py >/tmp/ids.log 2>&1 && echo "ids ok" || (echo "ids FAIL"; tail /tmp/ids.log)

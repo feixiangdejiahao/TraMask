@@ -1,0 +1,140 @@
+     1	"""
+     2	Tube multiplexer
+     3	================
+     4	
+     5	Implements a multiplexer which allows multiple independent, bidirectional
+     6	logical channels over a single underlying tube.
+     7	"""
+     8	
+     9	import atexit
+    10	import collections
+    11	import queue
+    12	import struct
+    13	import threading
+    14	import time
+    15	
+    16	from pwnlib.context import context
+    17	from pwnlib.log import getLogger
+    18	from pwnlib.tubes.buffer import Buffer
+    19	from pwnlib.tubes.tube import tube
+    20	
+    21	log = getLogger(__name__)
+    22	
+    23	# Frame types
+    24	_OPEN   = 1
+    25	_ACK    = 2
+    26	_NAK    = 3
+    27	_DATA   = 4
+    28	_CLOSE  = 5
+    29	_EOF    = 6   # half-close: sender's outgoing direction is closed
+    30	_PAUSE  = 7
+    31	_RESUME = 8
+    32	
+    33	_HEADER = struct.Struct('>IBH')  # length, type, channel_id
+    34	
+    35	
+    36	def _is_channel_id(value):
+    37	    """Return True if value is an integer channel id (and not a bool)."""
+    38	    return isinstance(value, int) and not isinstance(value, bool)
+    39	
+    40	
+    41	class TubeMultiplexer(object):
+    42	    """
+    43	    Multiplexes multiple logical channels over a single underlying tube.
+    44	
+    45	    A :class:`TubeMultiplexer` is created around an existing :class:`~pwnlib.tubes.tube.tube`
+    46	    instance.  The remote end of the underlying tube is expected to be another
+    47	    :class:`TubeMultiplexer` (or a compatible implementation) speaking the same
+    48	    simple frame protocol.
+    49	
+    50	    Channels are created with :meth:`open_channel` and received from the remote
+    51	    end with :meth:`accept_channel`.
+    52	
+    53	    Arguments:
+    54	        underlying(tube): The tube to multiplex over.
+    55	        max_channels(int): Maximum number of simultaneously open channels.
+    56	            Must be in the range ``[1, 65535]``.
+    57	        high_water_mark(int): Number of bytes buffered per channel at which
+    58	            the remote sender is paused.
+    59	        low_water_mark(int): Number of bytes buffered per channel at which
+    60	            the remote sender is resumed.
+    61	    """
+    62	
+    63	    def __init__(self, underlying, max_channels=256,
+    64	                 high_water_mark=1048576, low_water_mark=262144):
+    65	        if not isinstance(underlying, tube):
+    66	            raise TypeError('underlying must be a tube, got %r' % type(underlying).__name__)
+    67	
+    68	        if not isinstance(max_channels, int) or isinstance(max_channels, bool) or \
+    69	           not 1 <= max_channels <= 65535:
+    70	            raise ValueError('max_channels must be an integer in [1, 65535]')
+    71	
+    72	        if low_water_mark > high_water_mark:
+    73	            raise ValueError('low_water_mark cannot be greater than high_water_mark')
+    74	
+    75	        self._underlying = underlying
+    76	        self._max_channels = max_channels
+    77	        self._high_water_mark = high_water_mark
+    78	        self._low_water_mark = low_water_mark
+    79	
+    80	        # channel_id -> MuxChannel currently known locally
+    81	        self.channels = {}
+    82	
+    83	        self._closed = False
+    84	        self._lock = threading.RLock()
+    85	        self._send_lock = threading.Lock()
+    86	
+    87	        # Channels opened by the remote end and waiting for accept_channel()
+    88	        self._pending_accept = collections.deque()
+    89	        self._accept_cond = threading.Condition(self._lock)
+    90	
+    91	        # channel_id -> queue.Queue used to wait for OPEN acknowledgements
+    92	        self._open_results = {}
+    93	
+    94	        # IDs which have been closed locally but are awaiting confirmation
+    95	        # from the remote end before they may be reused.
+    96	        self._closing_ids = set()
+    97	
+    98	        self._read_buffer = b''
+    99	
+   100	        self._reader_thread = context.Thread(target=self._read_loop, name='mux-reader')
+   101	        self._reader_thread.daemon = True
+   102	        self._reader_thread.start()
+   103	
+   104	        atexit.register(self.close)
+   105	
+   106	    # ------------------------------------------------------------------
+   107	    # Properties
+   108	    # ------------------------------------------------------------------
+   109	    @property
+   110	    def max_channels(self):
+   111	        return self._max_channels
+   112	
+   113	    @property
+   114	    def high_water_mark(self):
+   115	        return self._high_water_mark
+   116	
+   117	    @high_water_mark.setter
+   118	    def high_water_mark(self, value):
+   119	        if self._low_water_mark is not None and value is not None and self._low_water_mark > value:
+   120	            raise ValueError('low_water_mark cannot be greater than high_water_mark')
+   121	        self._high_water_mark = value
+   122	        for ch in list(self.channels.values()):
+   123	            ch._recv_buffer.set_watermarks(high=value, low=self._low_water_mark)
+   124	
+   125	    @property
+   126	    def low_water_mark(self):
+   127	        return self._low_water_mark
+   128	
+   129	    @low_water_mark.setter
+   130	    def low_water_mark(self, value):
+   131	        if value is not None and self._high_water_mark is not None and value > self._high_water_mark:
+   132	            raise ValueError('low_water_mark cannot be greater than high_water_mark')
+   133	        self._low_water_mark = value
+   134	        for ch in list(self.channels.values()):
+   135	            ch._recv_buffer.set_watermarks(high=self._high_water_mark, low=value)
+   136	
+   137	    # ------------------------------------------------------------------
+   138	    # Public API
+   139	    # ------------------------------------------------------------------
+   140	    def open_channel(self, channel_id=None, timeout=None):

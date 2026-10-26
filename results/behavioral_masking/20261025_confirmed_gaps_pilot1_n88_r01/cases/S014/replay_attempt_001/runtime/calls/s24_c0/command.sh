@@ -1,0 +1,1 @@
+cd /app && sed -i 's/private render()/protected render()/' packages/core/src/prompts/prompt.ts && grep -n "render()" packages/core/src/prompts/prompt.ts

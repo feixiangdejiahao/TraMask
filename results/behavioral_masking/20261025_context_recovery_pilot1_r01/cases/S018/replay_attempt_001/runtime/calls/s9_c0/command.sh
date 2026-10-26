@@ -1,0 +1,1 @@
+cd /app && nl -ba bandit/core/manager.py | sed -n '280,375p'

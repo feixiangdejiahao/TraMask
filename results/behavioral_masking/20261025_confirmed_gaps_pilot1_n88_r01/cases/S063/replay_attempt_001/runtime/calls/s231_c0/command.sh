@@ -1,0 +1,1 @@
+cd /app && timeout 30 python /tmp/test_mux_basic.py >/dev/null 2>&1 && echo "basic ok" && timeout 30 python /tmp/test_flow.py >/dev/null 2>&1 && echo "flow ok"

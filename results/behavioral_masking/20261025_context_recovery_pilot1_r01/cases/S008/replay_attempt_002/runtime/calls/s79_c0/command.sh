@@ -1,0 +1,1 @@
+cd /app && sed -n '68,150p' backend/internal/services/job_service.go && echo "=====JOB SCHEDULE TYPES=====" && sed -n '1,120p' types/jobschedule/jobschedule.go

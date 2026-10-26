@@ -1,0 +1,1 @@
+cd /app && cat package.json && echo '---SRC---' && find src -type f | sort && echo '---TEST---' && find test -type f | sort

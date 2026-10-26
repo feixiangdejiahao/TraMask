@@ -1,0 +1,1 @@
+cd /app && grep -rn "apiGroup\.\|\.POST(\|\.GET(" backend/internal/api/*.go | head -30 && echo "=====" && ls backend/internal/api/

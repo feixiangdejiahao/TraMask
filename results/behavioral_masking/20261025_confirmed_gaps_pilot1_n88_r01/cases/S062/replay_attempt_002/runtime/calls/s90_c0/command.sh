@@ -1,0 +1,1 @@
+cd /app && grep -n "DEBUG\|print\|traceback\|/tmp/" pwnlib/tubes/mux.py pwnlib/tubes/buffer.py pwnlib/tubes/tube.py; echo "--- no debug output above means clean ---"; python -m py_compile pwnlib/tubes/mux.py pwnlib/tubes/buffer.py pwnlib/tubes/tube.py && echo compile OK

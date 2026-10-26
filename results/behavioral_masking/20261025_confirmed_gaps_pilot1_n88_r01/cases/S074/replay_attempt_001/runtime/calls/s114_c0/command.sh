@@ -1,0 +1,1 @@
+cd /app && sed -n '14,190p' vm.go

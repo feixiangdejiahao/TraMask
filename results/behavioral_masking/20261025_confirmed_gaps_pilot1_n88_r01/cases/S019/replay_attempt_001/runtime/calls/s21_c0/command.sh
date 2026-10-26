@@ -1,0 +1,1 @@
+cd /app && nl -ba src/schema/anyOf/schema_.ts | sed -n '1,220p'

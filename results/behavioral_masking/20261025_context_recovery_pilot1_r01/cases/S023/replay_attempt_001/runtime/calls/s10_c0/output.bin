@@ -1,0 +1,301 @@
+        other = union_params[0] if union_params[1] is NoneType else union_params[1]
+        # We can't actually have a Union of a Union, so this is safe.
+        return self._structure_func.dispatch(other)(obj, other)
+
+    def _structure_tuple(self, obj: Iterable, tup: type[T]) -> T:
+        """Deal with structuring into a tuple."""
+        tup_params = None if tup in (Tuple, tuple) else tup.__args__
+        has_ellipsis = tup_params and tup_params[-1] is Ellipsis
+        if tup_params is None or (has_ellipsis and tup_params[0] in ANIES):
+            # Just a Tuple. (No generic information.)
+            return tuple(obj)
+        if has_ellipsis:
+            # We're dealing with a homogenous tuple, tuple[int, ...]
+            tup_type = tup_params[0]
+            conv = self._structure_func.dispatch(tup_type)
+            if self.detailed_validation:
+                errors = []
+                res = []
+                ix = 0
+                for e in obj:
+                    try:
+                        res.append(conv(e, tup_type))
+                    except Exception as exc:
+                        msg = IterableValidationNote(
+                            f"Structuring {tup} @ index {ix}", ix, tup_type
+                        )
+                        exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
+                        errors.append(exc)
+                    finally:
+                        ix += 1
+                if errors:
+                    raise IterableValidationError(
+                        f"While structuring {tup!r}", errors, tup
+                    )
+                return tuple(res)
+            return tuple(conv(e, tup_type) for e in obj)
+
+        # We're dealing with a heterogenous tuple.
+        exp_len = len(tup_params)
+        if self.detailed_validation:
+            errors = []
+            res = []
+            for ix, (t, e) in enumerate(zip(tup_params, obj)):
+                try:
+                    conv = self._structure_func.dispatch(t)
+                    res.append(conv(e, t))
+                except Exception as exc:
+                    msg = IterableValidationNote(
+                        f"Structuring {tup} @ index {ix}", ix, t
+                    )
+                    exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
+                    errors.append(exc)
+            if len(obj) != exp_len:
+                problem = "Not enough" if len(res) < exp_len else "Too many"
+                exc = ValueError(f"{problem} values in {obj!r} to structure as {tup!r}")
+                msg = f"Structuring {tup}"
+                exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
+                errors.append(exc)
+            if errors:
+                raise IterableValidationError(f"While structuring {tup!r}", errors, tup)
+            return tuple(res)
+
+        if len(obj) != exp_len:
+            problem = "Not enough" if len(obj) < len(tup_params) else "Too many"
+            raise ValueError(f"{problem} values in {obj!r} to structure as {tup!r}")
+        return tuple(
+            [self._structure_func.dispatch(t)(e, t) for t, e in zip(tup_params, obj)]
+        )
+
+    def _get_dis_func(
+        self,
+        union: Any,
+        use_literals: bool = True,
+        overrides: dict[str, AttributeOverride] | None = None,
+    ) -> Callable[[Any], type]:
+        """Fetch or try creating a disambiguation function for a union."""
+        union_types = union.__args__
+        if NoneType in union_types:
+            # We support unions of attrs classes and NoneType higher in the
+            # logic.
+            union_types = tuple(e for e in union_types if e is not NoneType)
+
+        if not all(has(get_origin(e) or e) for e in union_types):
+            raise StructureHandlerNotFoundError(
+                "Only unions of attrs classes and dataclasses supported "
+                "currently. Register a structure hook manually.",
+                type_=union,
+            )
+
+        return create_default_dis_func(
+            self,
+            *union_types,
+            use_literals=use_literals,
+            overrides=overrides if overrides is not None else "from_converter",
+        )
+
+    def __deepcopy__(self, _) -> BaseConverter:
+        return self.copy()
+
+    def copy(
+        self,
+        dict_factory: Callable[[], Any] | None = None,
+        unstruct_strat: UnstructureStrategy | None = None,
+        prefer_attrib_converters: bool | None = None,
+        detailed_validation: bool | None = None,
+    ) -> Self:
+        """Create a copy of the converter, keeping all existing custom hooks.
+
+        :param detailed_validation: Whether to use a slightly slower mode for detailed
+            validation errors.
+        """
+        res = self.__class__(
+            dict_factory if dict_factory is not None else self._dict_factory,
+            (
+                unstruct_strat
+                if unstruct_strat is not None
+                else (
+                    UnstructureStrategy.AS_DICT
+                    if self._unstructure_attrs == self.unstructure_attrs_asdict
+                    else UnstructureStrategy.AS_TUPLE
+                )
+            ),
+            (
+                prefer_attrib_converters
+                if prefer_attrib_converters is not None
+                else self._prefer_attrib_converters
+            ),
+            (
+                detailed_validation
+                if detailed_validation is not None
+                else self.detailed_validation
+            ),
+        )
+
+        self._unstructure_func.copy_to(res._unstructure_func, self._unstruct_copy_skip)
+        self._structure_func.copy_to(res._structure_func, self._struct_copy_skip)
+
+        return res
+
+
+class Converter(BaseConverter):
+    """A converter which generates specialized un/structuring functions."""
+
+    __slots__ = (
+        "_unstruct_collection_overrides",
+        "forbid_extra_keys",
+        "omit_if_default",
+        "type_overrides",
+        "use_alias",
+    )
+
+    def __init__(
+        self,
+        dict_factory: Callable[[], Any] = dict,
+        unstruct_strat: UnstructureStrategy = UnstructureStrategy.AS_DICT,
+        omit_if_default: bool = False,
+        forbid_extra_keys: bool = False,
+        type_overrides: Mapping[type, AttributeOverride] = {},
+        unstruct_collection_overrides: Mapping[type, UnstructureHook] = {},
+        prefer_attrib_converters: bool = False,
+        detailed_validation: bool = True,
+        unstructure_fallback_factory: HookFactory[UnstructureHook] = lambda _: identity,
+        structure_fallback_factory: HookFactory[StructureHook] = lambda t: raise_error(
+            None, t
+        ),
+        use_alias: bool = False,
+    ):
+        """
+        :param detailed_validation: Whether to use a slightly slower mode for detailed
+            validation errors.
+        :param unstructure_fallback_factory: A hook factory to be called when no
+            registered unstructuring hooks match.
+        :param structure_fallback_factory: A hook factory to be called when no
+            registered structuring hooks match.
+        :param use_alias: Whether to use the field alias instead of the field name as
+            the un/structured dictionary key by default.
+
+        ..  versionadded:: 23.2.0 *unstructure_fallback_factory*
+        ..  versionadded:: 23.2.0 *structure_fallback_factory*
+        ..  versionchanged:: 24.2.0
+            The default `structure_fallback_factory` now raises errors for missing handlers
+            more eagerly, surfacing problems earlier.
+        ..  versionadded:: 25.2.0 *use_alias*
+        """
+        super().__init__(
+            dict_factory=dict_factory,
+            unstruct_strat=unstruct_strat,
+            prefer_attrib_converters=prefer_attrib_converters,
+            detailed_validation=detailed_validation,
+            unstructure_fallback_factory=unstructure_fallback_factory,
+            structure_fallback_factory=structure_fallback_factory,
+        )
+        self.omit_if_default = omit_if_default
+        self.forbid_extra_keys = forbid_extra_keys
+        self.type_overrides = dict(type_overrides)
+        self.use_alias = use_alias
+
+        unstruct_collection_overrides = {
+            get_origin(k) or k: v for k, v in unstruct_collection_overrides.items()
+        }
+
+        self._unstruct_collection_overrides = unstruct_collection_overrides
+
+        # Do a little post-processing magic to make things easier for users.
+        co = unstruct_collection_overrides
+
+        # abc.Set overrides, if defined, apply to abc.MutableSets and sets
+        if OriginAbstractSet in co:
+            if OriginMutableSet not in co:
+                co[OriginMutableSet] = co[OriginAbstractSet]
+            if FrozenSetSubscriptable not in co:
+                co[FrozenSetSubscriptable] = co[OriginAbstractSet]
+
+        # abc.MutableSet overrrides, if defined, apply to sets
+        if OriginMutableSet in co and set not in co:
+            co[set] = co[OriginMutableSet]
+
+        # abc.Sequence overrides, if defined, can apply to MutableSequences, lists and
+        # tuples
+        if Sequence in co:
+            if MutableSequence not in co:
+                co[MutableSequence] = co[Sequence]
+            if tuple not in co:
+                co[tuple] = co[Sequence]
+
+        # abc.MutableSequence overrides, if defined, can apply to lists
+        if MutableSequence in co:
+            if list not in co:
+                co[list] = co[MutableSequence]
+            if deque not in co:
+                co[deque] = co[MutableSequence]
+
+        # abc.Mapping overrides, if defined, can apply to MutableMappings
+        if Mapping in co and MutableMapping not in co:
+            co[MutableMapping] = co[Mapping]
+
+        # abc.MutableMapping overrides, if defined, can apply to dicts
+        if MutableMapping in co and dict not in co:
+            co[dict] = co[MutableMapping]
+
+        # builtins.dict overrides, if defined, can apply to counters
+        if dict in co and Counter not in co:
+            co[Counter] = co[dict]
+
+        if unstruct_strat is UnstructureStrategy.AS_DICT:
+            # Override the attrs handler.
+            self.register_unstructure_hook_factory(
+                has_with_generic, self.gen_unstructure_attrs_fromdict
+            )
+            self.register_structure_hook_factory(
+                has_with_generic, self.gen_structure_attrs_fromdict
+            )
+        self.register_unstructure_hook_factory(
+            is_annotated, self.gen_unstructure_annotated
+        )
+        self.register_unstructure_hook_factory(
+            is_hetero_tuple, self.gen_unstructure_hetero_tuple
+        )
+        self.register_unstructure_hook_factory(is_namedtuple)(
+            namedtuple_unstructure_factory
+        )
+        self.register_unstructure_hook_factory(
+            is_sequence, self.gen_unstructure_iterable
+        )
+        self.register_unstructure_hook_factory(is_mapping, self.gen_unstructure_mapping)
+        self.register_unstructure_hook_factory(
+            is_mutable_set,
+            lambda cl: self.gen_unstructure_iterable(cl, unstructure_to=set),
+        )
+        self.register_unstructure_hook_factory(
+            is_frozenset,
+            lambda cl: self.gen_unstructure_iterable(cl, unstructure_to=frozenset),
+        )
+        self.register_unstructure_hook_factory(
+            is_optional, self.gen_unstructure_optional
+        )
+        self.register_unstructure_hook_factory(
+            is_typeddict, self.gen_unstructure_typeddict
+        )
+        self.register_unstructure_hook_factory(
+            lambda t: get_newtype_base(t) is not None,
+            lambda t: self.get_unstructure_hook(get_newtype_base(t)),
+        )
+
+        self.register_structure_hook_factory(is_annotated, self.gen_structure_annotated)
+        self.register_structure_hook_factory(is_mapping, self.gen_structure_mapping)
+        self.register_structure_hook_factory(is_counter, self.gen_structure_counter)
+        self.register_structure_hook_factory(
+            is_defaultdict, defaultdict_structure_factory
+        )
+        self.register_structure_hook_factory(is_typeddict, self.gen_structure_typeddict)
+        self.register_structure_hook_factory(
+            lambda t: get_newtype_base(t) is not None, self.get_structure_newtype
+        )
+
+        # We keep these so we can more correctly copy the hooks.
+        self._struct_copy_skip = self._structure_func.get_num_fns()
+        self._unstruct_copy_skip = self._unstructure_func.get_num_fns()
+
+    @overload
+    def register_unstructure_hook_factory(

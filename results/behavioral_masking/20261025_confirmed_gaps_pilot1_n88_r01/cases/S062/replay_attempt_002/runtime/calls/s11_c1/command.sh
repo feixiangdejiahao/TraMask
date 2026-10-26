@@ -1,0 +1,1 @@
+cat pwnlib/tubes/server.py; echo '===== pyproject'; cat pyproject.toml

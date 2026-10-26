@@ -1,0 +1,1 @@
+cd /app && tail -50 packages/core/test/prompts/async-autocomplete.test.ts

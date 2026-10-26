@@ -1,0 +1,1 @@
+cd /app && sed -n '1160,1215p' objects.go && sed -n '1385,1400p' objects.go

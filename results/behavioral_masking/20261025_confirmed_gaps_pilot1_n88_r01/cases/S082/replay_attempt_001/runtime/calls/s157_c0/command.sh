@@ -1,0 +1,1 @@
+cd /app && grep -n "bail_on_uncaught_error\|defaults\|client_decycle_depth" tests/config_tests.js | head -20 && tail -30 tests/config_tests.js

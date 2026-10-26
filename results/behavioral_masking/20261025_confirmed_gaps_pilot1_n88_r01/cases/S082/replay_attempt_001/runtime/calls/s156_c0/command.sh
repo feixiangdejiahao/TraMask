@@ -1,0 +1,1 @@
+cd /app && timeout 25 npx eslint . 2>&1 | tail -20

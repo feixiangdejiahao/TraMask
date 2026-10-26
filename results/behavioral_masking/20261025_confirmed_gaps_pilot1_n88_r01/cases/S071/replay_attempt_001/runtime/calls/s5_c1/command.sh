@@ -1,0 +1,1 @@
+cd /app && git log --oneline -10 && git branch -a

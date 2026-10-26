@@ -1,0 +1,35 @@
+cd /app && cat > /tmp/mux_peer_exit2.py <<'PYEOF'
+import sys, os, select
+from pwnlib.tubes.tube import tube
+class StdioTube(tube):
+    def recv_raw(self, numb):
+        r,_,_ = select.select([sys.stdin], [], [], self.timeout)
+        if not r: return None
+        data = os.read(sys.stdin.fileno(), numb)
+        if not data: raise EOFError
+        return data
+    def send_raw(self, data): sys.stdout.buffer.write(data); sys.stdout.buffer.flush()
+    def can_recv_raw(self, timeout):
+        r,_,_ = select.select([sys.stdin], [], [], timeout); return bool(r)
+    def connected_raw(self, direction): return True
+t = StdioTube()
+m = t.mux()
+c = m.accept_channel(timeout=5)
+# die abruptly, closing stdout so parent sees EOF
+os._exit(0)
+EOF
+timeout 15 python -u - <<'EOF'
+import time
+from pwnlib.tubes.process import process
+p = process(['python3', '/tmp/mux_peer_exit2.py'])
+m = p.mux()
+try:
+    c = m.open_channel(1, timeout=2)
+    print("opened", flush=True)
+except Exception as e:
+    print("open exc", type(e).__name__, e, flush=True)
+time.sleep(1.0)
+print("m.closed", m.closed, flush=True)
+m.close()
+print("done", flush=True)
+EOF

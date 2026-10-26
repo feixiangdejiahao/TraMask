@@ -1,0 +1,1 @@
+cd /app && git diff packages/core/src/prompts/prompt.ts packages/core/src/index.ts

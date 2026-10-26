@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/parse/parser.ts && echo "===ITEM PARSER===" && cat src/schema/actions/parse/item.ts && echo "===MAP PARSER===" && cat src/schema/actions/parse/map.ts

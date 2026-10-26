@@ -1,0 +1,1 @@
+cd /app && ls src/schema/actions/jsonSchemer && find src/schema/actions/jsonSchemer -name "*.ts" | grep -v test | sort

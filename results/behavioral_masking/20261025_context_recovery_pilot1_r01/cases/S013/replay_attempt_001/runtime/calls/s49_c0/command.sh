@@ -1,0 +1,1 @@
+cd /app && sed -i "s#require('./lib/awilix.js')#require('/app/lib/awilix.js')#" /tmp/repro.js && node /tmp/repro.js

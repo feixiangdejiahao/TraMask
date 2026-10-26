@@ -1,0 +1,1 @@
+cd /app && cat modules.go && echo '=== variable.go ===' && cat variable.go && echo '=== objectptr ===' && grep -n "ObjectPtr" objects.go

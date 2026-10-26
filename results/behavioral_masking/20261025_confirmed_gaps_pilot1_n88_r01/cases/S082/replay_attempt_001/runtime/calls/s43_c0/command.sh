@@ -1,0 +1,1 @@
+cd /app && sed -n '1,100p' lib/reporters/dev/index.js && grep -n "constructor" lib/reporters/dev/*.js lib/reporters/dev/*/*.js 2>/dev/null | head

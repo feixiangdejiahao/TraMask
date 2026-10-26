@@ -1,0 +1,1 @@
+cd /app/libs/core && timeout 120 python -m pytest tests/unit_tests/test_imports.py -q 2>&1 | tail -15

@@ -1,0 +1,1 @@
+cd /app && timeout 10 python -c "from pwnlib.tubes import TubeMultiplexer, MuxChannel; print('import from pwnlib.tubes ok')"

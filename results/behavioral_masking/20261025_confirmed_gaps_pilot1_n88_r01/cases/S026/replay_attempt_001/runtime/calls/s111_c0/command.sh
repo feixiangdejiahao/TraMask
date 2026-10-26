@@ -1,0 +1,1 @@
+GOROOT=$(go env GOROOT); grep -rln "LookupSym" "$GOROOT/src/go/doc/" | head; echo "===="; grep -rn "func.*lookupSym\|LookupSym =" "$GOROOT/src/go/doc/"*.go | head

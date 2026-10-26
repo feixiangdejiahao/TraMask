@@ -1,0 +1,1 @@
+cd /app && cat tsconfig.json tsconfig.build.json

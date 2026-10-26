@@ -1,0 +1,1 @@
+cd /app && head -5 compiled_function_call_test.go && grep -n "func TestCompiledFunctionCallAddTransfer\|func TestCompiledFunctionCallNestedClosureIsolation\|package" compiled_function_call_test.go

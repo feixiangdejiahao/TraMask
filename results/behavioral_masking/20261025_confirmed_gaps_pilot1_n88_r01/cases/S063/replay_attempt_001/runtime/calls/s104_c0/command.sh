@@ -1,0 +1,1 @@
+cd /app && timeout 60 python -m doctest pwnlib/tubes/buffer.py 2>&1 | tail -3 && echo "buffer doctest done" && timeout 30 python /tmp/test_mux_basic.py && timeout 30 python /tmp/test_flow.py

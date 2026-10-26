@@ -1,0 +1,1 @@
+grep -n "_adapted_fields\|_required_keys\|def get_notrequired_base\|Required\|NotRequired" src/cattrs/gen/typeddicts.py | head -40 && sed -n '300,500p' src/cattrs/gen/typeddicts.py

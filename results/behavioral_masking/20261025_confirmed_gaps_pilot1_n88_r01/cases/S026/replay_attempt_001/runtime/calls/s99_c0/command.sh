@@ -1,0 +1,1 @@
+cd /app && go test ./checkers/ -run 'Test(Tags|Docs|StableList)$' -count=1 2>&1 | tail -10

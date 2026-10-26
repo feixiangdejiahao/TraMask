@@ -1,0 +1,1 @@
+cd /app && cat src/entity/actions/update/updateItemParams/requiredIfConditions.ts && echo "===UPDATE PARAMS===" && cat src/entity/actions/update/updateItemParams/updateItemParams.ts

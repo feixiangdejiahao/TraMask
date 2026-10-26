@@ -1,0 +1,1 @@
+grep -n "def test.*insert\|def test.*upsert\|def test.*bulk" tests/test_cli_insert.py tests/test_cli_bulk.py tests/test_upsert.py tests/test_cli.py | head -50 && echo "---conftest---" && cat tests/conftest.py

@@ -1,0 +1,1 @@
+cd /app && python -m pytest tests/test_partial.py -q -o addopts="" 2>&1 | tail -3 && python /tmp/test_spec.py 2>&1 | tail -1 && python /tmp/edge.py 2>&1 | tail -1

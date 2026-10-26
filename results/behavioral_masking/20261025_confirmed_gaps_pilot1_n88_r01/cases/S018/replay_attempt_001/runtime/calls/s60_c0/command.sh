@@ -1,0 +1,44 @@
+cd /app && python - <<'EOF'
+path = 'src/dateutil/rrule.py'
+with open(path) as f:
+    src = f.read()
+
+# Add import io
+old_import = "import heapq\nimport itertools"
+new_import = "import heapq\nimport io\nimport itertools"
+assert old_import in src
+src = src.replace(old_import, new_import, 1)
+
+# Fix tzical call to use StringIO
+old = "                ical = _tz.tzical(original_s)"
+new = "                ical = _tz.tzical(io.StringIO(original_s))"
+assert old in src
+src = src.replace(old, new, 1)
+
+with open(path, 'w') as f:
+    f.write(src)
+print("fixed tzical call")
+EOF
+cd /app && python - <<'EOF'
+from datetime import datetime
+from dateutil import tz
+from dateutil.rrule import *
+from dateutil.tz import tzical
+from io import StringIO
+
+NYC = tz.gettz('America/New_York')
+r = rrule(YEARLY, count=3, dtstart=datetime(1997,9,2,9,0,tzinfo=NYC))
+ical = r.to_ical()
+t = tzical(StringIO(ical))
+print('keys:', t.keys())
+for k in t.keys():
+    print(k, repr(t.get(k)))
+
+r2 = rrulestr(ical)
+print('parsed tzinfo:', repr(r2.dtstart.tzinfo))
+print('parsed list:', list(r2))
+print('original list:', list(r))
+assert list(r) == list(r2)
+assert r2.dtstart.tzinfo is not None
+print('OK')
+EOF

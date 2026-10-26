@@ -1,0 +1,1 @@
+cd /app && git checkout -b feat/async-autocomplete && git branch --show-current

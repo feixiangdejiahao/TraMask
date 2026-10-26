@@ -1,0 +1,1 @@
+find src -type f | head -100 && echo '---' && find tests -type f | head -50

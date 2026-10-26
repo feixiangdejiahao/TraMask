@@ -1,0 +1,1 @@
+sed -n '750,1000p' src/dateutil/rrule.py

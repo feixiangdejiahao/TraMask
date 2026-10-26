@@ -1,0 +1,1 @@
+cd /app && cat bandit/plugins/general_start_process_with_partial_path.py 2>/dev/null | head -80; ls bandit/plugins | grep -i partial

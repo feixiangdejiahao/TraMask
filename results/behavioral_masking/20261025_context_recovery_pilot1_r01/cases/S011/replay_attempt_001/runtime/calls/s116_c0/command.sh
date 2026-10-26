@@ -1,0 +1,1 @@
+cd /app && git status --short && echo "BRANCH: $(git branch --show-current)" && ls src/__tests__/initialize.test.ts

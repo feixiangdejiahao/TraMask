@@ -1,0 +1,1 @@
+cd /app && git status --short && ls -la .tmp-* 2>/dev/null || echo "no temp files"

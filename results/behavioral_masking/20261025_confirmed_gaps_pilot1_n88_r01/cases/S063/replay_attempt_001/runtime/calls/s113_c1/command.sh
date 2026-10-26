@@ -1,0 +1,1 @@
+cd /app && timeout 60 python /tmp/test_concurrent.py && timeout 30 python /tmp/test_halfclose.py

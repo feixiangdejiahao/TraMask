@@ -1,0 +1,1 @@
+cd /app && python /tmp/edge.py 2>&1 | tail -5

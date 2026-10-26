@@ -1,0 +1,1 @@
+cd /app && ls tests/support tests/reporters 2>/dev/null; find tests -name '*reporter*'; echo '--- fake reporter ---'; cat tests/support/fake_reporter.js 2>/dev/null

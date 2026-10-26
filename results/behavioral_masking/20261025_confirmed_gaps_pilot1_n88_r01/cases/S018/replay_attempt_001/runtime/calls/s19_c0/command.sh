@@ -1,0 +1,1 @@
+grep -rl "VTIMEZONE\|TZOFFSETFROM\|multiple timezones" / 2>/dev/null | grep -v proc | head -30; echo '---'; git log --all --oneline | head -20; echo '---'; git fsck --lost-found 2>&1 | head

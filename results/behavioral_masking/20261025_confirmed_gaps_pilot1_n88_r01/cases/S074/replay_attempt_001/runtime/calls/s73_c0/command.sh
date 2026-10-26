@@ -1,0 +1,1 @@
+cd /app && grep -rn "Bytes" --include="*_test.go" script_test.go objects_test.go | head -20

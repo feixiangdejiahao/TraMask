@@ -1,0 +1,1 @@
+tail -30 /tmp/all_test.log; echo "--- running:"; ps aux | grep 'go test' | grep -v grep | wc -l

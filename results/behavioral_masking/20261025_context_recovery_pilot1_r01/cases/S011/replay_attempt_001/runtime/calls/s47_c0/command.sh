@@ -1,0 +1,1 @@
+grep -rl "getInitializer\|Initializer" / --include="*.ts" --include="*.js" 2>/dev/null | grep -v "/app/node_modules/ts\|/app/node_modules/typescript\|/app/src" | head -20; echo '---npm cache---'; find /root/.npm -iname "*awilix*" 2>/dev/null | head

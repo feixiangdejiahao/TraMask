@@ -1,0 +1,1 @@
+cd /app && grep -rn "from sqlite_utils import\|from sqlite_utils.db import" tests | grep -i "error\|Exception\|NoTable\|AlterError" | head -20

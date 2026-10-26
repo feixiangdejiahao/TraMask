@@ -1,0 +1,1 @@
+cd /app && sed -n '1,22p' src/schema/actions/zodSchemer/formatter/map.ts

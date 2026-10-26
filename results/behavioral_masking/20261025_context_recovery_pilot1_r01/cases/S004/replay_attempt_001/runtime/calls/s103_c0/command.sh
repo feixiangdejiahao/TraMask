@@ -1,0 +1,1 @@
+cd /app && git status --short | head -30 && git check-ignore aiomonitor.egg-info 2>/dev/null; cat .gitignore | grep -i egg

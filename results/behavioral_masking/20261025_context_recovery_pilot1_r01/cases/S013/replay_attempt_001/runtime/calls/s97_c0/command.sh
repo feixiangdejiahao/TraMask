@@ -1,0 +1,1 @@
+cd /app && sed -n '827,910p' README.md; echo "=====END====="; sed -n '1350,1400p' README.md

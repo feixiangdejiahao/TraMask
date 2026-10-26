@@ -1,0 +1,1 @@
+cd /app && ls backend/internal/huma/ && echo "=====" && grep -rn "RegisterRoutes" backend/internal/huma/handlers/*.go | head -20 && echo "=====BOOTSTRAP=====" && cat backend/internal/huma/huma.go

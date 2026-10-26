@@ -1,0 +1,1 @@
+cd /app && sed -n '825,1010p' src/dateutil/rrule.py

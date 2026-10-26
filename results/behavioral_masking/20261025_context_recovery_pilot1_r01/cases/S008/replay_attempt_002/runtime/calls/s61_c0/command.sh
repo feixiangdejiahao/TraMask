@@ -1,0 +1,1 @@
+cd /app/backend && go build ./internal/services/ 2>&1 | head -30

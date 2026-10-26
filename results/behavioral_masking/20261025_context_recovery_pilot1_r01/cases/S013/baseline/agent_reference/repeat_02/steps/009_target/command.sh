@@ -1,0 +1,1 @@
+cd /app && ./node_modules/.bin/jest --runTestsByPath src/__tests__/container.initialize.test.ts --no-coverage --no-cache --runInBand --testNamePattern 'limits concurrency within a level'

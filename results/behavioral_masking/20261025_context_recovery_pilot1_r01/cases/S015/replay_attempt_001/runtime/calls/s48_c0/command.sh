@@ -1,0 +1,1 @@
+cd /app && python -m bandit /tmp/cachetest/foo.py --incremental --cache-dir /tmp/cachetest/.cache --force-rescan --verbose -f txt 2>/dev/null | sed -n '/Files in scope/,/^$/p' | head -30

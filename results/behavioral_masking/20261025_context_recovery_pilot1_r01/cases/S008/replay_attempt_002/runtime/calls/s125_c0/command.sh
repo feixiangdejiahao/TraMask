@@ -1,0 +1,1 @@
+cd /app && gofmt -w backend/internal/models/settings.go && gofmt -l backend/internal/models/settings.go; echo "clean"

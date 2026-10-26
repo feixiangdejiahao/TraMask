@@ -1,0 +1,9 @@
+cd /app && cat > .changeset/async-autocomplete.md <<'EOF'
+---
+"@clack/prompts": minor
+"@clack/core": minor
+---
+
+Adds async options support to `autocomplete` and `autocompleteMultiselect`. `options` may now be an async resolver receiving `(search, { signal })`, with configurable debouncing, caching (`cacheResults`, `maxCacheSize`, `clearCache()`), stale-while-revalidate, retries with backoff, fallback options, minimum search length, and minimum loading duration.
+EOF
+cat .changeset/async-autocomplete.md

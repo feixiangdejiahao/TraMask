@@ -1,0 +1,1 @@
+grep -rl "partial_structure" /root/.cache/pip /root/.cache/uv /usr/local/lib/python3.12/site-packages 2>/dev/null | head; grep -rl "cattrs" /root/.cache/pip/http-v2 --include="*.body" 2>/dev/null | head

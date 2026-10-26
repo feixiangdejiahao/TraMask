@@ -1,0 +1,1 @@
+cd /app && ls -la | grep -i manifest; find . -name 'MANIFEST.in' -o -name '*.egg-info/SOURCES.txt' | head; cat aiomonitor.egg-info/SOURCES.txt | grep -E "templates|static" | head -30

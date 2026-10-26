@@ -1,0 +1,1 @@
+go test -tags compiledcall -count=1 -v -run "^TestCompiledFunctionCall_CloneKeepsNestedCallableGraphsIsolated$" .

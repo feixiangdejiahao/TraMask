@@ -1,0 +1,1 @@
+cd /app && npx jest --no-coverage 2>&1 | tail -60

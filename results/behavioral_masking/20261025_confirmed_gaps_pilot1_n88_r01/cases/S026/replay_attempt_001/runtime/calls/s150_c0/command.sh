@@ -1,0 +1,1 @@
+cd /app && git status --porcelain && echo "--- build ---" && go build ./... && echo "--- test ---" && go test ./checkers/ -run 'TestCheckers/brokenDocLink|Test(Tags|Docs|StableList)$' -count=1 2>&1 | tail -5

@@ -1,0 +1,1 @@
+git log --oneline -20 && echo '---' && cat src/cattrs/__init__.py && echo '---' && cat src/cattr/__init__.py

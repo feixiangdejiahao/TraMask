@@ -1,0 +1,1 @@
+cd /app && python -m testtools.run tests.unit.core.test_nosec_directives.NosecDirectiveTests.test_058_region_unioned_across_statement_lines

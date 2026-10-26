@@ -1,0 +1,1 @@
+cd /app && sed -i 's/assert r.failed_fields == frozenset({"td"})/assert r.failed_fields == frozenset({"td", "z"})/' /tmp/edge.py && python /tmp/edge.py

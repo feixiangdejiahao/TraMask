@@ -1,0 +1,1 @@
+cd /app && python3 -m black --version 2>&1; python3 -m flake8 --version 2>&1 | head -2

@@ -1,0 +1,1 @@
+cd /app && grep -rn "requiredAttributeNames" src --include="*.ts" | grep -v ".unit.test.ts" | grep -v ".type.test.ts" | head -100

@@ -1,0 +1,1 @@
+cd /app && cat backend/internal/models/settings.go | head -200

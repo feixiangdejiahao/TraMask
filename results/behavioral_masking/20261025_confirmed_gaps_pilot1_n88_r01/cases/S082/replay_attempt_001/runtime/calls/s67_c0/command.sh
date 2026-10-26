@@ -1,0 +1,1 @@
+cd /app && sed -n '155,190p' lib/app.js && echo '---' && sed -n '470,500p' lib/app.js

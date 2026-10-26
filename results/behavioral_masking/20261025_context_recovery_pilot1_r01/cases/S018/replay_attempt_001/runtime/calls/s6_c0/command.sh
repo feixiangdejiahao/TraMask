@@ -1,0 +1,1 @@
+cd /app && find bandit tests -type f -name '*.py' | xargs grep -l -i 'nosec' | sort

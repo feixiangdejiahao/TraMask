@@ -1,0 +1,1 @@
+cd /app && timeout 120 python -m doctest pwnlib/tubes/tube.py 2>&1 | grep -c "Failed example"; timeout 120 python -m doctest pwnlib/tubes/tube.py 2>&1 | grep "tube.tube.mux" || echo "no mux failures"

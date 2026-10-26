@@ -1,1 +1,0 @@
-../experiments/test_analogy_generation/research/generic_generation_plan.md

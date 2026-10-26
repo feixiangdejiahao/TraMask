@@ -1,0 +1,1 @@
+cd /app && npx biome check packages/core/test/prompts/async-autocomplete.test.ts packages/prompts/test/async-autocomplete.test.ts 2>&1 | grep -B3 -A3 "warning" | head -80

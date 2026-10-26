@@ -1,0 +1,1 @@
+GOROOT=$(go env GOROOT); grep -n "lookupPkg\|docLink" "$GOROOT/src/go/doc/comment/parse.go"

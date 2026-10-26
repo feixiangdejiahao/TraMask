@@ -1,0 +1,1 @@
+cd /app && git diff src/resolvers.ts | sed -n '1,180p'

@@ -1,0 +1,1 @@
+cd /app && sed -n '440,610p' script_test.go

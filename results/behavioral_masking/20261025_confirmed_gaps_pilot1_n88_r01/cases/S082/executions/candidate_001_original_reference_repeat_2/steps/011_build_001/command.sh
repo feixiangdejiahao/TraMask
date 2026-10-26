@@ -1,0 +1,1 @@
+git -c safe.directory=/app apply --whitespace=nowarn /tmp/pilot1_original_tests.patch

@@ -1,0 +1,220 @@
+   901	def insert_upsert_options(*, require_pk=False):
+   902	    def inner(fn):
+   903	        for decorator in reversed(
+   904	            (
+   905	                click.argument(
+   906	                    "path",
+   907	                    type=click.Path(file_okay=True, dir_okay=False, allow_dash=False),
+   908	                    required=True,
+   909	                ),
+   910	                click.argument("table"),
+   911	                click.argument("file", type=click.File("rb", lazy=True), required=True),
+   912	                click.option(
+   913	                    "--pk",
+   914	                    help="Columns to use as the primary key, e.g. id",
+   915	                    multiple=True,
+   916	                    required=require_pk,
+   917	                ),
+   918	            )
+   919	            + _import_options
+   920	            + (
+   921	                click.option(
+   922	                    "--batch-size", type=int, default=100, help="Commit every X records"
+   923	                ),
+   924	                click.option("--stop-after", type=int, help="Stop after X records"),
+   925	                click.option(
+   926	                    "--alter",
+   927	                    is_flag=True,
+   928	                    help="Alter existing table to add any missing columns",
+   929	                ),
+   930	                click.option(
+   931	                    "--not-null",
+   932	                    multiple=True,
+   933	                    help="Columns that should be created as NOT NULL",
+   934	                ),
+   935	                click.option(
+   936	                    "--default",
+   937	                    multiple=True,
+   938	                    type=(str, str),
+   939	                    help="Default value that should be set for a column",
+   940	                ),
+   941	                click.option(
+   942	                    "-d",
+   943	                    "--detect-types",
+   944	                    is_flag=True,
+   945	                    help="Detect types for columns in CSV/TSV data (default)",
+   946	                ),
+   947	                click.option(
+   948	                    "--no-detect-types",
+   949	                    is_flag=True,
+   950	                    help="Treat all CSV/TSV columns as TEXT",
+   951	                ),
+   952	                click.option(
+   953	                    "--analyze",
+   954	                    is_flag=True,
+   955	                    help="Run ANALYZE at the end of this operation",
+   956	                ),
+   957	                load_extension_option,
+   958	                click.option("--silent", is_flag=True, help="Do not show progress bar"),
+   959	                click.option(
+   960	                    "--strict",
+   961	                    is_flag=True,
+   962	                    default=False,
+   963	                    help="Apply STRICT mode to created table",
+   964	                ),
+   965	            )
+   966	        ):
+   967	            fn = decorator(fn)
+   968	        return fn
+   969	
+   970	    return inner
+   971	
+   972	
+   973	def insert_upsert_implementation(
+   974	    path,
+   975	    table,
+   976	    file,
+   977	    pk,
+   978	    flatten,
+   979	    nl,
+   980	    csv,
+   981	    tsv,
+   982	    empty_null,
+   983	    lines,
+   984	    text,
+   985	    convert,
+   986	    imports,
+   987	    delimiter,
+   988	    quotechar,
+   989	    sniff,
+   990	    no_headers,
+   991	    encoding,
+   992	    batch_size,
+   993	    stop_after,
+   994	    alter,
+   995	    upsert,
+   996	    ignore=False,
+   997	    replace=False,
+   998	    truncate=False,
+   999	    not_null=None,
+  1000	    default=None,
+  1001	    detect_types=None,
+  1002	    no_detect_types=False,
+  1003	    analyze=False,
+  1004	    load_extension=None,
+  1005	    silent=False,
+  1006	    bulk_sql=None,
+  1007	    functions=None,
+  1008	    strict=False,
+  1009	):
+  1010	    db = sqlite_utils.Database(path)
+  1011	    _register_db_for_cleanup(db)
+  1012	    _load_extensions(db, load_extension)
+  1013	    _maybe_register_functions(db, functions)
+  1014	    if (delimiter or quotechar or sniff or no_headers) and not tsv:
+  1015	        csv = True
+  1016	    if (nl + csv + tsv) >= 2:
+  1017	        raise click.ClickException("Use just one of --nl, --csv or --tsv")
+  1018	    if (csv or tsv) and flatten:
+  1019	        raise click.ClickException("--flatten cannot be used with --csv or --tsv")
+  1020	    if empty_null and not (csv or tsv):
+  1021	        raise click.ClickException("--empty-null can only be used with --csv or --tsv")
+  1022	    if encoding and not (csv or tsv):
+  1023	        raise click.ClickException("--encoding must be used with --csv or --tsv")
+  1024	    if pk and len(pk) == 1:
+  1025	        pk = pk[0]
+  1026	    encoding = encoding or "utf-8-sig"
+  1027	
+  1028	    # The --sniff option needs us to buffer the file to peek ahead
+  1029	    sniff_buffer = None
+  1030	    decoded_buffer = None
+  1031	    if sniff:
+  1032	        sniff_buffer = io.BufferedReader(file, buffer_size=4096)
+  1033	        decoded_buffer = io.TextIOWrapper(sniff_buffer, encoding=encoding)
+  1034	    else:
+  1035	        decoded_buffer = io.TextIOWrapper(file, encoding=encoding)
+  1036	
+  1037	    tracker = None
+  1038	    with file_progress(decoded_buffer, silent=silent) as decoded:
+  1039	        if csv or tsv:
+  1040	            if sniff:
+  1041	                # Read first 2048 bytes and use that to detect
+  1042	                assert sniff_buffer is not None
+  1043	                first_bytes = sniff_buffer.peek(2048)
+  1044	                dialect = csv_std.Sniffer().sniff(
+  1045	                    first_bytes.decode(encoding, "ignore")
+  1046	                )
+  1047	            else:
+  1048	                dialect = "excel-tab" if tsv else "excel"
+  1049	            csv_reader_args: dict[str, Any] = {"dialect": dialect}
+  1050	            if delimiter:
+  1051	                csv_reader_args["delimiter"] = delimiter
+  1052	            if quotechar:
+  1053	                csv_reader_args["quotechar"] = quotechar
+  1054	            reader = csv_std.reader(decoded, **csv_reader_args)  # type: ignore
+  1055	            first_row = next(reader)
+  1056	            if no_headers:
+  1057	                headers = ["untitled_{}".format(i + 1) for i in range(len(first_row))]
+  1058	                reader = itertools.chain([first_row], reader)
+  1059	            else:
+  1060	                headers = first_row
+  1061	            if empty_null:
+  1062	                docs = (
+  1063	                    dict(zip(headers, [None if cell == "" else cell for cell in row]))
+  1064	                    for row in reader
+  1065	                )
+  1066	            else:
+  1067	                docs = (dict(zip(headers, row)) for row in reader)
+  1068	            # detect_types is now the default, unless --no-detect-types is passed
+  1069	            if not no_detect_types:
+  1070	                tracker = TypeTracker()
+  1071	                docs = tracker.wrap(docs)
+  1072	        elif lines:
+  1073	            docs = ({"line": line.strip()} for line in decoded)
+  1074	        elif text:
+  1075	            docs = ({"text": decoded.read()},)
+  1076	        else:
+  1077	            try:
+  1078	                if nl:
+  1079	                    docs = (json.loads(line) for line in decoded if line.strip())
+  1080	                else:
+  1081	                    docs = json.load(decoded)
+  1082	                    if isinstance(docs, dict):
+  1083	                        docs = [docs]
+  1084	            except json.decoder.JSONDecodeError as ex:
+  1085	                raise click.ClickException(
+  1086	                    "Invalid JSON - use --csv for CSV or --tsv for TSV files\n\nJSON error: {}".format(
+  1087	                        ex
+  1088	                    )
+  1089	                )
+  1090	            if flatten:
+  1091	                docs = (_flatten(doc) for doc in docs)
+  1092	
+  1093	        if stop_after:
+  1094	            docs = itertools.islice(docs, stop_after)
+  1095	
+  1096	        if convert:
+  1097	            variable = "row"
+  1098	            if lines:
+  1099	                variable = "line"
+  1100	            elif text:
+  1101	                variable = "text"
+  1102	            fn = _compile_code(convert, imports, variable=variable)
+  1103	            if lines:
+  1104	                docs = (fn(doc["line"]) for doc in docs)
+  1105	            elif text:
+  1106	                # Special case: this is allowed to be an iterable
+  1107	                text_value = list(docs)[0]["text"]
+  1108	                fn_return = fn(text_value)
+  1109	                if isinstance(fn_return, dict):
+  1110	                    docs = [fn_return]
+  1111	                else:
+  1112	                    try:
+  1113	                        docs = iter(fn_return)
+  1114	                    except TypeError:
+  1115	                        raise click.ClickException(
+  1116	                            "--convert must return dict or iterator"
+  1117	                        )
+  1118	            else:
+  1119	                docs = (fn(doc) or doc for doc in docs)
+  1120	

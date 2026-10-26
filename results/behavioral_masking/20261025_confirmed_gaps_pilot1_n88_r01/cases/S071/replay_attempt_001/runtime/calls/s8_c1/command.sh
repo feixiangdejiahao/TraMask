@@ -1,0 +1,1 @@
+cd /app && cat src/custom-transformer-registry.ts && echo "=====REGISTRY=====" && cat src/registry.ts

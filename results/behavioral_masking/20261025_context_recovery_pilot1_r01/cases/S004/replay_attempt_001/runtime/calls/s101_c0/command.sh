@@ -1,0 +1,1 @@
+cd /app && python /tmp/cli_test.py >/tmp/cli_out.txt 2>&1; echo "CLI exit: $?"; tail -5 /tmp/cli_out.txt; echo '---'; python /tmp/web_test.py 2>&1 | tail -12

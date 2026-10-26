@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs reset --hard 6c7ebba57821989733a11d6f3888816658584d97

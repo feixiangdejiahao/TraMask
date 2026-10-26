@@ -1,0 +1,1 @@
+go env GOPATH GOMODCACHE 2>/dev/null; find / -path "*d5/tengo*" -name "objects.go" 2>/dev/null | head; ls $(go env GOMODCACHE)/github.com/d5 2>/dev/null

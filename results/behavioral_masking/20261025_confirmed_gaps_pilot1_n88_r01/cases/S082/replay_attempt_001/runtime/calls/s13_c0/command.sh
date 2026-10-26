@@ -1,0 +1,1 @@
+cd /app && ls tests && cat package.json | head -60

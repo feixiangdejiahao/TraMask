@@ -1,0 +1,1 @@
+sleep 15; echo "=== handlers ==="; cat /tmp/f_hand.log | tail -8; ps aux | grep '[g]o test' | head

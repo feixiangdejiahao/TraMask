@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary c981f9c7aa91b83cc9bd33a09ecee9e751b06e8d -- changelog.d/1470.feature.rst src/dateutil/rrule.py

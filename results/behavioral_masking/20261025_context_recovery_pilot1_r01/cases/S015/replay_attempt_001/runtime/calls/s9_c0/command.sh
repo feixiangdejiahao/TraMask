@@ -1,0 +1,1 @@
+sed -n '260,499p' bandit/core/manager.py

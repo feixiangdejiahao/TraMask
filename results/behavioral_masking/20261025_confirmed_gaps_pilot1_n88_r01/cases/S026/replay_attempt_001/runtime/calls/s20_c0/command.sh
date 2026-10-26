@@ -1,0 +1,1 @@
+GOROOT=$(go env GOROOT); nl -ba "$GOROOT/src/go/doc/comment/parse.go" | sed -n '875,900p'; echo "==== go version ===="; go version; cat /usr/local/go/VERSION 2>/dev/null; ls -la /usr/local/go/bin/go 2>/dev/null; which go; readlink -f $(which go)

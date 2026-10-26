@@ -1,0 +1,1 @@
+cd /app && cat .changeset/afraid-donkeys-sin.md .changeset/big-pants-invite.md .changeset/tricky-states-tease.md 2>/dev/null

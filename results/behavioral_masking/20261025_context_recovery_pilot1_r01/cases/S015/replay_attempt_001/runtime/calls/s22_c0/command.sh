@@ -1,0 +1,1 @@
+grep -n "def update_scores" -A 25 bandit/core/node_visitor.py && grep -n "RANKING_VALUES\|update_scores" bandit/core/tester.py | head -20

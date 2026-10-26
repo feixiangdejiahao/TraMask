@@ -1,0 +1,1 @@
+sleep 25; cat /tmp/test_drift.log 2>/dev/null | tail -100

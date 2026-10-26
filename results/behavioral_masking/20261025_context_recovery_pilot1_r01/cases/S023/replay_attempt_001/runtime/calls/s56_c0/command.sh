@@ -1,0 +1,1 @@
+find /root/.cache/pip -type f 2>/dev/null | head -30; find /root/.cache/pip -type f -name "*.body" 2>/dev/null | xargs grep -l -i "cattrs" 2>/dev/null | head

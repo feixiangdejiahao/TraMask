@@ -1,0 +1,1 @@
+cd /app && git show HEAD:packages/core/src/prompts/autocomplete.ts | sed -n '78,90p'

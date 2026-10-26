@@ -1,0 +1,1 @@
+cd /app && sed -n '194,198p' bandit/core/cache.py && sed -n '623,627p' bandit/core/manager.py

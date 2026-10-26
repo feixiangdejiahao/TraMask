@@ -1,0 +1,1 @@
+cd /app && sed -n '1,25p' checkers/testdata/brokenDocLink/negative_tests.go | cat -n

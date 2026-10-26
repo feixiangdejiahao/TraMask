@@ -1,0 +1,1 @@
+cd /app && timeout 25 npx mocha tests/*_tests.js tests/**/*_tests.js --grep "ci mode app" --invert 2>&1 | tail -20

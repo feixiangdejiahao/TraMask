@@ -1,0 +1,1 @@
+cd /app && grep -n "def execute_returning_dicts\|def resolve_foreign_keys\|def create_table_sql\|def reset_counts" sqlite_utils/db.py

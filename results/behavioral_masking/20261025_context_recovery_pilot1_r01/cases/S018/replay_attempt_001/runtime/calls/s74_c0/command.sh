@@ -1,0 +1,1 @@
+cd /app && python -m testtools.run tests.unit.core.test_nosec 2>&1 | grep -E 'FAIL|Error|assertEqual|expected|actual' | head -30

@@ -1,0 +1,1 @@
+cd /app && find skills -type f | head -30 && grep -rn "Tracking modifiers\|Changed(ChildOf\|createAdded" skills | head -30

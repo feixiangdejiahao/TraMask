@@ -1,0 +1,1 @@
+cd /app && go test ./checkers/ -count=1 2>&1 | tail -40

@@ -1,0 +1,1 @@
+cd /app && npx biome check --write packages/core/src/prompts/autocomplete.ts packages/core/src/prompts/prompt.ts packages/core/src/index.ts packages/prompts/src/autocomplete.ts packages/core/test/prompts/async-autocomplete.test.ts packages/prompts/test/async-autocomplete.test.ts 2>&1 | tail -15

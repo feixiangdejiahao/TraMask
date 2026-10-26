@@ -1,0 +1,1 @@
+git -c safe.directory=/app show 06a1adb7a70e85e7322d8cfae3181508785de95d:tests/runners/process_test_runner_tests.js > tests/runners/process_test_runner_tests.js

@@ -1,0 +1,1 @@
+cd /app && python /tmp/repro2.py 2>&1 | tail -30

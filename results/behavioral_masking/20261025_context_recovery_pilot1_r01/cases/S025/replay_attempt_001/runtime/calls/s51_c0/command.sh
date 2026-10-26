@@ -1,0 +1,1 @@
+cd /app && grep -n '258' packages/core/src/prompts/autocomplete.ts | cat -A

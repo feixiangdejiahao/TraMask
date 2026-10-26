@@ -1,0 +1,1 @@
+cd /app && git checkout src/container.ts && grep -n "function dispose" src/container.ts && wc -l src/container.ts

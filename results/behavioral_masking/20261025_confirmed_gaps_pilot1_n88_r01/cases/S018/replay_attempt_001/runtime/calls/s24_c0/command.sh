@@ -1,0 +1,1 @@
+cd /app && sed -n '2760,3060p' tests/test_rrule.py

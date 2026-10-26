@@ -1,0 +1,1 @@
+cd /app && timeout 30 python /tmp/test_mux_basic.py && timeout 30 python /tmp/test_flow.py && timeout 30 python /tmp/test_api.py

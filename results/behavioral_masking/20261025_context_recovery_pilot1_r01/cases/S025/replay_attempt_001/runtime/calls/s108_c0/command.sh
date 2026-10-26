@@ -1,0 +1,1 @@
+cd /app && git diff packages/prompts/src/autocomplete.ts

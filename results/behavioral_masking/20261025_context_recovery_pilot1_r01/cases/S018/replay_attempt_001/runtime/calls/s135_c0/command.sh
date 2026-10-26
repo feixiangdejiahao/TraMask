@@ -1,0 +1,1 @@
+cd /app && git diff bandit/core/manager.py

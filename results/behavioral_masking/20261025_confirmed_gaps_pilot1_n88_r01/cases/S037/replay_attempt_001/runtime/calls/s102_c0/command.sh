@@ -1,0 +1,1 @@
+cd /app && NODE_ENV=development BABEL_ENV=test npx jest 2>&1 | tail -8 && npx tsc --noEmit && echo "tsc ok" && npx eslint src/core/atomic-selectors.ts src/core/selectors.ts src/core/reducers.ts src/kea/build.ts src/kea/context.ts src/kea/kea.ts src/kea/store.ts src/types.ts test/jest/atomic-selectors.js && echo "eslint ok"

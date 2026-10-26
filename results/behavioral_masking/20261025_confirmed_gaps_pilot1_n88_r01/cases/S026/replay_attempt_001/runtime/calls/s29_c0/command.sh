@@ -1,0 +1,1 @@
+cd /app && go env GOMODCACHE GOFLAGS GOPROXY && ls $(go env GOMODCACHE) 2>/dev/null | head -20

@@ -1,0 +1,1 @@
+cd /app && sed -n '430,560p' src/types.ts && echo '--- mount.ts ---' && cat src/kea/mount.ts

@@ -1,0 +1,1 @@
+cd /app && sed -n '480,620p' compiler.go && sed -n '980,1180p' compiler.go

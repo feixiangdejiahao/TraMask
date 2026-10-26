@@ -1,0 +1,1 @@
+cd /app && git show --stat HEAD | head -40 && echo '---' && git diff HEAD^ --name-only | wc -l

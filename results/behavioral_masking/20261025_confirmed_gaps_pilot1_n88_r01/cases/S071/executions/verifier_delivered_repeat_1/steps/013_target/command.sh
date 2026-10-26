@@ -1,0 +1,1 @@
+./node_modules/.bin/vitest run src/error-stack.test.ts -t "registerErrorStackProcessor fires even when no errorStack option is set"

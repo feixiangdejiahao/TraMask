@@ -1,0 +1,1 @@
+cd /app && cat .gitignore && echo "---" && git status --short

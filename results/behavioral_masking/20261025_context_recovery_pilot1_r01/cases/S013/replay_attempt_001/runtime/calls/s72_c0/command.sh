@@ -1,0 +1,1 @@
+cd /app && grep -n "initializer\|Initializer" lib/awilix.d.ts | head -30; echo "---container types---"; grep -n "initialize\|Initialize" lib/awilix.d.ts | head -30

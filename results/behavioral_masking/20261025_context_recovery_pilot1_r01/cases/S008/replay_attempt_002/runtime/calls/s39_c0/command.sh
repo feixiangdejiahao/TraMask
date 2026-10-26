@@ -1,0 +1,1 @@
+cd /app && grep -rn "drift\|Drift\|compliance\|Compliance\|baseline\|Baseline" backend --include="*.go" | grep -v "_test.go" | head -40

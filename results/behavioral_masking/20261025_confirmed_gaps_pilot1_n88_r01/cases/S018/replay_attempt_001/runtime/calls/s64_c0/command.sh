@@ -1,0 +1,1 @@
+cd /app && grep -n "    def to_ical(self):" src/dateutil/rrule.py | head -1 && sed -n "$(grep -n '    def to_ical(self):' src/dateutil/rrule.py | head -1 | cut -d: -f1),+16p" src/dateutil/rrule.py

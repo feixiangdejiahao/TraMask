@@ -1,0 +1,1 @@
+cd /app && python -m ruff check src/cattrs/partial.py src/cattr/partial.py src/cattrs/converters.py src/cattrs/__init__.py src/cattr/__init__.py tests/test_partial.py 2>&1 | head -50

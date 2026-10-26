@@ -1,0 +1,1 @@
+cd /app && cat pwn/__init__.py | head -80

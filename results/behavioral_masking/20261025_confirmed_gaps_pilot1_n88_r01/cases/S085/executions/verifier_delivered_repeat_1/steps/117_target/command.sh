@@ -1,0 +1,1 @@
+pnpm vitest --run test/shard-balance.test.ts -t "isolateSlowThreshold"

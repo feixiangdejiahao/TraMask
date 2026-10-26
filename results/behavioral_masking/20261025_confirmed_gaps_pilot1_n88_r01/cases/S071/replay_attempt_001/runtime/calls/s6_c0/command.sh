@@ -1,0 +1,1 @@
+cd /app && cat src/index.ts

@@ -1,0 +1,1 @@
+cd /app && sed -n '1,20p' checkers/testdata/brokenDocLink/positive_tests.go && echo "=====" && cat checkers/testdata/brokenDocLink/positive_tests.go

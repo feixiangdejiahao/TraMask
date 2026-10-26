@@ -1,0 +1,1 @@
+cd /app && grep -rn "_importable" --include='*.go' --include='go.mod' . | head -20 && ls -la checkers/testdata/_importable/ && find checkers/testdata -name go.mod -maxdepth 3

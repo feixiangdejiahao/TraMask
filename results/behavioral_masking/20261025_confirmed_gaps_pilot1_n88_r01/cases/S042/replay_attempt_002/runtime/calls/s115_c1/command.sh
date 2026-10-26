@@ -1,0 +1,1 @@
+cd /app && git diff -- packages/core/src/relation/tracking.ts packages/core/src/query/utils/check-query-tracking.ts | head -300

@@ -1,0 +1,188 @@
+from dataclasses import dataclass
+
+import pytest
+
+from adaptix import DebugTrail, ExtraForbid, NameStyle, Retort, name_mapping
+from adaptix.load_error import ExtraFieldsLoadError, NoRequiredFieldsLoadError
+from adaptix.struct_trail import get_trail
+
+
+@dataclass
+class Book:
+    title: str
+    price: int
+    author: str = "unknown"
+
+
+def test_aliases_public_api():
+    retort = Retort(
+        recipe=[
+            name_mapping(
+                aliases={
+                    "title": ["name", "book_name"],
+                    "price": "cost",
+                },
+            ),
+        ],
+    )
+
+    assert retort.load({"title": "T", "price": 1}, Book) == Book("T", 1)
+    assert retort.load({"name": "T", "cost": 1}, Book) == Book("T", 1)
+    assert retort.load({"book_name": "T", "cost": 1, "author": "A"}, Book) == Book("T", 1, "A")
+
+
+def test_aliases_extra_forbid_public():
+    retort = Retort(
+        recipe=[
+            name_mapping(
+                aliases={"title": "name"},
+                extra_in=ExtraForbid(),
+            ),
+        ],
+        debug_trail=DebugTrail.FIRST,
+    )
+    assert retort.load({"name": "T", "price": 1}, Book) == Book("T", 1)
+
+    with pytest.raises(ExtraFieldsLoadError):
+        retort.load({"name": "T", "price": 1, "extra": 2}, Book)
+
+
+def test_aliases_conflict_public():
+    retort = Retort(
+        recipe=[
+            name_mapping(aliases={"title": "name"}),
+        ],
+        debug_trail=DebugTrail.FIRST,
+    )
+    with pytest.raises(ExtraFieldsLoadError):
+        retort.load({"title": "T", "name": "N", "price": 1}, Book)
+
+
+def test_aliases_missing_required_public():
+    retort = Retort(
+        recipe=[
+            name_mapping(aliases={"title": "name"}),
+        ],
+        debug_trail=DebugTrail.FIRST,
+    )
+    with pytest.raises(NoRequiredFieldsLoadError):
+        retort.load({"name": "T"}, Book)
+
+
+def test_alias_style_public():
+    @dataclass
+    class Item:
+        item_name: str
+        unit_price: int
+
+    retort = Retort(
+        recipe=[
+            name_mapping(alias_style=NameStyle.CAMEL),
+        ],
+    )
+    assert retort.load({"itemName": "T", "unitPrice": 1}, Item) == Item("T", 1)
+    assert retort.load({"item_name": "T", "unit_price": 1}, Item) == Item("T", 1)
+
+
+def test_alias_trail_public():
+    retort = Retort(
+        recipe=[
+            name_mapping(aliases={"price": "cost"}),
+        ],
+        debug_trail=DebugTrail.FIRST,
+    )
+    with pytest.raises(Exception) as exc_info:
+        retort.load({"title": "T", "cost": "bad"}, Book)
+    assert list(get_trail(exc_info.value)) == ["cost"]
+
+
+def test_aliases_dump_uses_primary_keys():
+    retort = Retort(
+        recipe=[
+            name_mapping(aliases={"title": "name"}),
+        ],
+    )
+    assert retort.dump(Book("T", 1), Book) == {"title": "T", "price": 1, "author": "unknown"}
+
+
+def test_aliases_validation_errors():
+    with pytest.raises(ValueError, match="are equal to its primary key"):
+        Retort(recipe=[name_mapping(aliases={"title": "title"})]).get_loader(Book)
+
+    with pytest.raises(ValueError, match="collides with primary key"):
+        Retort(recipe=[name_mapping(aliases={"title": "price"})]).get_loader(Book)
+
+    with pytest.raises(ValueError, match="collides with alias"):
+        Retort(recipe=[name_mapping(aliases={"title": "x", "price": "x"})]).get_loader(Book)
+
+
+def test_aliases_as_list_ignored():
+    @dataclass
+    class Point:
+        x: int
+        y: int
+
+    retort = Retort(
+        recipe=[
+            name_mapping(aliases={"x": "xx"}, as_list=True),
+        ],
+    )
+    assert retort.load([1, 2], Point) == Point(1, 2)
+
+
+def test_aliases_overlay_merge_first_wins():
+    retort = Retort(
+        recipe=[
+            name_mapping(aliases={"title": "outer"}),
+            name_mapping(aliases={"title": "inner"}),
+        ],
+        debug_trail=DebugTrail.FIRST,
+    )
+    assert retort.load({"outer": "T", "price": 1}, Book) == Book("T", 1)
+    with pytest.raises(NoRequiredFieldsLoadError):
+        retort.load({"inner": "T", "price": 1}, Book)
+
+
+def test_aliases_literal_under_name_style():
+    @dataclass
+    class Item:
+        some_field: int
+
+    retort = Retort(
+        recipe=[
+            name_mapping(
+                name_style=NameStyle.UPPER_SNAKE,
+                aliases={"some_field": "myAlias"},
+            ),
+        ],
+    )
+    assert retort.load({"myAlias": 1}, Item) == Item(1)
+    assert retort.load({"SOME_FIELD": 1}, Item) == Item(1)
+
+
+def test_alias_style_generated_pruned_when_equal_primary():
+    @dataclass
+    class Item:
+        some_field: int
+
+    retort = Retort(
+        recipe=[
+            name_mapping(alias_style=NameStyle.LOWER_SNAKE),
+        ],
+    )
+    # generated alias equals primary key and is pruned, so primary still works
+    assert retort.load({"some_field": 1}, Item) == Item(1)
+
+
+def test_aliases_generated_multiple_styles():
+    @dataclass
+    class Item:
+        some_field: int
+
+    retort = Retort(
+        recipe=[
+            name_mapping(alias_style=[NameStyle.CAMEL, NameStyle.UPPER_SNAKE]),
+        ],
+    )
+    assert retort.load({"someField": 1}, Item) == Item(1)
+    assert retort.load({"SOME_FIELD": 1}, Item) == Item(1)

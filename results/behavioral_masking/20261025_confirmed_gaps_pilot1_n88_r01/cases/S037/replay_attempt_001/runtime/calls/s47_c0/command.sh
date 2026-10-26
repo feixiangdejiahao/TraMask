@@ -1,0 +1,1 @@
+cd /app && BABEL_ENV=test npx jest test/jest/atomic-selectors.js 2>&1 | tail -120

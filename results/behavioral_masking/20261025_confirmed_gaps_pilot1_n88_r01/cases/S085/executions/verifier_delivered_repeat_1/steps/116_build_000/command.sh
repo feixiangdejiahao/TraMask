@@ -1,0 +1,1 @@
+cd /app && pnpm --filter vitest run build

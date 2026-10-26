@@ -1,0 +1,3 @@
+cd /app/backend && nohup go test ./internal/models/ ./internal/database/ -run 'TestGetEmbeddedMigrationVersions_ProvidersMatch' -count=1 > /tmp/test_final1.log 2>&1 &
+nohup go test ./internal/services/ -run 'Drift|SettingsService_EnsureDefaultSettings' ./internal/huma/handlers/ -run 'TestComplianceRoutes' ./pkg/scheduler/ -run 'TestDriftDetectionJob' -count=1 > /tmp/test_final2.log 2>&1 &
+echo "final tests started"

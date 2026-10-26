@@ -1,0 +1,1 @@
+cd /app && git checkout -b add-bail-on-test-failure && git branch --show-current

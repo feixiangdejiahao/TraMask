@@ -1,0 +1,1 @@
+cd /app && grep -rn "bail\|abort" lib public bin testem.js --include='*.js' | head -80

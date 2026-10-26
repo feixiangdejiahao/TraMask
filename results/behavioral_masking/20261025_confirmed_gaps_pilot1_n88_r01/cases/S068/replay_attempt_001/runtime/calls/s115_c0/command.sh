@@ -1,0 +1,1 @@
+cd /app && git diff sqlite_utils/cli.py

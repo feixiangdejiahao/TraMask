@@ -1,0 +1,1 @@
+find / -path /proc -prune -o -name 'mux.py' -print 2>/dev/null | grep -v /app/pwnlib | head; find / -path /proc -prune -o -type d -name 'pwntools*' -print 2>/dev/null | head; pip list 2>/dev/null | grep -i pwntools

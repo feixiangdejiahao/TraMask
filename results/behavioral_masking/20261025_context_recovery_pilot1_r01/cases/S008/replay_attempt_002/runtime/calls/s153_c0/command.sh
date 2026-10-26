@@ -1,0 +1,1 @@
+cd /app && git log --oneline -3 && git status && git branch --show-current

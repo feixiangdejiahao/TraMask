@@ -1,0 +1,1 @@
+cd /app && grep -n "func FromInterface\|func ToInterface\|case \*Array\|case \*Map\|case Object" objects.go | head -40

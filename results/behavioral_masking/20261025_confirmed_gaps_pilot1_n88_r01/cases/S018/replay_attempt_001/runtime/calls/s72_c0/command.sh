@@ -1,0 +1,1 @@
+cd /app && python -m pytest tests/test_rrule.py tests/test_imports.py tests/test_internals.py tests/test_parser.py tests/test_tz.py -q 2>&1 | tail -10

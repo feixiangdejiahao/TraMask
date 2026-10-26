@@ -1,0 +1,1 @@
+go test ./checkers/ -run '^TestCheckers/brokenDocLink$' -count=1 -timeout 120s -v

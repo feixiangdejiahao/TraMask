@@ -1,0 +1,1 @@
+cd /app && sed -i "s/export type { AutocompleteOptions } from '.\/prompts\/autocomplete.js';/export type { AutocompleteOptions, AutocompleteResolver } from '.\/prompts\/autocomplete.js';/" packages/core/src/index.ts && grep -n "Autocomplete" packages/core/src/index.ts && npx tsc --noEmit 2>&1 | grep -v "npm warn" | head

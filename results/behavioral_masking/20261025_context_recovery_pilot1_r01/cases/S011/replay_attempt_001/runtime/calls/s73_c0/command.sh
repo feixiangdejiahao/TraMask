@@ -1,0 +1,1 @@
+cd /app && git diff --stat && git diff src/resolvers.ts | head -200

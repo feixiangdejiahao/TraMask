@@ -1,0 +1,1 @@
+cd /app && npx tsc -p tsconfig.json --noEmit --pretty 2>&1 | head -60

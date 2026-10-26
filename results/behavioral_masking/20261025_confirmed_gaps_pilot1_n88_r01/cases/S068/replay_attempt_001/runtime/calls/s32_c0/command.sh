@@ -1,0 +1,1 @@
+grep -n "^DEFAULT\|^class Default\|DEFAULT =" sqlite_utils/db.py && sed -n '250,305p' sqlite_utils/db.py

@@ -1,0 +1,1 @@
+cd /app && wc -l src/core/atomic-selectors.ts && sed -n '1,80p' src/core/atomic-selectors.ts && echo '...' && sed -n '180,280p' src/core/atomic-selectors.ts

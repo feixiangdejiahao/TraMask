@@ -1,0 +1,1 @@
+cd /app && for f in checkers/testdata/_integration/*/linttest.params; do echo "=== $f ==="; cat "$f"; done 2>/dev/null | head -60

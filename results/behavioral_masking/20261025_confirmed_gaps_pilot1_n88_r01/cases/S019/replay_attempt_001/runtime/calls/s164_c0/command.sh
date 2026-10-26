@@ -1,0 +1,1 @@
+cd /app && cat vitest.config.ts && find src -name "*.type.test.ts" | head -20

@@ -1,0 +1,1 @@
+cd /app/libs/core && ruff --version 2>/dev/null && ruff check langchain_core/runnables/coalesce.py langchain_core/runnables/base.py langchain_core/runnables/__init__.py 2>&1 | head -60

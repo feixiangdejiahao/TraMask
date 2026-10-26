@@ -1,0 +1,1 @@
+cd /app && sed -n '180,210p' tests/ci/ci_tests.js && timeout 25 npx mocha tests/ci/ci_tests.js 2>&1 | grep -B5 -A20 "1)" | head -80

@@ -1,0 +1,1 @@
+sed -n '22,200p' /app/packages/core/src/query/query-result.ts

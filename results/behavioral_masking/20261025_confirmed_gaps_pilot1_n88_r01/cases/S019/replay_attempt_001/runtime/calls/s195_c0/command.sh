@@ -1,0 +1,1 @@
+cd /app && cat src/schema/string/resolve.ts && cat src/schema/string/types.ts | head -40

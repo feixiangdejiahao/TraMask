@@ -1,0 +1,1 @@
+cd /app && cat src/errors/dynamoDBToolboxError.ts && echo "===BLUEPRINT===" && cat src/errors/blueprint.ts && echo "===item errors===" && cat src/schema/item/errors.ts && echo "===map errors===" && cat src/schema/map/errors.ts

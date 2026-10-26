@@ -1,0 +1,1 @@
+cd /app && cat jest-setup.js && echo "---" && cat .github/workflows/*.yml 2>/dev/null | head -40

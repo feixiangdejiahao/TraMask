@@ -1,0 +1,21 @@
+cd /app && python - <<'EOF'
+from datetime import datetime
+from dateutil import tz
+from dateutil.rrule import *
+
+NYC = tz.gettz('America/New_York')
+r = rrule(YEARLY, count=3, dtstart=datetime(1997,9,2,9,0,tzinfo=NYC))
+ical = r.to_ical()
+assert '\r\n' in ical
+rr = rrulestr(ical)
+assert list(rr) == list(r)
+print("CRLF roundtrip OK")
+
+# rruleset with CRLF and two tz
+rs = rruleset()
+rs.rrule(rrule(YEARLY, count=2, dtstart=datetime(1997,1,2,9,0,tzinfo=NYC)))
+rs.rdate(datetime(1998,1,1,9,0,tzinfo=tz.gettz('Europe/Brussels')))
+rs2 = rrulestr(rs.to_ical())
+assert list(rs) == list(rs2)
+print("rruleset CRLF roundtrip OK")
+EOF

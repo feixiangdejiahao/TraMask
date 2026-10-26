@@ -1,0 +1,1 @@
+cd /app && grep -n "normalizeStackNewlines converts\|trims leading whitespace" src/error-stack.test.ts

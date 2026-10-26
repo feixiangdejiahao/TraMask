@@ -1,0 +1,1 @@
+cd /app && sed -n '100,210p' backend/internal/bootstrap/router_bootstrap.go

@@ -1,0 +1,1 @@
+python -m pytest tests/test_partial.py::test_refine_new_data_takes_precedence -q -o addopts="" -p no:cacheprovider

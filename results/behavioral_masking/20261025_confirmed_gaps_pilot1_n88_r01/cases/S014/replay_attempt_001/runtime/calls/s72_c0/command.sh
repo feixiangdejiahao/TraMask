@@ -1,0 +1,1 @@
+cd /app && grep -n "scheduleDebouncedFetch" -A 8 packages/core/src/prompts/autocomplete.ts | cat -A | head -12

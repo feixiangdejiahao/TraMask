@@ -1,0 +1,1 @@
+cd /app && echo "===== POSITIVE =====" && cat checkers/testdata/brokenDocLink/positive_tests.go && echo "===== NEGATIVE =====" && cat checkers/testdata/brokenDocLink/negative_tests.go

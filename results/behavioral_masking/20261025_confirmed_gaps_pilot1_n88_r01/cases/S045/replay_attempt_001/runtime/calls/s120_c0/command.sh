@@ -1,0 +1,1 @@
+cd /app/libs/core && timeout 400 python -m pytest tests/unit_tests -q -x --ignore=tests/unit_tests/runnables 2>&1 | tail -15

@@ -1,0 +1,1 @@
+pnpm vitest --run test/duration-shard.test.ts -t "isolateSlowThreshold isolates slow files across shards"

@@ -1,0 +1,1 @@
+cd /app && sed -n '85,115p' backend/internal/models/settings.go && echo "=====SETTINGS TEST=====" && head -80 backend/internal/models/settings_test.go 2>/dev/null || ls backend/internal/models/

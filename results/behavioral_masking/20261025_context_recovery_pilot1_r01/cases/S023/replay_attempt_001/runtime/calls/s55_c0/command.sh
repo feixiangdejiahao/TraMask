@@ -1,0 +1,1 @@
+find ~/.cache/uv -type f 2>/dev/null | head -20; ls -la ~/.cache/uv 2>/dev/null; find /root/.cache -maxdepth 4 -type d 2>/dev/null | head -40

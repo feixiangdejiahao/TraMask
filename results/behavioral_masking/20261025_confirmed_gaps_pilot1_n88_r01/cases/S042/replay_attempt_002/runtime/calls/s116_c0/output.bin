@@ -1,0 +1,325 @@
+diff --git a/packages/core/src/query/query.ts b/packages/core/src/query/query.ts
+index c68f4d9..39918aa 100644
+--- a/packages/core/src/query/query.ts
++++ b/packages/core/src/query/query.ts
+@@ -2,7 +2,8 @@ import { $internal } from '../common';
+ import type { Entity } from '../entity/types';
+ import { getEntityId } from '../entity/utils/pack-entity';
+ import { hasRelationPair } from '../relation/relation';
+-import type { Relation } from '../relation/types';
++import { hasPairEvent } from '../relation/tracking';
++import type { Relation, RelationPair } from '../relation/types';
+ import { isRelationPair } from '../relation/utils/is-relation';
+ import { registerTrait, trait } from '../trait/trait';
+ import { getTraitInstance, hasTraitInstance } from '../trait/trait-instance';
+@@ -113,7 +114,8 @@ export function resetQueryTrackingBitmasks(query: QueryInstance, eid: number) {
+ 
+ /**
+  * Unified function to process tracking modifiers with explicit AND/OR logic.
+- * Groups modifiers by (type, id, logic) key so same-tracker calls are combined.
++ * Pair inputs are split into their own tracking groups so each target is tracked
++ * independently while still composing with traits and other modifiers.
+  */
+ function processTrackingModifier(
+     world: World,
+@@ -127,10 +129,55 @@ function processTrackingModifier(
+     if (!trackingType) return;
+ 
+     const id = modifier.id;
+-    // Key includes logic so Changed(A) at top-level stays separate from Or(Changed(A))
++    const pairs = modifier.pairs ?? [];
++    const pairTraitIds = new Set<number>();
++
++    // Each relation pair becomes its own tracking group so per-target state is distinct.
++    for (const pair of pairs) {
++        const pairCtx = pair[$internal];
++        const relation = pairCtx.relation as Relation<Trait>;
++        const trait = relation[$internal].trait;
++        pairTraitIds.add(trait.id);
++
++        const target = pairCtx.target;
++        const key = `${trackingType}-${id}-${logic}-pair:${trait.id}:${target}`;
++
++        let group = groupsMap.get(key);
++        if (!group) {
++            group = {
++                logic,
++                type: trackingType,
++                id,
++                bitmasks: [],
++                trackers: [],
++                pairs: [pair],
++            };
++            groupsMap.set(key, group);
++            query.trackingGroups.push(group);
++        }
++
++        if (!hasTraitInstance(ctx.traitInstances, trait)) registerTrait(world, trait);
++        const instance = getTraitInstance(ctx.traitInstances, trait)!;
++        query.traits.push(trait);
++        query.traitInstances.all.push(instance);
++
++        const genId = instance.generationId;
++        group.bitmasks[genId] = (group.bitmasks[genId] || 0) | instance.bitflag;
++
++        if (trackingType === 'change') {
++            query.changedTraits.add(trait);
++            query.hasChangedModifiers = true;
++        }
++
++        query.isTracking = true;
++    }
++
++    // Non-pair traits are grouped together (existing trait-level behavior).
++    const regularTraits = modifier.traits.filter((trait) => !pairTraitIds.has(trait.id));
++    if (regularTraits.length === 0) return;
++
+     const key = `${trackingType}-${id}-${logic}`;
+ 
+-    // Find or create tracking group
+     let group = groupsMap.get(key);
+     if (!group) {
+         group = {
+@@ -144,8 +191,7 @@ function processTrackingModifier(
+         query.trackingGroups.push(group);
+     }
+ 
+-    // Register traits and build bitmasks
+-    for (const trait of modifier.traits) {
++    for (const trait of regularTraits) {
+         if (!hasTraitInstance(ctx.traitInstances, trait)) registerTrait(world, trait);
+         const instance = getTraitInstance(ctx.traitInstances, trait)!;
+         query.traits.push(trait);
+@@ -167,6 +213,120 @@ function processTrackingModifier(
+     query.isTracking = true;
+ }
+ 
++/**
++ * Evaluate a tracking query against accumulated state at query creation time.
++ * Unlike checkQueryTracking (which uses incremental per-query trackers), this
++ * reads the persistent tracking masks and pair event state directly.
++ */
++function checkQueryTrackingAtCreation(world: World, query: QueryInstance, entity: Entity): boolean {
++    // Static constraints first.
++    if (!checkQuery(world, query, entity)) return false;
++
++    const ctx = world[$internal];
++    const eid = getEntityId(entity);
++    let hasOrGroup = false;
++    let anyOrMatched = false;
++
++    for (const group of query.trackingGroups) {
++        const { type, id, logic } = group;
++
++        // Pair groups are satisfied from pair-level event state.
++        if (group.pairs && group.pairs.length > 0) {
++            const pair = group.pairs[0];
++            const pairCtx = pair[$internal];
++            const trait = pairCtx.relation[$internal].trait;
++            const target = pairCtx.target;
++
++            let traitMatches = false;
++            switch (type) {
++                case 'add':
++                    traitMatches =
++                        hasPairEvent(world, id, trait, entity, target, 'add') &&
++                        hasRelationPair(world, entity, pair);
++                    break;
++                case 'remove':
++                    traitMatches = hasPairEvent(world, id, trait, entity, target, 'remove');
++                    break;
++                case 'change':
++                    traitMatches =
++                        hasPairEvent(world, id, trait, entity, target, 'change') &&
++                        hasRelationPair(world, entity, pair);
++                    break;
++            }
++
++            if (logic === 'or') {
++                hasOrGroup = true;
++                if (traitMatches) anyOrMatched = true;
++            } else if (!traitMatches) {
++                return false;
++            }
++            continue;
++        }
++
++        // Trait-level group.
++        const bitmasks = group.bitmasks;
++        const snapshot = ctx.trackingSnapshots.get(id)!;
++        const dirtyMask = ctx.dirtyMasks.get(id)!;
++        const changedMask = ctx.changedMasks.get(id)!;
++
++        let groupMatches = logic === 'and'; // AND starts true, OR starts false
++
++        for (let genId = 0; genId < bitmasks.length; genId++) {
++            const mask = bitmasks[genId];
++            if (!mask) continue;
++
++            const oldMask = snapshot[genId]?.[eid] || 0;
++            const currentMask = ctx.entityMasks[genId]?.[eid] || 0;
++
++            for (let bit = 1; bit <= mask; bit <<= 1) {
++                if (!(mask & bit)) continue;
++
++                let traitMatches = false;
++                switch (type) {
++                    case 'add':
++                        traitMatches = (oldMask & bit) === 0 && (currentMask & bit) === bit;
++                        break;
++                    case 'remove':
++                        traitMatches =
++                            ((oldMask & bit) === bit && (currentMask & bit) === 0) ||
++                            ((oldMask & bit) === 0 &&
++                                (currentMask & bit) === 0 &&
++                                ((dirtyMask[genId]?.[eid] ?? 0) & bit) === bit);
++                        break;
++                    case 'change':
++                        traitMatches = ((changedMask[genId]?.[eid] ?? 0) & bit) === bit;
++                        break;
++                }
++
++                if (logic === 'and') {
++                    if (!traitMatches) {
++                        groupMatches = false;
++                        break;
++                    }
++                } else {
++                    if (traitMatches) {
++                        groupMatches = true;
++                        break;
++                    }
++                }
++            }
++
++            if (logic === 'and' && !groupMatches) break;
++            if (logic === 'or' && groupMatches) break;
++        }
++
++        if (logic === 'or') {
++            hasOrGroup = true;
++            if (groupMatches) anyOrMatched = true;
++        } else if (!groupMatches) {
++            return false;
++        }
++    }
++
++    if (hasOrGroup && !anyOrMatched) return false;
++    return true;
++}
++
+ export function createQueryInstance<T extends QueryParameter[]>(
+     world: World,
+     parameters: T
+@@ -204,8 +364,10 @@ export function createQueryInstance<T extends QueryParameter[]>(
+             entity: Entity,
+             eventType: EventType,
+             generationId: number,
+-            bitflag: number
+-        ) => checkQueryTracking(world, query, entity, eventType, generationId, bitflag),
++            bitflag: number,
++            target?: Entity,
++            pairCanceledByTracker?: Map<number, boolean>
++        ) => checkQueryTracking(world, query, entity, eventType, generationId, bitflag, target, pairCanceledByTracker),
+         resetTrackingBitmasks: (eid: number) => resetQueryTrackingBitmasks(query, eid),
+     };
+ 
+@@ -345,84 +507,22 @@ export function createQueryInstance<T extends QueryParameter[]>(
+ 
+     // Populate query with initial matching entities
+     if (query.trackingGroups.length > 0) {
+-        // For tracking queries, check each entity against tracking groups
+-        for (const group of query.trackingGroups) {
+-            const { type, id, logic, bitmasks } = group;
+-            const snapshot = ctx.trackingSnapshots.get(id)!;
+-            const dirtyMask = ctx.dirtyMasks.get(id)!;
+-            const changedMask = ctx.changedMasks.get(id)!;
+-
+-            for (const entity of ctx.entityIndex.dense) {
+-                // For AND groups, skip if already in query (will be checked by other groups)
+-                // For OR groups, skip if already in query
+-                if (query.entities.has(entity)) continue;
+-
+-                const eid = getEntityId(entity);
+-                let matches = logic === 'and'; // AND starts true, OR starts false
+-
+-                // Check each generation that has bitmasks
+-                for (let genId = 0; genId < bitmasks.length; genId++) {
+-                    const mask = bitmasks[genId];
+-                    if (!mask) continue;
+-
+-                    const oldMask = snapshot[genId]?.[eid] || 0;
+-                    const currentMask = ctx.entityMasks[genId]?.[eid] || 0;
+-
+-                    // Check each bit in the mask
+-                    for (let bit = 1; bit <= mask; bit <<= 1) {
+-                        if (!(mask & bit)) continue;
+-
+-                        let traitMatches = false;
+-
+-                        switch (type) {
+-                            case 'add':
+-                                traitMatches = (oldMask & bit) === 0 && (currentMask & bit) === bit;
+-                                break;
+-                            case 'remove':
+-                                traitMatches =
+-                                    ((oldMask & bit) === bit && (currentMask & bit) === 0) ||
+-                                    ((oldMask & bit) === 0 &&
+-                                        (currentMask & bit) === 0 &&
+-                                        ((dirtyMask[genId]?.[eid] ?? 0) & bit) === bit);
+-                                break;
+-                            case 'change':
+-                                traitMatches = ((changedMask[genId]?.[eid] ?? 0) & bit) === bit;
+-                                break;
+-                        }
+-
+-                        if (logic === 'and') {
+-                            if (!traitMatches) {
+-                                matches = false;
+-                                break;
+-                            }
+-                        } else {
+-                            // OR logic
+-                            if (traitMatches) {
+-                                matches = true;
+-                                break;
+-                            }
+-                        }
+-                    }
+-
+-                    // Early exit for AND that failed or OR that succeeded
+-                    if (logic === 'and' && !matches) break;
+-                    if (logic === 'or' && matches) break;
+-                }
+-
+-                if (matches) {
+-                    if (hasRelationFilters) {
+-                        let relationMatch = true;
+-                        for (const pair of query.relationFilters!) {
+-                            if (!hasRelationPair(world, entity, pair)) {
+-                                relationMatch = false;
+-                                break;
+-                            }
+-                        }
+-                        if (relationMatch) query.add(entity);
+-                    } else {
+-                        query.add(entity);
++        // For tracking queries, evaluate all tracking groups together so that
++        // AND groups are only satisfied when every group matches.
++        for (const entity of ctx.entityIndex.dense) {
++            if (!checkQueryTrackingAtCreation(world, query, entity)) continue;
++
++            if (hasRelationFilters) {
++                let relationMatch = true;
++                for (const pair of query.relationFilters!) {
++                    if (!hasRelationPair(world, entity, pair)) {
++                        relationMatch = false;
++                        break;
+                     }
+                 }
++                if (relationMatch) query.add(entity);
++            } else {
++                query.add(entity);
+             }
+         }
+     } else {

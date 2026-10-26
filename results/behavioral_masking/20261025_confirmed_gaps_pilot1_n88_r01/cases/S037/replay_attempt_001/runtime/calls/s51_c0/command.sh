@@ -1,0 +1,1 @@
+cd /app && BABEL_ENV=test npx jest test/jest/logic-component.js 2>&1 | tail -20 && echo "NODE_ENV=$NODE_ENV"

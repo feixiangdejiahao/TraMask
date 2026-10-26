@@ -1,0 +1,5 @@
+cd /app && rm -rf /tmp/cachetest/.cache && echo "=== key change via severity ===" && python -m bandit /tmp/cachetest/foo.py --incremental --cache-dir /tmp/cachetest/.cache -l -f json 2>/dev/null >/tmp/k1; python -c "import json; print(json.load(open('/tmp/k1'))['cache_info'])"
+python -m bandit /tmp/cachetest/foo.py --incremental --cache-dir /tmp/cachetest/.cache -ll -f json 2>/dev/null >/tmp/k2; python -c "import json; print(json.load(open('/tmp/k2'))['cache_info'])"
+python -m bandit /tmp/cachetest/foo.py --incremental --cache-dir /tmp/cachetest/.cache -ll -f json 2>/dev/null >/tmp/k3; python -c "import json; print(json.load(open('/tmp/k3'))['cache_info'])"
+echo "=== key change via tests ===" && python -m bandit /tmp/cachetest/foo.py --incremental --cache-dir /tmp/cachetest/.cache --tests B602 -f json 2>/dev/null >/tmp/k4; python -c "import json; print(json.load(open('/tmp/k4'))['cache_info'])"
+python -m bandit /tmp/cachetest/foo.py --incremental --cache-dir /tmp/cachetest/.cache --tests B602 -f json 2>/dev/null >/tmp/k5; python -c "import json; print(json.load(open('/tmp/k5'))['cache_info'])"

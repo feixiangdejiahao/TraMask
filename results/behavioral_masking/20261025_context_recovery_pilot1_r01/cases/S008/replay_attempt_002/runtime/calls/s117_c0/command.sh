@@ -1,0 +1,1 @@
+cd /app && cat backend/pkg/scheduler/vulnerability_scan_job_test.go

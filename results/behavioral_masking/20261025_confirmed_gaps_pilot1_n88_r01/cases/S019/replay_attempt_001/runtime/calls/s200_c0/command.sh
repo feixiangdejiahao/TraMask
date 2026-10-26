@@ -1,0 +1,1 @@
+cd /app && git status --short && ls dist 2>/dev/null | head -3 || echo "no dist"

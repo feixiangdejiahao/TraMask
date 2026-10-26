@@ -1,0 +1,1 @@
+cd /app/cmd/makedocs && go run main.go 2>&1 | head -20 && cd /app && git diff --stat docs/overview.md && grep -n "brokenDocLink" docs/overview.md | head

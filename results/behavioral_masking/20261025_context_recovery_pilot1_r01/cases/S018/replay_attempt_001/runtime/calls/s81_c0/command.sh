@@ -1,0 +1,1 @@
+cd /app && sed -n '330,340p' bandit/cli/main.py && sed -n '585,595p' bandit/cli/main.py

@@ -1,0 +1,177 @@
+	freeVars    []*ObjectPtr
+	ip          int
+	basePointer int
+	bytecode    *Bytecode
+	ctx         *functionContext
+}
+
+// VM is a virtual machine that executes the bytecode compiled by Compiler.
+type VM struct {
+	bytecode     *Bytecode
+	stack        [StackSize]Object
+	sp           int
+	globals      []Object
+	fileSet      *parser.SourceFileSet
+	frames       [MaxFrames]frame
+	framesIndex  int
+	curFrame     *frame
+	curInsts     []byte
+	ip           int
+	aborting     int64
+	maxAllocs    int64
+	allocs       int64
+	err          error
+	ctx          *functionContext
+	stopOnReturn bool
+	returnValue  Object
+}
+
+// NewVM creates a VM.
+func NewVM(
+	bytecode *Bytecode,
+	globals []Object,
+	maxAllocs int64,
+) *VM {
+	if globals == nil {
+		globals = make([]Object, GlobalsSize)
+	}
+	v := &VM{
+		bytecode:    bytecode,
+		sp:          0,
+		globals:     globals,
+		fileSet:     bytecode.FileSet,
+		framesIndex: 1,
+		ip:          -1,
+		maxAllocs:   maxAllocs,
+	}
+	v.ctx = &functionContext{
+		bytecode:  bytecode,
+		globals:   v.globals,
+		maxAllocs: maxAllocs,
+	}
+	v.frames[0].fn = bytecode.MainFunction
+	v.frames[0].ip = -1
+	v.frames[0].bytecode = bytecode
+	v.frames[0].ctx = v.ctx
+	v.curFrame = &v.frames[0]
+	v.curInsts = v.curFrame.fn.Instructions
+	return v
+}
+
+// Abort aborts the execution.
+func (v *VM) Abort() {
+	atomic.StoreInt64(&v.aborting, 1)
+}
+
+// Run starts the execution.
+func (v *VM) Run() (err error) {
+	// reset VM states
+	v.sp = 0
+	v.stopOnReturn = false
+	v.returnValue = UndefinedValue
+	v.curFrame = &(v.frames[0])
+	v.curInsts = v.curFrame.fn.Instructions
+	v.framesIndex = 1
+	v.ip = -1
+	v.allocs = v.maxAllocs + 1
+
+	v.run()
+	atomic.StoreInt64(&v.aborting, 0)
+	err = v.err
+	if err != nil {
+		return v.formatError(err)
+	}
+	return nil
+}
+
+// runFunction runs a single compiled function with the given arguments and
+// returns its return value. It is used to support invoking compiled functions
+// from Go code (CompiledFunction.Call).
+func (v *VM) runFunction(fn *CompiledFunction, args []Object) (
+	Object, error) {
+	v.err = nil
+	v.stopOnReturn = true
+	v.returnValue = UndefinedValue
+	v.frames[0].fn = fn
+	v.frames[0].freeVars = fn.Free
+	v.frames[0].ip = -1
+	v.frames[0].basePointer = 0
+	if fn.ctx != nil {
+		v.frames[0].bytecode = fn.ctx.bytecode
+		v.frames[0].ctx = fn.ctx
+	} else {
+		v.frames[0].bytecode = v.bytecode
+		v.frames[0].ctx = v.ctx
+	}
+	v.curFrame = &v.frames[0]
+	v.curInsts = fn.Instructions
+	v.framesIndex = 1
+	v.ip = -1
+	v.sp = 0
+	for i, arg := range args {
+		v.stack[i] = arg
+	}
+	v.sp = fn.NumLocals
+	v.allocs = v.maxAllocs + 1
+
+	v.run()
+	atomic.StoreInt64(&v.aborting, 0)
+	if v.err != nil {
+		return nil, v.formatError(v.err)
+	}
+	ret := v.returnValue
+	if ret == nil {
+		ret = UndefinedValue
+	}
+	return ret, nil
+}
+
+// formatError wraps a runtime error with the runtime error message and the
+// source position / call stack.
+func (v *VM) formatError(err error) error {
+	filePos := v.fileSet.Position(
+		v.curFrame.fn.SourcePos(v.ip - 1))
+	err = fmt.Errorf("Runtime Error: %w\n\tat %s",
+		err, filePos)
+	for v.framesIndex > 1 {
+		v.framesIndex--
+		v.curFrame = &v.frames[v.framesIndex-1]
+		filePos = v.fileSet.Position(
+			v.curFrame.fn.SourcePos(v.curFrame.ip - 1))
+		err = fmt.Errorf("%w\n\tat %s", err, filePos)
+	}
+	return err
+}
+
+func (v *VM) run() {
+	for atomic.LoadInt64(&v.aborting) == 0 {
+		v.ip++
+
+		switch v.curInsts[v.ip] {
+		case parser.OpConstant:
+			v.ip += 2
+			cidx := int(v.curInsts[v.ip]) | int(v.curInsts[v.ip-1])<<8
+
+			obj := v.curFrame.bytecode.Constants[cidx]
+			if fn, ok := obj.(*CompiledFunction); ok {
+				obj = fn.attachContext(v.curFrame.ctx)
+			}
+			v.stack[v.sp] = obj
+			v.sp++
+		case parser.OpNull:
+			v.stack[v.sp] = UndefinedValue
+			v.sp++
+		case parser.OpBinaryOp:
+			v.ip++
+			right := v.stack[v.sp-1]
+			left := v.stack[v.sp-2]
+			tok := token.Token(v.curInsts[v.ip])
+			res, e := left.BinaryOp(tok, right)
+			if e != nil {
+				v.sp -= 2
+				if e == ErrInvalidOperator {
+					v.err = fmt.Errorf("invalid operation: %s %s %s",
+						left.TypeName(), tok.String(), right.TypeName())
+					return
+				}
+				v.err = e

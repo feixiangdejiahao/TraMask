@@ -1,0 +1,1 @@
+cd /app && grep -rn "warningDirectiveRE" checkers/internal/linttest/ && cat checkers/internal/linttest/end2end.go | sed -n '1,16p'

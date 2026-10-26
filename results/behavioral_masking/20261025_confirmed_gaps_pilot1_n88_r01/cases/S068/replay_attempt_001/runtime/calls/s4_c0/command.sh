@@ -1,0 +1,1 @@
+find sqlite_utils tests -type f | sort && echo "---" && cat pyproject.toml

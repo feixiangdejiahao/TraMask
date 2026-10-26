@@ -1,0 +1,1 @@
+cd /app && git diff -- src/cattr/__init__.py src/cattrs/__init__.py src/cattrs/converters.py HISTORY.md docs/index.md docs/cattrs.rst

@@ -1,0 +1,221 @@
+// functionContext stores the execution context (bytecode, globals and
+// allocation limit) needed to invoke a CompiledFunction from Go code outside
+// of a running VM.
+type functionContext struct {
+	bytecode  *Bytecode
+	globals   []Object
+	maxAllocs int64
+}
+
+// CompiledFunction represents a compiled function.
+type CompiledFunction struct {
+	ObjectImpl
+	Instructions  []byte
+	NumLocals     int // number of local variables (including function parameters)
+	NumParameters int
+	VarArgs       bool
+	SourceMap     map[int]parser.Pos
+	Free          []*ObjectPtr
+	ctx           *functionContext
+}
+
+// TypeName returns the name of the type.
+func (o *CompiledFunction) TypeName() string {
+	return "compiled-function"
+}
+
+func (o *CompiledFunction) String() string {
+	return "<compiled-function>"
+}
+
+// Size of the compiled function in bytes
+// (as much as we can calculate it without reflection and black magic)
+func (o *CompiledFunction) Size() int64 {
+	return int64(len(o.Instructions) + len(o.SourceMap) + len(o.Free))
+}
+
+// Copy returns a copy of the type.
+func (o *CompiledFunction) Copy() Object {
+	return &CompiledFunction{
+		Instructions:  append([]byte{}, o.Instructions...),
+		NumLocals:     o.NumLocals,
+		NumParameters: o.NumParameters,
+		VarArgs:       o.VarArgs,
+		SourceMap:     o.SourceMap,
+		Free:          append([]*ObjectPtr{}, o.Free...), // DO NOT Copy() of elements; these are variable pointers
+		ctx:           o.ctx,
+	}
+}
+
+// attachContext returns a copy of o with the given execution context attached.
+// Unlike bindContext, attachContext keeps the original free-variable pointers,
+// so closures continue to share their captured variables during VM execution.
+func (o *CompiledFunction) attachContext(ctx *functionContext) *CompiledFunction {
+	if o.ctx == ctx {
+		return o
+	}
+	return &CompiledFunction{
+		Instructions:  o.Instructions,
+		NumLocals:     o.NumLocals,
+		NumParameters: o.NumParameters,
+		VarArgs:       o.VarArgs,
+		SourceMap:     o.SourceMap,
+		Free:          o.Free,
+		ctx:           ctx,
+	}
+}
+
+// bindContext returns a copy of o bound to ctx. The captured free variables are
+// snapshotted at their current values (recursively rebinding any callable
+// values) so the copy is independent of the VM stack where the closure was
+// created. The function bytecode (instructions, constants and imports) is
+// preserved from the function's original context when one is available; only
+// globals and the allocation limit are rebound to ctx.
+func (o *CompiledFunction) bindContext(ctx *functionContext) *CompiledFunction {
+	return o.bindContextRec(ctx, make(map[Object]Object))
+}
+
+func (o *CompiledFunction) bindContextRec(
+	ctx *functionContext,
+	seen map[Object]Object,
+) *CompiledFunction {
+	if bound, ok := seen[o]; ok {
+		if b, ok := bound.(*CompiledFunction); ok {
+			return b
+		}
+	}
+	bytecode := ctx.bytecode
+	if o.ctx != nil {
+		bytecode = o.ctx.bytecode
+	}
+	bound := &CompiledFunction{
+		Instructions:  append([]byte{}, o.Instructions...),
+		NumLocals:     o.NumLocals,
+		NumParameters: o.NumParameters,
+		VarArgs:       o.VarArgs,
+		SourceMap:     o.SourceMap,
+		ctx: &functionContext{
+			bytecode:  bytecode,
+			globals:   ctx.globals,
+			maxAllocs: ctx.maxAllocs,
+		},
+	}
+	seen[o] = bound
+	free := make([]*ObjectPtr, len(o.Free))
+	for i, p := range o.Free {
+		if p != nil && p.Value != nil {
+			val := bindObjectRec(*p.Value, ctx, seen)
+			free[i] = &ObjectPtr{Value: &val}
+		}
+	}
+	bound.Free = free
+	return bound
+}
+
+// Equals returns true if the value of the type is equal to the value of
+// another object.
+func (o *CompiledFunction) Equals(_ Object) bool {
+	return false
+}
+
+// SourcePos returns the source position of the instruction at ip.
+func (o *CompiledFunction) SourcePos(ip int) parser.Pos {
+	for ip >= 0 {
+		if p, ok := o.SourceMap[ip]; ok {
+			return p
+		}
+		ip--
+	}
+	return parser.NoPos
+}
+
+// CanCall returns whether the Object can be Called.
+func (o *CompiledFunction) CanCall() bool {
+	return true
+}
+
+// Call invokes the compiled function from Go code. The function executes with
+// the same globals, imports, closure captures, variadic behavior and error
+// formatting as it would inside the VM.
+func (o *CompiledFunction) Call(args ...Object) (Object, error) {
+	if o.ctx == nil {
+		return nil, fmt.Errorf("not callable: %s", o.TypeName())
+	}
+
+	if o.VarArgs {
+		realArgs := o.NumParameters - 1
+		if len(args) < realArgs {
+			return nil, fmt.Errorf(
+				"wrong number of arguments: want>=%d, got=%d",
+				realArgs, len(args))
+		}
+		varArgs := make([]Object, len(args)-realArgs)
+		copy(varArgs, args[realArgs:])
+		args = append(args[:realArgs], &Array{Value: varArgs})
+	} else if len(args) != o.NumParameters {
+		return nil, fmt.Errorf(
+			"wrong number of arguments: want=%d, got=%d",
+			o.NumParameters, len(args))
+	}
+
+	v := NewVM(o.ctx.bytecode, o.ctx.globals, o.ctx.maxAllocs)
+	ret, err := v.runFunction(o, args)
+	if err != nil {
+		return nil, err
+	}
+
+	// bind the result (and any callable values reachable from it) to the
+	// same execution context so it remains callable from Go.
+	return bindObject(ret, o.ctx), nil
+}
+
+// bindObject recursively rebinds callable values to ctx. Composite values are
+// deep-copied so that the resulting object is isolated from the original.
+func bindObject(o Object, ctx *functionContext) Object {
+	return bindObjectRec(o, ctx, make(map[Object]Object))
+}
+
+func bindObjectRec(
+	o Object,
+	ctx *functionContext,
+	seen map[Object]Object,
+) Object {
+	if o == nil {
+		return nil
+	}
+	switch o := o.(type) {
+	case *CompiledFunction:
+		return o.bindContextRec(ctx, seen)
+	case *Array:
+		if bound, ok := seen[o]; ok {
+			return bound
+		}
+		arr := &Array{Value: make([]Object, len(o.Value))}
+		seen[o] = arr
+		for i, e := range o.Value {
+			arr.Value[i] = bindObjectRec(e, ctx, seen)
+		}
+		return arr
+	case *ImmutableArray:
+		if bound, ok := seen[o]; ok {
+			return bound
+		}
+		arr := &ImmutableArray{Value: make([]Object, len(o.Value))}
+		seen[o] = arr
+		for i, e := range o.Value {
+			arr.Value[i] = bindObjectRec(e, ctx, seen)
+		}
+		return arr
+	case *Map:
+		if bound, ok := seen[o]; ok {
+			return bound
+		}
+		m := &Map{Value: make(map[string]Object, len(o.Value))}
+		seen[o] = m
+		for k, e := range o.Value {
+			m.Value[k] = bindObjectRec(e, ctx, seen)
+		}
+		return m
+	case *ImmutableMap:
+		if bound, ok := seen[o]; ok {
+			return bound

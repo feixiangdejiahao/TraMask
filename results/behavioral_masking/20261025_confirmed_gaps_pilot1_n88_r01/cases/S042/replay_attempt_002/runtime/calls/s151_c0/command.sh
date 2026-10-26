@@ -1,0 +1,1 @@
+cd /app && rm -f packages/core/tests/zz-removed.test.ts && git status --short | grep zz || true

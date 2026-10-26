@@ -1,0 +1,1 @@
+cd /app && grep -n "No results message" packages/prompts/src/autocomplete.ts && sed -n '400,470p' packages/prompts/src/autocomplete.ts

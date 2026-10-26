@@ -1,0 +1,1 @@
+ls /app/node_modules | grep -i testem; find / -path '*/testem/lib/utils/reporter.js' 2>/dev/null | head

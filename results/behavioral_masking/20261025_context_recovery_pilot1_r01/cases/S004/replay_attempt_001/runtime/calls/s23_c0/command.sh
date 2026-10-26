@@ -1,0 +1,1 @@
+git log --oneline -20; echo '---'; cat CHANGES.rst; echo '---'; cat aiomonitor/cli.py; echo '---'; cat aiomonitor/console.py | head -60; echo '---'; git remote -v

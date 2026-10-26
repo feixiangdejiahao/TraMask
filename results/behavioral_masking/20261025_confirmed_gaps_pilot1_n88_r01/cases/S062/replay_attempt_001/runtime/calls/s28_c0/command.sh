@@ -1,0 +1,1 @@
+cd /app && python /tmp/test_mux2.py 2>&1 | grep -B2 -A15 "multiplexer reader error\|Traceback (most recent call last)" | head -50

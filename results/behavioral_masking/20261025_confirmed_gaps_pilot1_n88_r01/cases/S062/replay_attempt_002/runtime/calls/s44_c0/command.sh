@@ -1,0 +1,1 @@
+cd /app && python /tmp/test_mux_full.py 2>&1 | tail -30

@@ -1,0 +1,1 @@
+cd /app && grep -n "report\|onStart\|reset\|clear" lib/reporters/dev/index.js | head -40 && sed -n '1,70p' lib/reporters/dev/runner.js

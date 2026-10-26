@@ -1,0 +1,1 @@
+cd /app && git checkout -- src/schema/*/schema_.ts && echo "restored" && grep -c "requiredIf" src/schema/string/schema_.ts || true

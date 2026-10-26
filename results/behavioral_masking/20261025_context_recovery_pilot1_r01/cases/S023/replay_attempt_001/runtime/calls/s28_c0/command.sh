@@ -1,0 +1,32 @@
+cd /app && python - <<'EOF'
+import re
+path = 'src/cattrs/converters.py'
+src = open(path).read()
+
+# Add import
+src = src.replace(
+    "from .fns import Predicate, identity, raise_error\n",
+    "from .fns import Predicate, identity, raise_error\nfrom .partial import PartialResult, partial_structure\n",
+)
+
+# Add method after get_structure_hook method (before "    # Classes to Python primitives.")
+anchor = "    # Classes to Python primitives."
+method = '''    def partial_structure(
+        self, obj: Any, cl: type[T]
+    ) -> PartialResult:
+        """Partially structure `obj` as `cl`.
+
+        Returns a `PartialResult` with a potentially partial `value`, the
+        names of fields successfully structured, the names of fields that
+        failed, and the errors encountered.
+
+        .. versionadded:: 25.4.0
+        """
+        return partial_structure(self, obj, cl)
+
+'''
+src = src.replace(anchor, method + anchor)
+open(path, 'w').write(src)
+print("done")
+EOF
+grep -n "partial_structure" src/cattrs/converters.py | head

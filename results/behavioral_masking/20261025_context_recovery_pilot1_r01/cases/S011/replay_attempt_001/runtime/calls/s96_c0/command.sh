@@ -1,0 +1,1 @@
+cd /app && git diff src/errors.ts && echo '=== README DIFF ===' && git diff README.md | head -120

@@ -1,0 +1,1 @@
+nl -ba src/dateutil/rrule.py | sed -n '1000,1250p'

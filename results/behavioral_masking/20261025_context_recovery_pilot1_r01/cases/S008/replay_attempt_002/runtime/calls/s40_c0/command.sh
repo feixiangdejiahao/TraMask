@@ -1,0 +1,1 @@
+cd /app && grep -rn "X-User-ID\|X_USER_ID\|UserID" backend/internal/huma/handlers/*.go backend/internal/huma/middleware/*.go | head -30

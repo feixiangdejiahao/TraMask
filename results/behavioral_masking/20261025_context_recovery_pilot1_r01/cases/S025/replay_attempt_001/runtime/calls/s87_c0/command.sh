@@ -1,0 +1,1 @@
+cd /app && pnpm --filter @clack/prompts build 2>&1 | tail -4 && cd packages/prompts && npx vitest run 2>&1 | tail -6

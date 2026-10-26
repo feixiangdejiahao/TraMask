@@ -1,0 +1,301 @@
+			case *Bytes:
+				numElements := int64(len(left.Value))
+				var highIdx int64
+				if high == UndefinedValue {
+					highIdx = numElements
+				} else if highInt, ok := high.(*Int); ok {
+					highIdx = highInt.Value
+				} else {
+					v.err = fmt.Errorf("invalid slice index type: %s",
+						high.TypeName())
+					return
+				}
+				if lowIdx > highIdx {
+					v.err = fmt.Errorf("invalid slice index: %d > %d",
+						lowIdx, highIdx)
+					return
+				}
+				if lowIdx < 0 {
+					lowIdx = 0
+				} else if lowIdx > numElements {
+					lowIdx = numElements
+				}
+				if highIdx < 0 {
+					highIdx = 0
+				} else if highIdx > numElements {
+					highIdx = numElements
+				}
+				var val Object = &Bytes{
+					Value: left.Value[lowIdx:highIdx],
+				}
+				v.allocs--
+				if v.allocs == 0 {
+					v.err = ErrObjectAllocLimit
+					return
+				}
+				v.stack[v.sp] = val
+				v.sp++
+			default:
+				v.err = fmt.Errorf("not indexable: %s", left.TypeName())
+				return
+			}
+		case parser.OpCall:
+			numArgs := int(v.curInsts[v.ip+1])
+			spread := int(v.curInsts[v.ip+2])
+			v.ip += 2
+
+			value := v.stack[v.sp-1-numArgs]
+			if !value.CanCall() {
+				v.err = fmt.Errorf("not callable: %s", value.TypeName())
+				return
+			}
+
+			if spread == 1 {
+				v.sp--
+				switch arr := v.stack[v.sp].(type) {
+				case *Array:
+					for _, item := range arr.Value {
+						v.stack[v.sp] = item
+						v.sp++
+					}
+					numArgs += len(arr.Value) - 1
+				case *ImmutableArray:
+					for _, item := range arr.Value {
+						v.stack[v.sp] = item
+						v.sp++
+					}
+					numArgs += len(arr.Value) - 1
+				default:
+					v.err = fmt.Errorf("not an array: %s", arr.TypeName())
+					return
+				}
+			}
+
+			if callee, ok := value.(*CompiledFunction); ok {
+				if callee.VarArgs {
+					// if the closure is variadic,
+					// roll up all variadic parameters into an array
+					realArgs := callee.NumParameters - 1
+					varArgs := numArgs - realArgs
+					if varArgs >= 0 {
+						numArgs = realArgs + 1
+						args := make([]Object, varArgs)
+						spStart := v.sp - varArgs
+						for i := spStart; i < v.sp; i++ {
+							args[i-spStart] = v.stack[i]
+						}
+						v.stack[spStart] = &Array{Value: args}
+						v.sp = spStart + 1
+					}
+				}
+				if numArgs != callee.NumParameters {
+					if callee.VarArgs {
+						v.err = fmt.Errorf(
+							"wrong number of arguments: want>=%d, got=%d",
+							callee.NumParameters-1, numArgs)
+					} else {
+						v.err = fmt.Errorf(
+							"wrong number of arguments: want=%d, got=%d",
+							callee.NumParameters, numArgs)
+					}
+					return
+				}
+
+				// test if it's tail-call
+				if callee == v.curFrame.fn { // recursion
+					nextOp := v.curInsts[v.ip+1]
+					if nextOp == parser.OpReturn ||
+						(nextOp == parser.OpPop &&
+							parser.OpReturn == v.curInsts[v.ip+2]) {
+						for p := 0; p < numArgs; p++ {
+							v.stack[v.curFrame.basePointer+p] =
+								v.stack[v.sp-numArgs+p]
+						}
+						v.sp -= numArgs + 1
+						v.ip = -1 // reset IP to beginning of the frame
+						continue
+					}
+				}
+				if v.framesIndex >= MaxFrames {
+					v.err = ErrStackOverflow
+					return
+				}
+
+				// update call frame
+				v.curFrame.ip = v.ip // store current ip before call
+				v.curFrame = &(v.frames[v.framesIndex])
+				v.curFrame.fn = callee
+				v.curFrame.freeVars = callee.Free
+				v.curFrame.basePointer = v.sp - numArgs
+				v.curInsts = callee.Instructions
+				v.ip = -1
+				v.framesIndex++
+				v.sp = v.sp - numArgs + callee.NumLocals
+			} else {
+				var args []Object
+				args = append(args, v.stack[v.sp-numArgs:v.sp]...)
+				ret, e := value.Call(args...)
+				v.sp -= numArgs + 1
+
+				// runtime error
+				if e != nil {
+					if e == ErrWrongNumArguments {
+						v.err = fmt.Errorf(
+							"wrong number of arguments in call to '%s'",
+							value.TypeName())
+						return
+					}
+					if e, ok := e.(ErrInvalidArgumentType); ok {
+						v.err = fmt.Errorf(
+							"invalid type for argument '%s' in call to '%s': "+
+								"expected %s, found %s",
+							e.Name, value.TypeName(), e.Expected, e.Found)
+						return
+					}
+					v.err = e
+					return
+				}
+
+				// nil return -> undefined
+				if ret == nil {
+					ret = UndefinedValue
+				}
+				v.allocs--
+				if v.allocs == 0 {
+					v.err = ErrObjectAllocLimit
+					return
+				}
+				v.stack[v.sp] = ret
+				v.sp++
+			}
+		case parser.OpReturn:
+			v.ip++
+			var retVal Object
+			if int(v.curInsts[v.ip]) == 1 {
+				retVal = v.stack[v.sp-1]
+			} else {
+				retVal = UndefinedValue
+			}
+			//v.sp--
+			v.framesIndex--
+			v.curFrame = &v.frames[v.framesIndex-1]
+			v.curInsts = v.curFrame.fn.Instructions
+			v.ip = v.curFrame.ip
+			//v.sp = lastFrame.basePointer - 1
+			v.sp = v.frames[v.framesIndex].basePointer
+			// skip stack overflow check because (newSP) <= (oldSP)
+			v.stack[v.sp-1] = retVal
+			//v.sp++
+		case parser.OpDefineLocal:
+			v.ip++
+			localIndex := int(v.curInsts[v.ip])
+			sp := v.curFrame.basePointer + localIndex
+
+			// local variables can be mutated by other actions
+			// so always store the copy of popped value
+			val := v.stack[v.sp-1]
+			v.sp--
+			v.stack[sp] = val
+		case parser.OpSetLocal:
+			localIndex := int(v.curInsts[v.ip+1])
+			v.ip++
+			sp := v.curFrame.basePointer + localIndex
+
+			// update pointee of v.stack[sp] instead of replacing the pointer
+			// itself. this is needed because there can be free variables
+			// referencing the same local variables.
+			val := v.stack[v.sp-1]
+			v.sp--
+			if obj, ok := v.stack[sp].(*ObjectPtr); ok {
+				*obj.Value = val
+				val = obj
+			}
+			v.stack[sp] = val // also use a copy of popped value
+		case parser.OpSetSelLocal:
+			localIndex := int(v.curInsts[v.ip+1])
+			numSelectors := int(v.curInsts[v.ip+2])
+			v.ip += 2
+
+			// selectors and RHS value
+			selectors := make([]Object, numSelectors)
+			for i := 0; i < numSelectors; i++ {
+				selectors[i] = v.stack[v.sp-numSelectors+i]
+			}
+			val := v.stack[v.sp-numSelectors-1]
+			v.sp -= numSelectors + 1
+			dst := v.stack[v.curFrame.basePointer+localIndex]
+			if obj, ok := dst.(*ObjectPtr); ok {
+				dst = *obj.Value
+			}
+			if e := indexAssign(dst, val, selectors); e != nil {
+				v.err = e
+				return
+			}
+		case parser.OpGetLocal:
+			v.ip++
+			localIndex := int(v.curInsts[v.ip])
+			val := v.stack[v.curFrame.basePointer+localIndex]
+			if obj, ok := val.(*ObjectPtr); ok {
+				val = *obj.Value
+			}
+			v.stack[v.sp] = val
+			v.sp++
+		case parser.OpGetBuiltin:
+			v.ip++
+			builtinIndex := int(v.curInsts[v.ip])
+			v.stack[v.sp] = builtinFuncs[builtinIndex]
+			v.sp++
+		case parser.OpClosure:
+			v.ip += 3
+			constIndex := int(v.curInsts[v.ip-1]) | int(v.curInsts[v.ip-2])<<8
+			numFree := int(v.curInsts[v.ip])
+			fn, ok := v.constants[constIndex].(*CompiledFunction)
+			if !ok {
+				v.err = fmt.Errorf("not function: %s", fn.TypeName())
+				return
+			}
+			free := make([]*ObjectPtr, numFree)
+			for i := 0; i < numFree; i++ {
+				switch freeVar := (v.stack[v.sp-numFree+i]).(type) {
+				case *ObjectPtr:
+					free[i] = freeVar
+				default:
+					free[i] = &ObjectPtr{
+						Value: &v.stack[v.sp-numFree+i],
+					}
+				}
+			}
+			v.sp -= numFree
+			cl := &CompiledFunction{
+				Instructions:  fn.Instructions,
+				NumLocals:     fn.NumLocals,
+				NumParameters: fn.NumParameters,
+				VarArgs:       fn.VarArgs,
+				SourceMap:     fn.SourceMap,
+				Free:          free,
+			}
+			v.allocs--
+			if v.allocs == 0 {
+				v.err = ErrObjectAllocLimit
+				return
+			}
+			v.stack[v.sp] = cl
+			v.sp++
+		case parser.OpGetFreePtr:
+			v.ip++
+			freeIndex := int(v.curInsts[v.ip])
+			val := v.curFrame.freeVars[freeIndex]
+			v.stack[v.sp] = val
+			v.sp++
+		case parser.OpGetFree:
+			v.ip++
+			freeIndex := int(v.curInsts[v.ip])
+			val := *v.curFrame.freeVars[freeIndex].Value
+			v.stack[v.sp] = val
+			v.sp++
+		case parser.OpSetFree:
+			v.ip++
+			freeIndex := int(v.curInsts[v.ip])
+			*v.curFrame.freeVars[freeIndex].Value = v.stack[v.sp-1]
+			v.sp--
+		case parser.OpGetLocalPtr:

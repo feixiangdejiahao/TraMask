@@ -1,0 +1,1 @@
+cd /app && grep -n "    def _iter(self):" src/dateutil/rrule.py | tail -1 && sed -n "$(grep -n '    def _iter(self):' src/dateutil/rrule.py | tail -1 | cut -d: -f1),+8p" src/dateutil/rrule.py

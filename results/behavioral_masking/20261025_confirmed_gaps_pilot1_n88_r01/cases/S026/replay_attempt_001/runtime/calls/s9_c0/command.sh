@@ -1,0 +1,1 @@
+go version && go doc go/doc/comment.Parser && echo "=====" && go doc go/doc/comment.Doc && echo "=====" && go doc go/doc/comment.Link && echo "=====" && go doc go/doc/comment.Text

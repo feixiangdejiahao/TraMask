@@ -1,0 +1,1 @@
+cd /app && cat errors.go && grep -n "MaxAllocs\|ErrObjectAllocLimit" *.go | head

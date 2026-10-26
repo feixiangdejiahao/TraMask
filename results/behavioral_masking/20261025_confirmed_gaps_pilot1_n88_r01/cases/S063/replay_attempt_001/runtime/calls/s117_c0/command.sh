@@ -1,0 +1,1 @@
+cd /app && sed -i 's/_POLL_INTERVAL = 0.1/_POLL_INTERVAL = 0.01/' pwnlib/tubes/mux.py && grep -n "_POLL_INTERVAL" pwnlib/tubes/mux.py

@@ -1,0 +1,1 @@
+cd /app && git diff --stat && echo "=== diff summary ===" && git status --short

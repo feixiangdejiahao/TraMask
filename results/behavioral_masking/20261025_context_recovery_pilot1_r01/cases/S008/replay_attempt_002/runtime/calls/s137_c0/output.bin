@@ -1,0 +1,232 @@
+package services
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/getarcaneapp/arcane/backend/internal/database"
+	"github.com/getarcaneapp/arcane/backend/internal/models"
+	"github.com/getarcaneapp/arcane/types"
+	"github.com/moby/moby/api/types/container"
+	"gorm.io/gorm"
+)
+
+// DriftDetectionService compares live container state against captured baselines
+// and records configuration drifts.
+type DriftDetectionService struct {
+	db                  *database.DB
+	dockerService       *DockerClientService
+	containerService    *ContainerService
+	eventService        *EventService
+	settingsService     *SettingsService
+	notificationService *NotificationService
+}
+
+// NewDriftDetectionService creates a new drift detection service. All dependencies
+// may be nil (the service gracefully degrades when optional dependencies are absent).
+func NewDriftDetectionService(
+	db *database.DB,
+	dockerSvc *DockerClientService,
+	containerSvc *ContainerService,
+	eventSvc *EventService,
+	settingsSvc *SettingsService,
+	notificationSvc *NotificationService,
+) *DriftDetectionService {
+	return &DriftDetectionService{
+		db:                  db,
+		dockerService:       dockerSvc,
+		containerService:    containerSvc,
+		eventService:        eventSvc,
+		settingsService:     settingsSvc,
+		notificationService: notificationSvc,
+	}
+}
+
+// CaptureBaselineFromConfigs creates a new active baseline for an environment,
+// deactivating any previously active baselines.
+func (s *DriftDetectionService) CaptureBaselineFromConfigs(
+	ctx context.Context,
+	envID, name, desc, userID string,
+	containers map[string]models.ContainerConfig,
+) (*models.EnvironmentBaseline, error) {
+	baseline := &models.EnvironmentBaseline{
+		EnvironmentID:  envID,
+		Name:           name,
+		Description:    desc,
+		CreatedBy:      userID,
+		CapturedAt:     time.Now().UTC(),
+		ContainerCount: len(containers),
+		IsActive:       true,
+	}
+	if err := baseline.SetContainerConfigs(containers); err != nil {
+		return nil, fmt.Errorf("failed to encode container configs: %w", err)
+	}
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.EnvironmentBaseline{}).
+			Where("environment_id = ? AND is_active = ?", envID, true).
+			Update("is_active", false).Error; err != nil {
+			return err
+		}
+		return tx.Create(baseline).Error
+	})
+	if err != nil {
+...
+}
+
+type driftDetection struct {
+	ContainerName string
+	ContainerID   string
+	DriftType     string
+	Field         string
+	ExpectedValue string
+	ActualValue   string
+	Severity      string
+}
+
+func driftRecordKey(containerName, driftType, field string) string {
+	return containerName + "\x00" + driftType + "\x00" + field
+}
+
+func (s *DriftDetectionService) computeDrifts(
+	baselineConfigs map[string]models.ContainerConfig,
+	liveConfigs map[string]models.ContainerConfig,
+) []driftDetection {
+	var drifts []driftDetection
+
+	for name, bc := range baselineConfigs {
+		lc, ok := liveConfigs[name]
+		if !ok {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "container_missing",
+				Severity:      "critical",
+				ExpectedValue: "present",
+				ActualValue:   "missing",
+			})
+			continue
+		}
+
+		if bc.Image != lc.Image {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "image_changed",
+				ExpectedValue: bc.Image,
+				ActualValue:   lc.Image,
+				Severity:      "critical",
+			})
+		}
+		if !equalStringSlices(bc.Env, lc.Env) {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "env_changed",
+				ExpectedValue: joinSlice(bc.Env),
+				ActualValue:   joinSlice(lc.Env),
+				Severity:      "high",
+			})
+		}
+		if bc.NetworkMode != lc.NetworkMode {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "network_changed",
+				ExpectedValue: bc.NetworkMode,
+				ActualValue:   lc.NetworkMode,
+				Severity:      "high",
+			})
+		}
+		if !equalStringSlices(bc.Ports, lc.Ports) {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "config_changed",
+				Field:         "ports",
+				ExpectedValue: joinSlice(bc.Ports),
+				ActualValue:   joinSlice(lc.Ports),
+				Severity:      "high",
+			})
+		}
+		if !equalStringSlices(bc.Volumes, lc.Volumes) {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "config_changed",
+				Field:         "volumes",
+				ExpectedValue: joinSlice(bc.Volumes),
+				ActualValue:   joinSlice(lc.Volumes),
+				Severity:      "high",
+			})
+		}
+		if bc.RestartPolicy != lc.RestartPolicy {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "restart_policy_changed",
+				ExpectedValue: bc.RestartPolicy,
+				ActualValue:   lc.RestartPolicy,
+				Severity:      "medium",
+			})
+		}
+		if bc.MemoryLimit != lc.MemoryLimit {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "resource_changed",
+				Field:         "memoryLimit",
+				ExpectedValue: strconv.FormatInt(bc.MemoryLimit, 10),
+				ActualValue:   strconv.FormatInt(lc.MemoryLimit, 10),
+				Severity:      "medium",
+			})
+		}
+		if bc.CpuLimit != lc.CpuLimit {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "resource_changed",
+				Field:         "cpuLimit",
+				ExpectedValue: strconv.FormatFloat(bc.CpuLimit, 'f', -1, 64),
+				ActualValue:   strconv.FormatFloat(lc.CpuLimit, 'f', -1, 64),
+				Severity:      "medium",
+			})
+		}
+		if !equalLabels(bc.Labels, lc.Labels) {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "label_changed",
+				ExpectedValue: formatLabels(bc.Labels),
+				ActualValue:   formatLabels(lc.Labels),
+				Severity:      "low",
+			})
+		}
+	}
+
+	for name, lc := range liveConfigs {
+		if _, ok := baselineConfigs[name]; !ok {
+			drifts = append(drifts, driftDetection{
+				ContainerName: name,
+				DriftType:     "container_added",
+				ActualValue:   lc.Image,
+				Severity:      "medium",
+			})
+		}
+	}
+
+	return drifts
+}
+
+func (s *DriftDetectionService) buildComplianceSnapshot(
+	baselineID, envID string,
+	baselineConfigs, liveConfigs map[string]models.ContainerConfig,
+	drifts []driftDetection,
+) *models.ComplianceSnapshot {
+	snapshot := &models.ComplianceSnapshot{
+		EnvironmentID:   envID,
+		BaselineID:      baselineID,
+		TotalContainers: len(baselineConfigs),
+	}
+
+	driftedNames := make(map[string]struct{})
+	missingNames := make(map[string]struct{})
+	for name := range baselineConfigs {
+		if _, ok := liveConfigs[name]; !ok {

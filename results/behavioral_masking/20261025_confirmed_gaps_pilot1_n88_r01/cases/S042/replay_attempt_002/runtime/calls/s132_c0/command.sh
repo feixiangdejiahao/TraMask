@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec oxlint src tests/pair-tracking-modifiers.test.ts 2>&1 | tail -60

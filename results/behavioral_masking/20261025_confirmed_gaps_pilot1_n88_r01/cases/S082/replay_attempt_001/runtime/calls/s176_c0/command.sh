@@ -1,0 +1,1 @@
+cd /app && git diff docs/config_file.md && echo '---' && sed -n '58,72p' docs/config_file.md

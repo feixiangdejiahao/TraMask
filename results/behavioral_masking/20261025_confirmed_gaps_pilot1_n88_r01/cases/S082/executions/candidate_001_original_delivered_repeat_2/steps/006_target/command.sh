@@ -1,0 +1,1 @@
+./node_modules/.bin/mocha tests/runners/process_test_runner_tests.js --grep "is idempotent and finishes without reporting results"

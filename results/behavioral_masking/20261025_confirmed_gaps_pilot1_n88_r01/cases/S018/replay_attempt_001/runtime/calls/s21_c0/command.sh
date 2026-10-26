@@ -1,0 +1,1 @@
+cd /app && git checkout -b rrule-tz-interop && git status && echo '---' && sed -n '2600,2760p' tests/test_rrule.py

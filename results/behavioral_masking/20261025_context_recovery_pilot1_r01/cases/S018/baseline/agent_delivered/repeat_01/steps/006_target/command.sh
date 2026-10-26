@@ -1,0 +1,1 @@
+cd /app && python -m testtools.run tests.functional.test_functional.FunctionalTests.test_nosec_directives

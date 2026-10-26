@@ -1,0 +1,1 @@
+cd /app && head -40 checkers/testdata/docStub/positive_tests.go | cat -A | head -40

@@ -1,0 +1,1 @@
+cd /app && sed -n '500,800p' vm.go

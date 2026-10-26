@@ -1,0 +1,1 @@
+cd packages/core && pnpm build 2>&1 | tail -20 && ls dist 2>/dev/null

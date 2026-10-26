@@ -1,0 +1,1 @@
+cd /app && nohup go test ./checkers/ -run '^TestCheckers$' -count=1 > /tmp/checkers_test4.log 2>&1 & echo "started pid $!"

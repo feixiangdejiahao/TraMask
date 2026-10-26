@@ -1,0 +1,1 @@
+cd /app && grep -n "^class ssh\|^class process\|^class remote\|^class listen\|^class sock" pwnlib/tubes/ssh.py pwnlib/tubes/process.py pwnlib/tubes/remote.py pwnlib/tubes/listen.py pwnlib/tubes/sock.py

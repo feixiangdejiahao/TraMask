@@ -1,0 +1,1 @@
+cat bandit/core/metrics.py && echo "=== JSON formatter ===" && cat bandit/formatters/json.py

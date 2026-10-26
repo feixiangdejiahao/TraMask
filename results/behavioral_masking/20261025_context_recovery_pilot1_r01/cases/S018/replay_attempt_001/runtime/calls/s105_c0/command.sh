@@ -1,0 +1,1 @@
+cd /app && grep -n '\bre\.\|tokenize\.' bandit/core/manager.py | head

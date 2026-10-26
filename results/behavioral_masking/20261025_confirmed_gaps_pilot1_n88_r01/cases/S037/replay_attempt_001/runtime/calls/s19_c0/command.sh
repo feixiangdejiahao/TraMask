@@ -1,0 +1,1 @@
+cd /app && grep -rn "atomic\|selectorHealth\|atomicSelectors\|Circular dependency" src test package.json README.md docs 2>/dev/null | head -50

@@ -1,0 +1,1 @@
+cd /app && git checkout -b feat/async-autocomplete && sed -i '273s/private render()/protected render()/' packages/core/src/prompts/prompt.ts && sed -n '270,278p' packages/core/src/prompts/prompt.ts

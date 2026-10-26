@@ -1,0 +1,1 @@
+cd /app && nl -ba sqlite_utils/db.py | sed -n '880,1150p'

@@ -1,0 +1,1 @@
+cd /app && npx mocha tests/runners/*.js 2>&1 | tail -40 && echo '===CLIENT===' && npx mocha tests/client_tests.js tests/mocha_adapter_tests.js 2>&1 | tail -50

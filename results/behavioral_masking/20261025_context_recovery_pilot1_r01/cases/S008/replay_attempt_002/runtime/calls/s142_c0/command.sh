@@ -1,0 +1,1 @@
+sleep 25; echo "=== final1 ==="; cat /tmp/test_final1.log | tail -10; echo "=== final2 ==="; cat /tmp/test_final2.log | tail -30

@@ -1,0 +1,1 @@
+cd /app && GOFLAGS=-mod=mod go build ./... 2>&1 | head -40

@@ -1,0 +1,1 @@
+cd /app && find docs -name '*.rst' | xargs grep -l "tubes" | head; grep -rn "serialtube\|tubes" docs/source/*.rst docs/source/**/*.rst 2>/dev/null | head -20

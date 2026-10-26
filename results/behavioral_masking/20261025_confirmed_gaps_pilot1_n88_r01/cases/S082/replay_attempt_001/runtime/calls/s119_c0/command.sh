@@ -1,0 +1,1 @@
+cd /app && tail -40 tests/app_tests.js

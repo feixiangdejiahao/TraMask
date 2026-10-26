@@ -1,0 +1,1 @@
+cd /app && npx tsc --noEmit 2>&1 | head -10; echo "TSC DONE"

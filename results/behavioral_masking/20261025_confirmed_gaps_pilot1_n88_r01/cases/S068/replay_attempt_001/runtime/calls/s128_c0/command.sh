@@ -1,0 +1,1 @@
+cd /app && tail -5 docs/cli-reference.rst && grep -n "cli_ref_enable_safe_import\|cli_ref_validate_import_invariants" docs/cli-reference.rst

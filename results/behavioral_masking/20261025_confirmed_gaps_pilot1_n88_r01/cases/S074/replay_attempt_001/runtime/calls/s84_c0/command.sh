@@ -1,0 +1,1 @@
+cd /app && grep -n 'r2.String' zz_repro3_test.go | cat -A | head && grep -n 'got != 15' zz_repro3_test.go | cat -A | head && sed -n '80,90p' zz_repro3_test.go | cat -A

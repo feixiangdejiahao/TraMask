@@ -1,0 +1,1 @@
+tail -5 /tmp/checkers_test4.log; echo "--- running:"; ps aux | grep 'go test' | grep -v grep | wc -l

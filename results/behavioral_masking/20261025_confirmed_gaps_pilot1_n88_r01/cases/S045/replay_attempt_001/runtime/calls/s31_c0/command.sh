@@ -1,0 +1,1 @@
+cd /app/libs/core && grep -n "def call_func_with_variable_args\|def acall_func_with_variable_args" langchain_core/runnables/utils.py && sed -n '1,75p' langchain_core/runnables/utils.py

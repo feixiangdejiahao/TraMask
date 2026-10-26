@@ -1,0 +1,1 @@
+cd /app && git show-ref | head -20; git tag | head

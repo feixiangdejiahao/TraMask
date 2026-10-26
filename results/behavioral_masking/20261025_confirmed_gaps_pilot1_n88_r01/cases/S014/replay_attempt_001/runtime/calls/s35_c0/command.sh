@@ -1,0 +1,1 @@
+cd /app && git checkout packages/prompts/src/autocomplete.ts && cat packages/prompts/src/autocomplete.ts

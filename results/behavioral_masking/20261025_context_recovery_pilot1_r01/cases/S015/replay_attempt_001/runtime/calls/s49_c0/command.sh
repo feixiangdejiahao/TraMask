@@ -1,0 +1,1 @@
+sed -n '120,260p' tests/unit/formatters/test_text.py

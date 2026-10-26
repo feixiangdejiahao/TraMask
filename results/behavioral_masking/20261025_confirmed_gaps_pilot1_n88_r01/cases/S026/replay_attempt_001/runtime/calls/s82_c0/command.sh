@@ -1,0 +1,1 @@
+kill 9157 2>/dev/null; sleep 1; cd /app && timeout 25 go test ./checkers/ -run '^TestCheckers$' -count=1 -v 2>&1 | tail -50

@@ -1,0 +1,1 @@
+cd /app && python -m bandit -f json examples/nosec.py 2>/dev/null | python -c "import json,sys; d=json.load(sys.stdin); print('nosec',d['metrics']['_totals']['nosec'],'skipped',d['metrics']['_totals']['skipped_tests']); [print(r['line_number'], r['test_id'], r['code'].splitlines()[1] if len(r['code'].splitlines())>1 else r['code']) for r in d['results']]"

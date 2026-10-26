@@ -1,0 +1,1 @@
+sleep 15; cat /tmp/test_compliance.log | tail -40

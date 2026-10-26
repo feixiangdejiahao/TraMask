@@ -1,1 +1,0 @@
-../experiments/initial_test_combinations/research/contract_scope_audit.md

@@ -1,0 +1,1 @@
+cd /app && grep -n "self.strict = strict" sqlite_utils/db.py

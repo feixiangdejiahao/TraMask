@@ -1,0 +1,1 @@
+cd /app && cat backend/internal/huma/middleware/auth.go | sed -n '1,120p' && grep -rn "c.Set(\|Set(\"user" backend/internal/middleware/*.go | head -20

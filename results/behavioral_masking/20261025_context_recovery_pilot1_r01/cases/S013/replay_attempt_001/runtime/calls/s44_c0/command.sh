@@ -1,0 +1,1 @@
+cd /app && nl -ba src/container.ts | sed -n '360,445p'

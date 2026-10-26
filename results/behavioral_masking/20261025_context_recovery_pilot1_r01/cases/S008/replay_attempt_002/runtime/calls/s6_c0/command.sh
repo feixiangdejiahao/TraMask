@@ -1,0 +1,1 @@
+cd /app && git rev-parse --show-toplevel && git status && ls backend/internal/models/ && ls backend/internal/services/ && ls backend/internal/huma/handlers/

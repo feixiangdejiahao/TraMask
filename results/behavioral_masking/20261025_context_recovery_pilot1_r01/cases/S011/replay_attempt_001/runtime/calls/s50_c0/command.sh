@@ -1,0 +1,1 @@
+cd /app && grep -n "initializer" src/container.ts | head -20; echo '---'; sed -n '960,1000p' src/container.ts; echo '---'; grep -n "getInitializer\|INITIALIZER\|initializer" src/resolvers.ts | head -30

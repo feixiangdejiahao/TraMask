@@ -1,0 +1,1 @@
+cat src/errors.ts && echo '---AWILIX---' && cat src/awilix.ts && echo '---UTILS---' && cat src/utils.ts

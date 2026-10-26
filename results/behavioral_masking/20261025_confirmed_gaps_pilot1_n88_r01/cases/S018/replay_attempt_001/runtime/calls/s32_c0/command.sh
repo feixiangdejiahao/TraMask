@@ -1,0 +1,1 @@
+find / -name 'rrule*.pyc' 2>/dev/null | head; find / -path '*dateutil*' -name '*.pyc' 2>/dev/null | head; ls /root/.local/share/uv/tools/mini-swe-agent/lib/python3.12/site-packages/dateutil/__pycache__/ 2>/dev/null | head -40

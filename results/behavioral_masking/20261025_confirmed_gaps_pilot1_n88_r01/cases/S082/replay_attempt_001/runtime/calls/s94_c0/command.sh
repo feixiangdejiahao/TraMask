@@ -1,0 +1,1 @@
+cd /app && timeout 120 npx mocha tests/*_tests.js tests/**/*_tests.js 2>&1 | tail -60

@@ -1,0 +1,1 @@
+cd /app && grep -n "debounceMs\|cacheResults\|maxCacheSize\|minSearchLength\|maxRetries\|retryDelay\|retryBackoff\|staleWhileRevalidate\|fallbackOptions\|loadingMinDuration" packages/prompts/src/autocomplete.ts

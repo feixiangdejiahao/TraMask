@@ -1,0 +1,226 @@
+diff --git a/packages/platform-node/test/HttpApi.test.ts b/packages/platform-node/test/HttpApi.test.ts
+index 83c8baa94..4fd111314 100644
+--- a/packages/platform-node/test/HttpApi.test.ts
++++ b/packages/platform-node/test/HttpApi.test.ts
+@@ -19,7 +19,7 @@ import {
+ import { NodeHttpServer } from "@effect/platform-node"
+ import * as HttpLayerRouter from "@effect/platform/HttpLayerRouter"
+ import { assert, describe, it } from "@effect/vitest"
+-import { Chunk, Context, DateTime, Effect, Layer, Redacted, Ref, Schema, Stream, Struct } from "effect"
++import { Chunk, Context, DateTime, Effect, Either, Layer, Redacted, Ref, Schema, Stream, Struct } from "effect"
+ import OpenApiFixture from "./fixtures/openapi.json" with { type: "json" }
+ 
+ describe("HttpApi", () => {
+@@ -672,3 +672,72 @@ const HttpLive = HttpApiBuilder.serve().pipe(
+   Layer.provide(HttpApiLive),
+   Layer.provideMerge(NodeHttpServer.layerTest)
+ )
++
++// -------------------------------------------------------------------------------------
++// SSE
++// -------------------------------------------------------------------------------------
++
++class SSEEventA extends Schema.TaggedClass<SSEEventA>()("SSEEventA", { value: Schema.String }) {}
++class SSEEventB extends Schema.TaggedClass<SSEEventB>()("SSEEventB", { value: Schema.Number }) {}
++const SSEEvent = Schema.Union(SSEEventA, SSEEventB)
++
++class SSEError extends Schema.TaggedClass<SSEError>()("SSEError", { reason: Schema.String }) {}
++
++class SSEApi extends HttpApiGroup.make("sse")
++  .add(
++    HttpApiEndpoint.sse("stream", "/stream")
++      .setUrlParams(Schema.Struct({ fail: Schema.optional(Schema.String) }))
++      .addSuccess(SSEEvent)
++      .addError(SSEError, { status: 400 })
++  ) {}
++
++class SSEApiClass extends HttpApi.make("sse-api").add(SSEApi) {}
++
++const SSEApiLive = HttpApiBuilder.group(SSEApiClass, "sse", (handlers) =>
++  handlers.handle("stream", ({ urlParams }) =>
++    urlParams.fail !== undefined
++      ? Effect.fail(new SSEError({ reason: "boom" }))
++      : Effect.succeed(Stream.make(new SSEEventA({ value: "a" }), new SSEEventB({ value: 2 }))))
++)
++
++const HttpSSEApiLive = Layer.provide(HttpApiBuilder.api(SSEApiClass), SSEApiLive)
++
++const HttpSSELive = HttpApiBuilder.serve().pipe(
++  Layer.provide(HttpSSEApiLive),
++  Layer.provideMerge(NodeHttpServer.layerTest)
++)
++
++describe("sse", () => {
++  it.effect("client returns a stream of typed events", () =>
++    Effect.gen(function*() {
++      const client = yield* HttpApiClient.make(SSEApiClass)
++      const stream = yield* client.sse.stream({ urlParams: {} })
++      const events = yield* Stream.runCollect(stream)
++      assert.strictEqual(Chunk.size(events), 2)
++      const values = Chunk.toReadonlyArray(events)
++      assert.ok(values[0] instanceof SSEEventA)
++      assert.strictEqual(values[0].value, "a")
++      assert.ok(values[1] instanceof SSEEventB)
++      assert.strictEqual(values[1].value, 2)
++    }).pipe(Effect.provide(HttpSSELive)))
++
++  it.effect("withResponse returns the stream and response", () =>
++    Effect.gen(function*() {
++      const client = yield* HttpApiClient.make(SSEApiClass)
++      const [stream, response] = yield* client.sse.stream({ urlParams: {}, withResponse: true })
++      assert.strictEqual(response.status, 200)
++      assert.strictEqual(response.headers["content-type"], "text/event-stream")
++      const events = yield* Stream.runCollect(stream)
++      assert.strictEqual(Chunk.size(events), 2)
++    }).pipe(Effect.provide(HttpSSELive)))
++
++  it.effect("error responses fail the outer effect", () =>
++    Effect.gen(function*() {
++      const client = yield* HttpApiClient.make(SSEApiClass)
++      const result = yield* client.sse.stream({ urlParams: { fail: "1" } }).pipe(Effect.either)
++      assert.ok(Either.isLeft(result))
++      if (Either.isLeft(result)) {
++        assert.ok(result.left instanceof SSEError)
++      }
++    }).pipe(Effect.provide(HttpSSELive)))
++})
+
+diff --git a/packages/platform/test/HttpApiSSE.test.ts b/packages/platform/test/HttpApiSSE.test.ts
+new file mode 100644
+index 000000000..78f9ae43b
+--- /dev/null
++++ b/packages/platform/test/HttpApiSSE.test.ts
+@@ -0,0 +1,133 @@
++import { HttpApiSSE, HttpClientRequest, HttpClientResponse } from "@effect/platform"
++import { describe, it } from "@effect/vitest"
++import * as assert from "node:assert"
++import { Chunk, Effect, Schema, Stream } from "effect"
++
++class A extends Schema.TaggedClass<A>()("A", { a: Schema.String }) {}
++class B extends Schema.TaggedClass<B>()("B", { b: Schema.Number }) {}
++const Union = Schema.Union(A, B)
++
++describe("HttpApiSSE", () => {
++  describe("formatMessage", () => {
++    it("formats a simple message", () => {
++      assert.strictEqual(HttpApiSSE.formatMessage({ data: "hello" }), "data: hello\n\n")
++    })
++
++    it("formats multi-line data", () => {
++      assert.strictEqual(
++        HttpApiSSE.formatMessage({ data: "line1\nline2" }),
++        "data: line1\ndata: line2\n\n"
++      )
++    })
++
++    it("formats event, id and retry", () => {
++      assert.strictEqual(
++        HttpApiSSE.formatMessage({ data: "hello", event: "evt", id: "1", retry: 100 }),
++        "event: evt\nid: 1\nretry: 100\ndata: hello\n\n"
++      )
++    })
++  })
++
++  describe("formatDataMessage", () => {
++    it("JSON encodes the data", () => {
++      assert.strictEqual(HttpApiSSE.formatDataMessage({ foo: 1 }), "data: {\"foo\":1}\n\n")
++    })
++  })
++
++  describe("makeEventEncoder / makeEventDecoder", () => {
++    it.effect("round trips", () =>
++      Effect.gen(function*() {
++        const encode = HttpApiSSE.makeEventEncoder(Union)
++        const decode = HttpApiSSE.makeEventDecoder(Union)
++        const message = yield* encode(new A({ a: "x" }))
++        assert.strictEqual(message, "data: {\"a\":\"x\",\"_tag\":\"A\"}\n\n")
++        const value = yield* decode(JSON.stringify({ a: "x", _tag: "A" }))
++        assert.ok(value instanceof A)
++      }))
++  })
++
++  describe("makeUnionEventEncoder / makeUnionEventDecoder", () => {
++    it.effect("sets event from _tag for tagged unions", () =>
++      Effect.gen(function*() {
++        const encode = HttpApiSSE.makeUnionEventEncoder(Union)
++        const decode = HttpApiSSE.makeUnionEventDecoder(Union)
++        const message = yield* encode(new A({ a: "x" }))
++        assert.strictEqual(message, "event: A\ndata: {\"a\":\"x\",\"_tag\":\"A\"}\n\n")
++        const value = yield* decode({ data: JSON.stringify({ a: "x" }), event: "A" })
++        assert.ok(value instanceof A)
++      }))
++
++    it.effect("supports transformed unions", () =>
++      Effect.gen(function*() {
++        const transformed = Schema.transform(Union, Union, {
++          decode: (u) => u,
++          encode: (u) => u
++        })
++        const encode = HttpApiSSE.makeUnionEventEncoder(transformed)
++        const message = yield* encode(new B({ b: 1 }))
++        assert.strictEqual(message, "event: B\ndata: {\"b\":1,\"_tag\":\"B\"}\n\n")
++      }))
++
++    it.effect("supports suspended unions", () =>
++      Effect.gen(function*() {
++        const suspended = Schema.suspend(() => Union)
++        const encode = HttpApiSSE.makeUnionEventEncoder(suspended)
++        const message = yield* encode(new B({ b: 1 }))
++        assert.strictEqual(message, "event: B\ndata: {\"b\":1,\"_tag\":\"B\"}\n\n")
++      }))
++
++    it.effect("falls back to data-only for non-union schemas", () =>
++      Effect.gen(function*() {
++        const encode = HttpApiSSE.makeUnionEventEncoder(A)
++        const message = yield* encode(new A({ a: "x" }))
++        assert.strictEqual(message, "data: {\"a\":\"x\",\"_tag\":\"A\"}\n\n")
++      }))
++  })
++
++  describe("fromStream", () => {
++    it.effect("maps a stream through an encoder", () =>
++      Effect.gen(function*() {
++        const encode = HttpApiSSE.makeUnionEventEncoder(Union)
++        const values = yield* Stream.runCollect(
++          HttpApiSSE.fromStream(Stream.make(new A({ a: "x" }), new B({ b: 1 })), encode)
++        )
++        assert.deepStrictEqual(Chunk.toReadonlyArray(values), [
++          "event: A\ndata: {\"a\":\"x\",\"_tag\":\"A\"}\n\n",
++          "event: B\ndata: {\"b\":1,\"_tag\":\"B\"}\n\n"
++        ])
++      }))
++  })
++
++  describe("toStream", () => {
++    it.effect("buffers partial chunks across \\n\\n boundaries", () =>
++      Effect.gen(function*() {
++        const wire =
++          "event: A\ndata: {\"a\":\"hello\"}\n\nevent: B\ndata: {\"b\":42}\n\n"
++        const encoder = new TextEncoder()
++        const chunks = [0, 7, 20, 45, 55].map((_, i, arr) => {
++          const start = i === 0 ? 0 : arr[i]
++          const end = i === arr.length - 1 ? wire.length : arr[i + 1]
++          return encoder.encode(wire.slice(start, end))
++        })
++        const response = new Response(new ReadableStream({
++          start(controller) {
++            for (const chunk of chunks) {
++              controller.enqueue(chunk)
++            }
++            controller.close()
++          }
++        }), { status: 200 })
++        const clientResponse = HttpClientResponse.fromWeb(
++          HttpClientRequest.get("http://localhost/stream"),
++          response
++        )
++        const values = yield* Stream.runCollect(
++          HttpApiSSE.toStream(clientResponse, HttpApiSSE.makeUnionEventDecoder(Union))
++        )
++        const events = Chunk.toReadonlyArray(values)
++        assert.strictEqual(events.length, 2)
++        assert.ok(events[0] instanceof A)
++        assert.ok(events[1] instanceof B)
++      }))
++  })
++})

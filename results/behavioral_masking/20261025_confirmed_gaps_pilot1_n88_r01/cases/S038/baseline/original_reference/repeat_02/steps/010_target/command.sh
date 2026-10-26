@@ -1,0 +1,1 @@
+./node_modules/.bin/jest --runTestsByPath test/jest/atomic-selectors.js --runInBand --no-coverage --no-cache -t '^atomic selectors selectorHealth is available on logics without selectors$'

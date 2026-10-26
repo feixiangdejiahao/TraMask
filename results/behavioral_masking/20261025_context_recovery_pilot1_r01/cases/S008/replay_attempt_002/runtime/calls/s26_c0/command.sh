@@ -1,0 +1,1 @@
+cd /app && grep -n "func (s \*ContainerService)" backend/internal/services/container_service.go | head -40 && echo "=====ENV=====" && grep -n "func (s \*EnvironmentService)" backend/internal/services/environment_service.go | head -40

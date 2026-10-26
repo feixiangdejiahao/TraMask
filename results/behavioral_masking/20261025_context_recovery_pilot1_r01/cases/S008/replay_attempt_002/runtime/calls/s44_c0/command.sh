@@ -1,0 +1,1 @@
+cd /app && sed -n '1,180p' backend/internal/middleware/environment_middleware.go

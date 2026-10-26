@@ -1,0 +1,1 @@
+cd /app && grep -rn "bail\|Bail" docs README.md examples testcases 2>/dev/null | head -30

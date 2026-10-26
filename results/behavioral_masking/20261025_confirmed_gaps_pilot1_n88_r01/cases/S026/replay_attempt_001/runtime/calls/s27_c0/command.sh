@@ -1,0 +1,1 @@
+cd /app && grep -rn "func newWarnings" checkers/internal/linttest/ && cat checkers/internal/linttest/*.go | grep -n "newWarnings" -A 40 | head -70

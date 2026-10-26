@@ -1,0 +1,227 @@
+diff --git a/bandit/core/manager.py b/bandit/core/manager.py
+index cc0e345..31edcb0 100644
+--- a/bandit/core/manager.py
++++ b/bandit/core/manager.py
+@@ -20,6 +20,7 @@ from bandit.core import extension_loader
+ from bandit.core import issue
+ from bandit.core import meta_ast as b_meta_ast
+ from bandit.core import metrics
++from bandit.core import nosec as b_nosec
+ from bandit.core import node_visitor as b_node_visitor
+ from bandit.core import test_set as b_test_set
+ 
+@@ -29,6 +30,17 @@ NOSEC_COMMENT_TESTS = re.compile(r"(?:(B\d+|[a-z\d_]+),?)+", re.IGNORECASE)
+ PROGRESS_THRESHOLD = 50
+ 
+ 
++def _posix_path(path):
++    # Normalize for stable matching/output across platforms (Windows uses '\').
++    # Keep Windows absolute paths as-is (tests/metrics keying expect them).
++    # For POSIX-style paths (even if they look "absolute" on Windows, like
++    # "/a/b"), normalize to forward slashes for stable comparisons.
++    is_windows_abs = bool(re.match(r"^[A-Za-z]:[\\/]", path)) or path.startswith(
++        "\\\\"
++    )
++    return path if is_windows_abs else path.replace("\\", "/")
++
++
+ class BanditManager:
+     scope = []
+ 
+@@ -98,6 +110,17 @@ class BanditManager:
+         try:
+             jdata = json.loads(data)
+             items = [issue.issue_from_dict(j) for j in jdata["results"]]
++            for i in items:
++                if getattr(i, "fname", None):
++                    fname = i.fname
++                    is_windows_abs = bool(
++                        re.match(r"^[A-Za-z]:[\\/]", fname)
++                    ) or fname.startswith("\\\\")
++                    i.fname = (
++                        os.path.normpath(fname)
++                        if is_windows_abs
++                        else fname.replace("\\", "/")
++                    )
+         except Exception as e:
+             LOG.warning("Failed to load baseline data: %s", e)
+         self.baseline = items
+@@ -251,9 +274,9 @@ class BanditManager:
+                 ):
+                     if fname != "-":
+                         fname = os.path.join(".", fname)
+-                    files_list.add(fname)
++                    files_list.add(_posix_path(fname))
+                 else:
+-                    excluded_files.add(fname)
++                    excluded_files.add(_posix_path(fname))
+ 
+         self.files_list = sorted(files_list)
+         self.excluded_files = sorted(excluded_files)
+@@ -310,12 +333,17 @@ class BanditManager:
+             nosec_lines = dict()
+             try:
+                 fdata.seek(0)
+-                tokens = tokenize.tokenize(fdata.readline)
+-
+                 if not self.ignore_nosec:
+-                    for toktype, tokval, (lineno, _), _, _ in tokens:
+-                        if toktype == tokenize.COMMENT:
+-                            nosec_lines[lineno] = _parse_nosec_comment(tokval)
++                    tokens = list(tokenize.tokenize(fdata.readline))
++                    nosec_lines = b_nosec.build_nosec_lines(
++                        tokens,
++                        extension_loader.MANAGER,
++                        _find_test_id_from_nosec_string,
++                        self.b_ts.filtering,
++                        _parse_nosec_comment,
++                    )
++                else:
++                    nosec_lines = dict()
+ 
+             except tokenize.TokenError:
+                 pass
+@@ -382,9 +410,9 @@ def _get_files_from_dir(
+         for filename in files:
+             path = os.path.join(root, filename)
+             if _is_file_included(path, included_globs, excluded_path_strings):
+-                files_list.add(path)
++                files_list.add(_posix_path(path))
+             else:
+-                excluded_files.add(path)
++                excluded_files.add(_posix_path(path))
+ 
+     return files_list, excluded_files
+ 
+@@ -409,7 +437,9 @@ def _is_file_included(
+ 
+     # if this is matches a glob of files we look at, and it isn't in an
+     # excluded path
++    path = _posix_path(path)
+     if _matches_glob_list(path, included_globs) or not enforce_glob:
++        excluded_path_strings = [_posix_path(x) for x in excluded_path_strings]
+         if not _matches_glob_list(path, excluded_path_strings) and not any(
+             x in path for x in excluded_path_strings
+         ):
+@@ -419,8 +449,9 @@ def _is_file_included(
+ 
+ 
+ def _matches_glob_list(filename, glob_list):
++    filename = _posix_path(filename)
+     for glob in glob_list:
+-        if fnmatch.fnmatch(filename, glob):
++        if fnmatch.fnmatch(filename, _posix_path(glob)):
+             return True
+     return False
+ 
+diff --git a/bandit/core/test_set.py b/bandit/core/test_set.py
+index 1e7dd0d..8e4eaad 100644
+--- a/bandit/core/test_set.py
++++ b/bandit/core/test_set.py
+@@ -17,6 +17,7 @@ class BanditTestSet:
+             profile = {}
+         extman = extension_loader.MANAGER
+         filtering = self._get_filter(config, profile)
++        self.filtering = filtering
+         self.plugins = [
+             p for p in extman.plugins if p.plugin._test_id in filtering
+         ]
+diff --git a/bandit/core/tester.py b/bandit/core/tester.py
+index 32642a5..327bbe9 100644
+--- a/bandit/core/tester.py
++++ b/bandit/core/tester.py
+@@ -130,7 +130,6 @@ class BanditTester:
+         :param test_result: optional test result
+         :return: set of tests to skip for the line based on contexts
+         """
+-        nosec_tests_to_skip = set()
+         base_tests = (
+             self.nosec_lines.get(test_result.lineno, None)
+             if test_result
+@@ -143,15 +142,19 @@ class BanditTester:
+         # empty set indicates blanket nosec comment without
+         # individual test names or ids
+         if base_tests is None and context_tests is None:
+-            nosec_tests_to_skip = None
+-
+-        # combine tests from current line and context line
+-        if base_tests is not None:
+-            nosec_tests_to_skip.update(base_tests)
+-        if context_tests is not None:
+-            nosec_tests_to_skip.update(context_tests)
+-
+-        return nosec_tests_to_skip
++            return None
++
++        # Combine suppressions from the finding's reported line and any other
++        # line in the same statement (context linerange). Blanket suppression
++        # (empty set) dominates and must not be "narrowed" by unioning with a
++        # specific set, as that would break skip metrics and semantics.
++        if base_tests is None:
++            return set(context_tests)
++        if context_tests is None:
++            return set(base_tests)
++        if not base_tests or not context_tests:
++            return set()
++        return set(base_tests) | set(context_tests)
+ 
+     @staticmethod
+     def report_error(test, context, error):
+diff --git a/bandit/core/utils.py b/bandit/core/utils.py
+index 7feb214..d53d3b3 100644
+--- a/bandit/core/utils.py
++++ b/bandit/core/utils.py
+@@ -219,7 +219,33 @@ def calc_linerange(node):
+ def linerange(node):
+     """Get line number range from a node."""
+     if hasattr(node, "lineno"):
+-        return list(range(node.lineno, node.end_lineno + 1))
++        # Most expression nodes (e.g. multiline calls) can safely use the full
++        # span so that a suppression comment on any line of the statement
++        # applies to findings reported for that statement.
++        #
++        # For compound statements with bodies (def/class/if/for/try/with/etc.),
++        # using the full span would incorrectly propagate a header-line nosec
++        # across the entire nested suite. Preserve baseline behavior by
++        # restricting these to the header line only.
++        compound_header_only = (
++            ast.FunctionDef,
++            ast.AsyncFunctionDef,
++            ast.ClassDef,
++            ast.If,
++            ast.For,
++            ast.AsyncFor,
++            ast.While,
++            ast.Try,
++            ast.With,
++            ast.AsyncWith,
++            getattr(ast, "Match", ()),  # py>=3.10
++        )
++        if isinstance(node, compound_header_only):
++            return [node.lineno]
++        end = getattr(node, "end_lineno", None)
++        if isinstance(end, int) and end >= node.lineno:
++            return list(range(node.lineno, end + 1))
++        return [node.lineno]
+     else:
+         if hasattr(node, "_bandit_linerange_stripped"):
+             lines_minmax = node._bandit_linerange_stripped
+@@ -391,8 +417,15 @@ def check_ast_node(name):
+ 
+ 
+ def get_nosec(nosec_lines, context):
++    combined = None
+     for lineno in context["linerange"]:
+         nosec = nosec_lines.get(lineno, None)
+-        if nosec is not None:
+-            return nosec
+-    return None
++        if nosec is None:
++            continue
++        if combined is None:
++            combined = set(nosec)
++        elif not combined or not nosec:
++            return set()
++        else:
++            combined.update(nosec)
++    return combined

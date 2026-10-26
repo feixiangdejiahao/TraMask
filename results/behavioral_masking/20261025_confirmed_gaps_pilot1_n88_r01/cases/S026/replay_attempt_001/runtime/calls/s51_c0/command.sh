@@ -1,0 +1,1 @@
+cd /app && sed -n '298,345p' checkers/brokenDocLink_checker.go

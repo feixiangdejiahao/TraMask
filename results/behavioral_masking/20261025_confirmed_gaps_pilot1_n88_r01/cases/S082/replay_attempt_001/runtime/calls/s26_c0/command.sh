@@ -1,0 +1,1 @@
+cd /app && sed -n '1,320p' tests/utils/reporter_tests.js

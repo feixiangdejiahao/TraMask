@@ -1,0 +1,1 @@
+cd /app && pnpm --filter @clack/core run build >/dev/null 2>&1 && cd packages/core && npx vitest run 2>&1 | tail -15

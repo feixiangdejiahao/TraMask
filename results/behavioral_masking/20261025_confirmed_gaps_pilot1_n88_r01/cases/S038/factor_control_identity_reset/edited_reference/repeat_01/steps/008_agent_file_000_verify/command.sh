@@ -1,0 +1,6 @@
+python3 -I -c '
+import hashlib,json,sys
+data=open(sys.argv[1],'"'"'rb'"'"').read();actual=hashlib.sha256(data).hexdigest()
+print(json.dumps({'"'"'path'"'"':sys.argv[1],'"'"'bytes'"'"':len(data),'"'"'sha256'"'"':actual}))
+if actual!=sys.argv[2]:raise RuntimeError('"'"'docker_copy_bytes_changed'"'"')
+' /app/test/jest/atomic-edge.js 015bc5b216919a0e5ef6fd65a2ddebaf1cf7c0dcd5979b7d657f6005a11286ca

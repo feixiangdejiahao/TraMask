@@ -1,0 +1,1 @@
+git branch -a && git tag | tail -20 && git stash list && git fsck --no-reflogs 2>/dev/null | head

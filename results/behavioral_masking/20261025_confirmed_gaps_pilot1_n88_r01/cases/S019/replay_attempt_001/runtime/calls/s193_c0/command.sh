@@ -1,0 +1,1 @@
+cd /app && timeout 28 npx eslint . 2>&1 | tail -10; echo "EXIT"

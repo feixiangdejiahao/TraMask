@@ -1,0 +1,1 @@
+git remote -v && cat .changeset/*.md 2>/dev/null | head -100 && echo "=====NO CHANGESET=====" && ls .changeset/

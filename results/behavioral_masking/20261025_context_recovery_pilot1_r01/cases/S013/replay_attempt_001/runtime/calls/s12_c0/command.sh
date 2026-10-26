@@ -1,0 +1,1 @@
+find / -path /proc -prune -o -name "container.ts" -print 2>/dev/null | grep -v proc | head; echo "---"; find / -name "awilix" -type d 2>/dev/null | grep -v "/proc" | head -20

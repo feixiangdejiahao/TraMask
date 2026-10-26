@@ -1,0 +1,1 @@
+cd /app && grep -n "type Function\|Callable\|Call(" objects.go | head -80

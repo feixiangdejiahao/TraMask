@@ -1,0 +1,1 @@
+cd /app && sed -n '1,120p' lib/reporters/index.js && echo '---APP---' && sed -n '1,120p' lib/app.js

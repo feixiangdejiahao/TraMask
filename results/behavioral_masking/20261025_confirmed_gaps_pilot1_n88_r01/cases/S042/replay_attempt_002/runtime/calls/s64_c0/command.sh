@@ -1,0 +1,1 @@
+grep -rn "query.traits\|\.traits" /app/packages/core/src --include=*.ts | grep -v "modifier.traits\|param.traits\|parameter.traits\|traitIds" | head -30

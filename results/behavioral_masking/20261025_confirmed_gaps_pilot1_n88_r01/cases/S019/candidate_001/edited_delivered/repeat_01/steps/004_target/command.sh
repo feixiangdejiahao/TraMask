@@ -1,0 +1,1 @@
+./node_modules/.bin/vitest run src/schema/actions/requiredIf.unit.test.ts -t 'zod parser and formatter enforce requiredIf' --maxWorkers 1 --minWorkers 1 --reporter=verbose

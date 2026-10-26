@@ -1,0 +1,1 @@
+head -80 docs/reference.rst && echo "=== __init__ ===" && cat sqlite_utils/__init__.py && echo "=== utils key ===" && sed -n '1,80p' sqlite_utils/utils.py

@@ -1,0 +1,1 @@
+nl -ba packages/core/src/query/query-result.ts | sed -n '1,260p'

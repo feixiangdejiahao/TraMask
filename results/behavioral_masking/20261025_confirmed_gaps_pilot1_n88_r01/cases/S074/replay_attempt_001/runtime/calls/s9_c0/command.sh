@@ -1,0 +1,1 @@
+cd /app && grep -rn "CompiledFunction\|\.Call(\|Callable\|CallFunc" --include="*.go" | grep -v "_test.go" | grep -v "Call(" | head -100

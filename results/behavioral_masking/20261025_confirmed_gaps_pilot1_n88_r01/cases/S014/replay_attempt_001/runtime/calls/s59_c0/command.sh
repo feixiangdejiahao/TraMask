@@ -1,0 +1,1 @@
+cd /app && sed -n '118,155p' packages/core/test/prompts/async-autocomplete.test.ts

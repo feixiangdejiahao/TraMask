@@ -1,0 +1,1 @@
+go test -run '^TestMuxSessionCloseUnblocksReader$' -count=1 -timeout 30s -v .

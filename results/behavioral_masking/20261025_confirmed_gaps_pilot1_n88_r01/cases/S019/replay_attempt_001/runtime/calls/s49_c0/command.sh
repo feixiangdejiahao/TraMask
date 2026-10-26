@@ -1,0 +1,1 @@
+cd /app && for f in src/schema/actions/dto/getSchemaDTO/*.ts; do echo "=== $f ==="; cat "$f"; done

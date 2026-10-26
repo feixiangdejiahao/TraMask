@@ -1,0 +1,1 @@
+cd /app && grep -rn "requiredIf" . --include="*.ts" --include="*.md" | head -50; echo "---"; grep -rn "requiredIf\|conditional" README.md docs 2>/dev/null | head -30

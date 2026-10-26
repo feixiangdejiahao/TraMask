@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/parseCondition/expressCondition/expressCondition.ts && echo "===UTILS===" && cat src/schema/actions/parseCondition/expressCondition/conditions/utils.ts

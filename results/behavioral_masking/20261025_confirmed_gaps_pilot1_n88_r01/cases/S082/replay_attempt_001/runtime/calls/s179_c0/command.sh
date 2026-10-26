@@ -1,0 +1,1 @@
+cd /app && git add -A && git commit -m "Add bail_on_test_failure option for early termination on test failure" && git log --oneline -3

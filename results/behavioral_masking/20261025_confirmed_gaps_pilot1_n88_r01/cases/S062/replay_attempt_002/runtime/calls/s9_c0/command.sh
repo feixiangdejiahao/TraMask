@@ -1,0 +1,1 @@
+pip download pwntools==4.12.0 --no-deps -d /tmp/pwndl 2>&1 | tail -5; ls -la /tmp/pwndl 2>/dev/null

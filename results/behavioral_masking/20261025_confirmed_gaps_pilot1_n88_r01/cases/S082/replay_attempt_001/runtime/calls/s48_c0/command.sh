@@ -1,0 +1,1 @@
+cd /app && cat lib/utils/report-file.js

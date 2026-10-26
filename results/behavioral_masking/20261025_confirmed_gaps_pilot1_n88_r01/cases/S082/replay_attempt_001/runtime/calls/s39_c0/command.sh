@@ -1,0 +1,1 @@
+cd /app && grep -n "xunit\|teamcity\|Bail\|bail\|suppressed\|suppress" tests/ci/reporter_tests.js

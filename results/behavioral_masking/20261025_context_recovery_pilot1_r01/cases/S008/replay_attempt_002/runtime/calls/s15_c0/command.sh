@@ -1,0 +1,1 @@
+cd /app && sed -n '130,260p' backend/internal/huma/huma.go && echo "=====ROUTER=====" && cat backend/internal/huma/router_bootstrap.go 2>/dev/null || find . -name '*router*' -o -name '*bootstrap*' | grep -v test | head -20

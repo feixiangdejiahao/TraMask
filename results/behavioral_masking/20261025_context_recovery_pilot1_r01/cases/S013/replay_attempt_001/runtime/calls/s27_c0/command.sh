@@ -1,0 +1,1 @@
+cd /app && sed -n '248,280p' src/container.ts

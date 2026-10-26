@@ -1,0 +1,1 @@
+cd /app && sed -n '400,800p' lib/app.js

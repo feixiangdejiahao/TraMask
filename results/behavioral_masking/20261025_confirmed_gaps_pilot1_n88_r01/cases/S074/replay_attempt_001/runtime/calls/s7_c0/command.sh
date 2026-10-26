@@ -1,0 +1,1 @@
+cd /app && grep -n "CompiledFunction\|callFrame\|call(\|Call(" vm.go | head -100

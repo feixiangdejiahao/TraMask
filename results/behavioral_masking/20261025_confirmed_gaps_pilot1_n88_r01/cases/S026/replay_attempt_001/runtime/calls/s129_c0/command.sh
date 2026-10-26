@@ -1,0 +1,1 @@
+cd /app && sed -n '120,240p' checkers/brokenDocLink_checker.go && echo "===== rest =====" && sed -n '240,380p' checkers/brokenDocLink_checker.go

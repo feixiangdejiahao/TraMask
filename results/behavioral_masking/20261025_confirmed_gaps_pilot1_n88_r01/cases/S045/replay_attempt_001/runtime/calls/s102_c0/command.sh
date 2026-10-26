@@ -1,0 +1,1 @@
+cd /app/libs/core && awk 'NR>=2020 && NR<=2070 && length($0) > 100 {print NR": "length($0)}' langchain_core/runnables/base.py && echo "---base new method---" && sed -n '2024,2068p' langchain_core/runnables/base.py

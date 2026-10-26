@@ -1,0 +1,1 @@
+cd /app && npm run build >/dev/null 2>&1 && npx vitest run 2>&1 | tail -14

@@ -1,0 +1,1 @@
+cd /app && git remote -v; echo "---"; curl -sS --max-time 10 https://raw.githubusercontent.com/PyCQA/bandit/main/bandit/core/nosec.py | head -60; echo "exit=$?"

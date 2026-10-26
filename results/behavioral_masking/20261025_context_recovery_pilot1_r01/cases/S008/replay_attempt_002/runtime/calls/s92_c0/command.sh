@@ -1,0 +1,1 @@
+ls -la /tmp/build*.log; echo "=== build2 ==="; cat /tmp/build2.log; echo "=== build_all ==="; cat /tmp/build_all.log 2>/dev/null; echo "=== build ==="; cat /tmp/build.log; ps aux | grep '[g]o build'

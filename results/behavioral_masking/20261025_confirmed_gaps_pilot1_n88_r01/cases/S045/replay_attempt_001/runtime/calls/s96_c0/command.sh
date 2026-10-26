@@ -1,0 +1,1 @@
+cd /app/libs/core && timeout 180 python -m pytest tests/unit_tests/runnables/test_concurrency.py tests/unit_tests/runnables/test_runnable.py -q 2>&1 | tail -25

@@ -1,0 +1,1 @@
+cd /app && git status --short && git branch --show-current && git show --stat HEAD | tail -20

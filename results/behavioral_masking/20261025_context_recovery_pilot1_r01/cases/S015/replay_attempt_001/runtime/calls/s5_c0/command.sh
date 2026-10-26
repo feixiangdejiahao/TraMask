@@ -1,0 +1,1 @@
+wc -l bandit/cli/main.py bandit/core/manager.py bandit/core/config.py bandit/formatters/json.py bandit/core/issue.py bandit/core/metrics.py && echo "---" && sed -n '1,200p' bandit/cli/main.py

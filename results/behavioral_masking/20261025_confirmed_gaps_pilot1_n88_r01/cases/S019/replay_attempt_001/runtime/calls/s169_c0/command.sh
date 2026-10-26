@@ -1,0 +1,1 @@
+cd /app && grep -rn "c_" src/schema/actions/parseCondition --include="*.ts" | grep -v test | head -20

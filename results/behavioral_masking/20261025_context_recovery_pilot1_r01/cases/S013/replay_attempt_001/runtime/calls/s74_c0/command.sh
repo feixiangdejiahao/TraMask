@@ -1,0 +1,1 @@
+cd /app && npx eslint src/container.ts src/resolvers.ts src/errors.ts src/awilix.ts src/__tests__/container.initialize.test.ts 2>&1 | head -80

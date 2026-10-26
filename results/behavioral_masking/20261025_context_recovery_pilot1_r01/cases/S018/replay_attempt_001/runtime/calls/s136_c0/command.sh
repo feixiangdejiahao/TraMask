@@ -1,0 +1,1 @@
+cd /app && grep -n 'extension_loader' bandit/core/manager.py

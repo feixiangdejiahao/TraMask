@@ -1,0 +1,1 @@
+cd /app && sed -n '10,24p' src/schema/string/schema_.ts && echo "===" && sed -n '14,22p' src/schema/map/schema_.ts

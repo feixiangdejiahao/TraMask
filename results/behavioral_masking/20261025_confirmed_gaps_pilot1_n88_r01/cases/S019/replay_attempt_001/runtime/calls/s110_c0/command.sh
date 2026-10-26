@@ -1,0 +1,1 @@
+cd /app && sed -n '1,35p' src/schema/actions/dto/getSchemaDTO/map.ts && echo "===ANYOF===" && sed -n '1,30p' src/schema/actions/dto/getSchemaDTO/anyOf.ts

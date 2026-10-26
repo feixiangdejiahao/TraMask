@@ -1,0 +1,1 @@
+cd /app && grep -rn "reset" lib tests --include='*.js' | head -40

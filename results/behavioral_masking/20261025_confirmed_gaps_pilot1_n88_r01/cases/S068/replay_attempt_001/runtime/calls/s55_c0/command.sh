@@ -1,0 +1,1 @@
+cd /app && for n in 2395 2423 2486 3100 3254 3461 3534 3623 3671 3890; do echo "=== $n ==="; sed -n "$((n-4)),$((n+6))p" sqlite_utils/db.py; done

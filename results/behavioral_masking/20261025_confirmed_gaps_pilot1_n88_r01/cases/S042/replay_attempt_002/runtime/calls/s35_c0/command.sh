@@ -1,0 +1,1 @@
+nl -ba /app/packages/core/src/trait/trait.ts | sed -n '525,540p'; nl -ba /app/packages/core/src/trait/trait.ts | sed -n '487,535p'

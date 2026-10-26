@@ -1,0 +1,1 @@
+cd /app && sed -i 's|"github.com/d5/tengo/v2"|_ "github.com/d5/tengo/v2"|' zz_edge_test.go && go test -run TestEdgeNestedClosureCapture -v . 2>&1 | tail -20

@@ -1,0 +1,1 @@
+cd /app && rm -f src/tmp-error-stack.test.ts && npx tsc --noEmit 2>&1 | head -30

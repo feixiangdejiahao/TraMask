@@ -1,0 +1,1 @@
+cd /app && cat backend/internal/bootstrap/services_bootstrap.go | tail -80 && echo "=====ROUTER FULL=====" && nl -ba backend/internal/bootstrap/router_bootstrap.go | sed -n '1,100p'

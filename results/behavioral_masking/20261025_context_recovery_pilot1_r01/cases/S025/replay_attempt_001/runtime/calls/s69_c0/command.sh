@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm build 2>&1 | tail -3 && npx vitest run 2>&1 | tail -8

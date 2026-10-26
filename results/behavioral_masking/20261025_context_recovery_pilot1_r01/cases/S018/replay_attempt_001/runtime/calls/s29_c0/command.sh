@@ -1,0 +1,1 @@
+cd /app && grep -rn 'nosec_lines\|get_nosec\|_get_nosecs_from_contexts\|_parse_nosec_comment' bandit tests | grep -v '.pyc'

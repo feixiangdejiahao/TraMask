@@ -1,0 +1,1 @@
+cd /app && sed -n '360,430p' tests/ci/ci_tests.js

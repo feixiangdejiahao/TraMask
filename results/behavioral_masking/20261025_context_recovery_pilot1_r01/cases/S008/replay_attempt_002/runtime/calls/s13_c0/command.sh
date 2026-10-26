@@ -1,0 +1,1 @@
+cd /app && grep -n "vulnerability\|VulnerabilityScan" backend/internal/models/settings.go && echo "=====" && cat backend/pkg/scheduler/vulnerability_scan_job.go && echo "=====" && cat backend/pkg/scheduler/scheduler.go

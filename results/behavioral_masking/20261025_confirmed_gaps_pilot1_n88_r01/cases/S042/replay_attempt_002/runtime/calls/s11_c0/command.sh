@@ -1,0 +1,1 @@
+cat packages/core/src/query/utils/check-query-tracking-with-relations.ts && echo '---check-query-tracking---' && cat packages/core/src/query/utils/check-query-tracking.ts && echo '---check-query-with-relations---' && cat packages/core/src/query/utils/check-query-with-relations.ts && echo '---check-query---' && cat packages/core/src/query/utils/check-query.ts

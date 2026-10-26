@@ -1,0 +1,1 @@
+cd /root 2>/dev/null; ls -la; find . -maxdepth 3 -name "pwnlib" -type d 2>/dev/null | head

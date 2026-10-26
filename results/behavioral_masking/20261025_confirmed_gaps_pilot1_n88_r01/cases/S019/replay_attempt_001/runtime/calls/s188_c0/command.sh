@@ -1,0 +1,1 @@
+cd /app && for f in any anyOf binary boolean list map null number record set string; do echo "=== $f ==="; grep -n "requiredIf<" -A8 "src/schema/$f/schema_.ts" | head -12; done

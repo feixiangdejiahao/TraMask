@@ -1,0 +1,1 @@
+cd /app && ls /root/go/pkg/mod/github.com/ | grep -i moby; find /root/go/pkg/mod -path '*moby*' -name '*.go' 2>/dev/null | head -5

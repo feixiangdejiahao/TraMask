@@ -1,0 +1,1 @@
+pip show bandit 2>/dev/null | head; python -c "import bandit; print(bandit.__file__)"; find / -path '*/bandit/core/nosec.py' 2>/dev/null | head; find / -name '*.tar.gz' -o -name '*.whl' 2>/dev/null | grep -i bandit | head

@@ -1,0 +1,1 @@
+cd /app && sed -i 's/const r = await container.initialize()/await container.initialize()/' src/__tests__/debug.test.ts && npx jest src/__tests__/debug.test.ts --no-coverage 2>&1 | tail -40

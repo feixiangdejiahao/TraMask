@@ -1,0 +1,212 @@
+diff --git a/src/awilix.ts b/src/awilix.ts
+index e43989b..6295c18 100644
+--- a/src/awilix.ts
++++ b/src/awilix.ts
+@@ -4,6 +4,9 @@ export {
+   type CacheEntry,
+   type ClassOrFunctionReturning,
+   type FunctionReturning,
++  type InitializeMetrics,
++  type InitializeOptions,
++  type InitializeResult,
+   type NameAndRegistrationPair,
+   type RegistrationHash,
+   type ResolveOptions,
+@@ -11,6 +14,8 @@ export {
+ } from './container'
+ export {
+   AwilixError,
++  AwilixInitializationError,
++  AwilixNotInitializedError,
+   AwilixRegistrationError,
+   AwilixResolutionError,
+   AwilixTypeError,
+@@ -26,6 +31,7 @@ export {
+ export {
+   type BuildResolverOptions,
+   type Disposer,
++  type Initializer,
+   type InjectorFunction,
+   type Resolver,
+   type ResolverOptions,
+@@ -33,6 +39,7 @@ export {
+   type Constructor,
+   type DisposableResolver,
+   type DisposableResolverOptions,
++  INITIALIZER,
+   RESOLVER,
+   aliasTo,
+   asClass,
+diff --git a/src/errors.ts b/src/errors.ts
+index 282f93c..eaafd36 100644
+--- a/src/errors.ts
++++ b/src/errors.ts
+@@ -172,3 +172,48 @@ export class AwilixRegistrationError extends AwilixError {
+     super(msg)
+   }
+ }
++
++/**
++ * Error thrown when resolving a registration that has an initializer
++ * but the container has not been initialized (or that registration was
++ * not initialized).
++ */
++export class AwilixNotInitializedError extends AwilixError {
++  /**
++   * Constructor.
++   *
++   * @param {string|symbol} name
++   * The name of the registration that was not initialized.
++   */
++  constructor(name: string | symbol) {
++    super(
++      `'${name.toString()}' was not initialized. Please call initialize() before resolving it.`,
++    )
++  }
++}
++
++/**
++ * Error thrown when an initializer throws or rejects during `container.initialize()`.
++ * The original error is available via `err.cause`.
++ */
++export class AwilixInitializationError extends AwilixError {
++  /**
++   * The original error that caused the initialization to fail.
++   */
++  cause: Error
++
++  /**
++   * Constructor.
++   *
++   * @param {string|symbol} name
++   * The name of the registration that failed to initialize.
++   *
++   * @param {Error} cause
++   * The original error thrown/rejected by the initializer.
++   */
++  constructor(name: string | symbol, cause: Error) {
++    const causeMessage = cause instanceof Error ? cause.message : String(cause)
++    super(`Failed to initialize '${name.toString()}': ${causeMessage}`)
++    this.cause = cause
++  }
++}
+diff --git a/src/resolvers.ts b/src/resolvers.ts
+index 6eed6db..37dc03d 100644
+--- a/src/resolvers.ts
++++ b/src/resolvers.ts
+@@ -14,6 +14,12 @@ import { isFunction, uniq } from './utils'
+  */
+ export const RESOLVER = Symbol('Awilix Resolver Config')
+ 
++/**
++ * Symbol used to store the initializer function on a resolver, so the fluid
++ * `initializer()` builder method can share the same public property name.
++ */
++export const INITIALIZER = Symbol('Awilix Resolver Initializer')
++
+ /**
+  * Gets passed the container and is expected to return an object
+  * whose properties are accessible at construction time for the
+@@ -35,7 +41,10 @@ export interface Resolver<T> extends ResolverOptions<T> {
+ /**
+  * A resolver object created by asClass() or asFunction().
+  */
+-export interface BuildResolver<T> extends Resolver<T>, BuildResolverOptions<T> {
++export interface BuildResolver<T>
++  extends Resolver<T>,
++    DisposableResolverOptions<T>,
++    InitializerResolver<T> {
+   injectionMode?: InjectionModeType
+   injector?: InjectorFunction
+   setLifetime(lifetime: LifetimeType): this
+@@ -69,6 +78,19 @@ export interface DisposableResolver<T>
+  */
+ export type Disposer<T> = (value: T) => any | Promise<any>
+ 
++/**
++ * Initializer function type. Called with the resolved instance during
++ * `container.initialize()`. May return a replacement instance.
++ */
++export type Initializer<T> = (instance: T) => any | Promise<any>
++
++/**
++ * A resolver that supports the `initializer()` fluid API.
++ */
++export interface InitializerResolver<T> {
++  initializer(initializer: Initializer<T>): this
++}
++
+ /**
+  * The options when registering a class, function or value.
+  * @type RegistrationOptions
+@@ -107,6 +129,11 @@ export interface BuildResolverOptions<T>
+    * Injector function to provide additional parameters.
+    */
+   injector?: InjectorFunction
++  /**
++   * Initializer function called with the resolved instance during
++   * `container.initialize()`. May return a replacement instance.
++   */
++  initializer?: Initializer<T>
+ }
+ 
+ /**
+@@ -171,6 +198,7 @@ export function asFunction<T>(
+   const result = {
+     resolve,
+     ...opts,
++    [INITIALIZER]: (opts as any).initializer,
+   }
+ 
+   return createDisposableResolver(createBuildResolver(result))
+@@ -215,6 +243,7 @@ export function asClass<T = object>(
+     createBuildResolver({
+       ...opts,
+       resolve,
++      [INITIALIZER]: (opts as any).initializer,
+     }),
+   )
+ }
+@@ -268,6 +297,13 @@ export function createBuildResolver<T, B extends Resolver<T>>(
+     })
+   }
+ 
++  function setInitializer(this: any, initializer: Initializer<T>) {
++    return createBuildResolver({
++      ...this,
++      [INITIALIZER]: initializer,
++    })
++  }
++
+   return updateResolver(obj, {
+     setLifetime,
+     inject,
+@@ -277,6 +313,7 @@ export function createBuildResolver<T, B extends Resolver<T>>(
+     setInjectionMode,
+     proxy: partial(setInjectionMode, InjectionMode.PROXY),
+     classic: partial(setInjectionMode, InjectionMode.CLASSIC),
++    initializer: setInitializer,
+   })
+ }
+ 
+@@ -461,7 +498,7 @@ function generateResolve(fn: Function, dependencyParseTarget?: Function) {
+   const dependencies = parseDependencies(dependencyParseTarget)
+ 
+   // Use a regular function instead of an arrow function to facilitate binding to the resolver.
+-  return function resolve<T extends object>(
++  const resolve = function resolve<T extends object>(
+     this: BuildResolver<any>,
+     container: AwilixContainer<T>,
+   ) {
+@@ -496,6 +533,11 @@ function generateResolve(fn: Function, dependencyParseTarget?: Function) {
+ 
+     return fn()
+   }
++
++  // Expose the parsed dependencies so initialization can build a dependency graph.
++  ;(resolve as any).dependencies = dependencies
++
++  return resolve
+ }
+ 
+ /**

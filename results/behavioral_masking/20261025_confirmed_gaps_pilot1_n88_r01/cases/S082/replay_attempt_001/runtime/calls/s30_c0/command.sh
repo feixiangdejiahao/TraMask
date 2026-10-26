@@ -1,0 +1,1 @@
+cd /app && git log --all --oneline | head -50 && echo "---refs---" && git for-each-ref | head -50 && echo "---stash---" && git stash list

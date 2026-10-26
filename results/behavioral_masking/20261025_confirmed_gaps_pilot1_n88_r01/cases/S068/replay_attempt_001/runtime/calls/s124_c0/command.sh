@@ -1,0 +1,1 @@
+cd /app && PYTHONPATH=/app python3 /tmp/repro.py && echo "---" && PYTHONPATH=/app python3 /tmp/test_safe.py 2>&1 | tail -20 && echo "---" && PYTHONPATH=/app python3 /tmp/test_cli_safe.py && echo "---" && PYTHONPATH=/app python3 /tmp/test_edge.py 2>&1 | tail -10

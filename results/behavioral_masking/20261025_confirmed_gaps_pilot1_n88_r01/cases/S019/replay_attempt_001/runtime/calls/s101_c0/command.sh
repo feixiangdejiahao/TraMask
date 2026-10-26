@@ -1,0 +1,1 @@
+cd /app && cat src/entity/actions/update/symbols/remove.ts && cat src/entity/actions/update/symbols/index.ts && sed -n '1,60p' src/schema/actions/utils/types.ts 2>/dev/null; cat src/schema/actions/utils/formatArrayPath.ts 2>/dev/null; cat src/schema/actions/utils/parseStringPath.ts 2>/dev/null

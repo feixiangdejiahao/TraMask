@@ -1,0 +1,1 @@
+cd /app && grep -rn "gin\.RouterGroup\|c \*gin\.Context\|func Register.*(router \*gin" backend/internal/huma/handlers/*.go | head -40

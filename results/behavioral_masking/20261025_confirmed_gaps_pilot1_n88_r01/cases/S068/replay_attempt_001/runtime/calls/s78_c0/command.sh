@@ -1,0 +1,1 @@
+cd /app && python3 -m pytest -q 2>&1 | tail -20

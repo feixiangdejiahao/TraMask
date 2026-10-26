@@ -1,0 +1,1 @@
+cd /app && sed -n '1,140p' backend/internal/services/vulnerability_service.go

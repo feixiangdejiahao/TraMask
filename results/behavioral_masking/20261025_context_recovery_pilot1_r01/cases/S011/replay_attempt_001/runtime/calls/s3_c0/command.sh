@@ -1,0 +1,1 @@
+ls -la && git status && git branch -a

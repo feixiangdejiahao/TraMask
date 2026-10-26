@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec vitest run 2>&1 | tail -60

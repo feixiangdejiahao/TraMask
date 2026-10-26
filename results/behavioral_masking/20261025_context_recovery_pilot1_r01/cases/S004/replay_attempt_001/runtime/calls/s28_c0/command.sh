@@ -1,0 +1,1 @@
+cd /app && git checkout -b feature/snapshots && git status

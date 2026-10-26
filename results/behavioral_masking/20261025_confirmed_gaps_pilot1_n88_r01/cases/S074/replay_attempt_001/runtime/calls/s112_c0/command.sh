@@ -1,0 +1,1 @@
+cd /app && go test -race ./... 2>&1 | tail -15

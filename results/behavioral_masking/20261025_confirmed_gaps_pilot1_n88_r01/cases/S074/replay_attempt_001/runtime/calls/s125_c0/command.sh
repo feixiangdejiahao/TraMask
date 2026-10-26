@@ -1,0 +1,1 @@
+cd /app && go test -run TestCompiledFunctionCall -v . 2>&1 | grep -E '^(=== RUN|--- (PASS|FAIL)|PASS|FAIL|ok)' | tail -50

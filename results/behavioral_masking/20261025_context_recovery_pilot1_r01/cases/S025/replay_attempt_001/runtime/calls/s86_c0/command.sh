@@ -1,0 +1,1 @@
+cd /app && pnpm types 2>&1 | grep -v 'npm warn' | tail -5 && echo "TYPES OK" && cd packages/core && pnpm build 2>&1 | tail -2 && npx vitest run 2>&1 | tail -5

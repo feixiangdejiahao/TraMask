@@ -1,0 +1,1 @@
+cd /app && cat pyproject.toml | head -80 && echo '---' && ls test* 2>/dev/null; find . -maxdepth 2 -name 'test*.py' | head; cat .github/workflows/*.yml 2>/dev/null | head -60

@@ -1,0 +1,1 @@
+cat packages/core/test/mock-readable.ts packages/core/test/mock-writable.ts && echo "=====NODE_MODULES CLACK=====" && ls -la node_modules/@clack 2>/dev/null; ls -la packages/core/node_modules/@clack 2>/dev/null; ls -la packages/prompts/node_modules/@clack 2>/dev/null

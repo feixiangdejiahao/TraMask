@@ -1,0 +1,1 @@
+timeout 10 curl -sS https://raw.githubusercontent.com/bombshell-dev/clack/main/packages/core/src/prompts/autocomplete.ts 2>&1 | head -20; echo "EXIT:$?"

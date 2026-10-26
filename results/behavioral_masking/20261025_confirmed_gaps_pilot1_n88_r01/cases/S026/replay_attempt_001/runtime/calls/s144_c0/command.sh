@@ -1,0 +1,1 @@
+cat /tmp/checkers_test4.log; echo "---"; ps aux | grep 'go test' | grep -v grep | wc -l

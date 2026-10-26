@@ -1,0 +1,1 @@
+cd /app && rm -f .tmp-*.ts && npx vitest run --reporter=dot 2>&1 | tail -60

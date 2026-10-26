@@ -1,0 +1,1 @@
+pwd && whoami && git status 2>/dev/null | head -5

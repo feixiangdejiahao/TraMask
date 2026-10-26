@@ -1,0 +1,1 @@
+cd /app && git diff -- packages/core/src/query/query.ts | head -400

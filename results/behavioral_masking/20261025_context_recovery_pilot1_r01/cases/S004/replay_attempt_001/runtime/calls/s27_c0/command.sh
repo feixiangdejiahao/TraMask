@@ -1,0 +1,1 @@
+find / -path /proc -prune -o -name '*.whl' -print 2>/dev/null | head; find / -path /proc -prune -o -type d -name 'aiomonitor*' -print 2>/dev/null | head -20; pip cache dir 2>/dev/null; pip cache list 2>/dev/null | grep -i aiomonitor | head

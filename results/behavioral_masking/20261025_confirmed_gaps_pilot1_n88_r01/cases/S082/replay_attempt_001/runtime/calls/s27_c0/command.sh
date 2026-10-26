@@ -1,0 +1,1 @@
+cd /app && git remote -v && npm view testem version 2>/dev/null | head

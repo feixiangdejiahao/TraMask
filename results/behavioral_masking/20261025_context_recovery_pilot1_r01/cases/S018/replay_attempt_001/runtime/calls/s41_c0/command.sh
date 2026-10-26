@@ -1,0 +1,1 @@
+cd /app && grep -rln 'B607\|start_process_with_partial_path' bandit/plugins | head && grep -n 'B607' bandit/plugins/*.py | head

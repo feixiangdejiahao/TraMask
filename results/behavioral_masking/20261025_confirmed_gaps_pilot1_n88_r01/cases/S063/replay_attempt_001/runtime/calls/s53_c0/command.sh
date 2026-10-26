@@ -1,0 +1,1 @@
+cd /app && nl -ba /tmp/test_halfclose.py | sed -n '50,90p'

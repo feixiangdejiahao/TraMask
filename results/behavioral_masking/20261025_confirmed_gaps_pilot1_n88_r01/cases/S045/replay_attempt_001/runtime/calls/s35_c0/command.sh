@@ -1,0 +1,1 @@
+cd /app/libs/core && awk 'NR>=4399 && NR<=5270 && /def /' langchain_core/runnables/base.py

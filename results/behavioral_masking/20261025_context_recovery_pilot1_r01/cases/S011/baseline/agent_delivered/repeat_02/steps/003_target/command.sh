@@ -1,0 +1,1 @@
+cd /app && ./node_modules/.bin/jest --runTestsByPath src/__tests__/pilot1-agent.test.ts --no-coverage --no-cache --runInBand --testNamePattern 'scope initializing a parent singleton marks it initialized for the root too'

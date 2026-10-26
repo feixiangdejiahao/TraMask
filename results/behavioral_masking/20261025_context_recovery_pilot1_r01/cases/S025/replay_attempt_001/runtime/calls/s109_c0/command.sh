@@ -1,0 +1,1 @@
+cd /app && grep -n '258a\|▊' packages/core/src/prompts/autocomplete.ts || echo "no wrong cursor char" && grep -n '2588\|█' packages/core/src/prompts/autocomplete.ts | head

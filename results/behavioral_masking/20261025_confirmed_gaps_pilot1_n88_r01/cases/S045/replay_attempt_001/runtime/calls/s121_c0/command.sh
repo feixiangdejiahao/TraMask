@@ -1,0 +1,1 @@
+cd /app && git status && git diff --stat && echo "---" && git diff libs/core/langchain_core/runnables/coalesce.py | head -5 && echo "---new file lines---" && wc -l libs/core/langchain_core/runnables/coalesce.py libs/core/tests/unit_tests/runnables/test_coalesce.py

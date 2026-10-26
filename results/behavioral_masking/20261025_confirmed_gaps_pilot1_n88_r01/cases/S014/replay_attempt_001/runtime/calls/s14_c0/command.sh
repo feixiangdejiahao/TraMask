@@ -1,0 +1,1 @@
+for f in .changeset/afraid-donkeys-sin.md .changeset/big-pants-invite.md .changeset/dirty-actors-find.md .changeset/tangy-mirrors-hug.md .changeset/tricky-states-tease.md; do echo "===== $f ====="; cat "$f"; done

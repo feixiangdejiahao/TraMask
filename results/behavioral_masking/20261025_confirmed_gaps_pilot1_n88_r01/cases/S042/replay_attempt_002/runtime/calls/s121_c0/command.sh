@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec tsc --noEmit -p tsconfig.json 2>&1 | head -50

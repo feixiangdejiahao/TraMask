@@ -1,0 +1,1 @@
+cd /app && sed -n '120,185p' src/schema/actions/zodSchemer/parser/utils.ts

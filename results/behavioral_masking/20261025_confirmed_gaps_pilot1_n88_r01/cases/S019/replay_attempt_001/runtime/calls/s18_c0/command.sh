@@ -1,0 +1,1 @@
+cd /app && ls src/entity/actions/update && echo "===UPDATE PARAMS===" && cat src/entity/actions/update/updateItemParams/updateItemParams.ts 2>/dev/null; find src/entity/actions/update -name "*.ts" | grep -v test

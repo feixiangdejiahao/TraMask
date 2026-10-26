@@ -1,0 +1,1 @@
+cd /app && git diff src/index.ts && echo "=====TRANSFORMER DIFF (first 250 lines)=====" && git diff src/transformer.ts | head -250

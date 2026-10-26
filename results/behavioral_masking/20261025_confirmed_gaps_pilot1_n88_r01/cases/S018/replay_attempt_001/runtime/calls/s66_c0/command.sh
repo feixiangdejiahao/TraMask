@@ -1,0 +1,244 @@
+cd /app && cat > /tmp/upstream_like_test.py <<'EOF'
+from datetime import datetime
+import pytest
+from dateutil import tz
+from dateutil.rrule import (rrule, rruleset, rrulestr,
+    YEARLY, MONTHLY, WEEKLY, DAILY, MO, TU, WE, TH, FR, SA, SU)
+
+NYC = tz.gettz('America/New_York')
+
+# --- rrule tests ---
+def test_str_tzinfo():
+    rule = rrule(freq=YEARLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0, tzinfo=NYC))
+    assert 'TZID=America/New_York' in str(rule)
+    assert 'Z' not in str(rule).split('RRULE')[0].split('TZID')[0]
+    # round trip
+    assert list(rrulestr(str(rule))) == list(rule)
+
+def test_str_tzinfo_utc():
+    rule = rrule(freq=YEARLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0, tzinfo=tz.UTC))
+    assert 'DTSTART:19970902T090000Z' in str(rule)
+    assert list(rrulestr(str(rule))) == list(rule)
+
+def test_rrule_equality():
+    rule1 = rrule(freq=YEARLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0), byweekday=(MO, TU))
+    rule2 = rrule(freq=YEARLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0), byweekday=(TU, MO))
+    assert rule1 == rule2
+    assert rule1 != rrule(freq=MONTHLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0), byweekday=(MO, TU))
+
+def test_rrule_hash():
+    rule1 = rrule(freq=YEARLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0))
+    rule2 = rrule(freq=YEARLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0))
+    assert hash(rule1) == hash(rule2)
+
+def test_rrule_repr():
+    rule = rrule(freq=YEARLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0))
+    assert eval(repr(rule)) == rule
+    rule2 = rrule(freq=WEEKLY, byweekday=(MO(1), TU(-1)), dtstart=datetime(1997, 9, 2, 9, 0))
+    assert eval(repr(rule2)) == rule2
+
+def test_rrule_properties():
+    rule = rrule(freq=YEARLY, interval=2, count=3, dtstart=datetime(1997, 9, 2, 9, 0), until=datetime(2000,1,1))
+    assert rule.dtstart == datetime(1997, 9, 2, 9, 0)
+    assert rule.freq == YEARLY
+    assert rule.interval == 2
+    assert rule.until == datetime(2000,1,1)
+
+def test_rrule_count():
+    rule = rrule(freq=YEARLY, count=5, dtstart=datetime(1997, 9, 2, 9, 0))
+    assert rule.count() == 5
+
+def test_to_ical():
+    rule = rrule(freq=YEARLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0, tzinfo=NYC))
+    ical = rule.to_ical()
+    assert ical.startswith('BEGIN:VCALENDAR')
+    assert 'BEGIN:VEVENT' in ical
+    assert 'END:VEVENT' in ical
+    assert 'END:VCALENDAR' in ical
+    assert 'BEGIN:VTIMEZONE' in ical
+    assert 'TZOFFSETFROM:-0400' in ical
+    assert 'TZOFFSETTO:-0400' in ical
+    # round trip
+    assert list(rrulestr(ical)) == list(rule)
+
+def test_to_ical_utc_no_vtimezone():
+    rule = rrule(freq=YEARLY, count=3, dtstart=datetime(1997, 9, 2, 9, 0, tzinfo=tz.UTC))
+    assert 'BEGIN:VTIMEZONE' not in rule.to_ical()
+
+# --- rruleset tests ---
+def test_rruleset_properties():
+    rs = rruleset()
+    r = rrule(freq=YEARLY, count=2, dtstart=datetime(1997,9,2))
+    d = datetime(1998,1,1)
+    exr = rrule(freq=YEARLY, count=1, dtstart=datetime(1997,9,2))
+    exd = datetime(1998,2,2)
+    rs.rrule(r); rs.rdate(d); rs.exrule(exr); rs.exdate(exd)
+    assert rs.rrules == (r,)
+    assert rs.rdates == (d,)
+    assert rs.exrules == (exr,)
+    assert rs.exdates == (exd,)
+    with pytest.raises(AttributeError):
+        rs.rdates = ()
+
+def test_rruleset_equality():
+    rs1 = rruleset(); rs1.rdate(datetime(2020,1,2)); rs1.rdate(datetime(2020,1,1))
+    rs2 = rruleset(); rs2.rdate(datetime(2020,1,1)); rs2.rdate(datetime(2020,1,2))
+    assert rs1 == rs2
+    assert hash(rs1) == hash(rs2)
+
+def test_rruleset_repr():
+    rs = rruleset()
+    rs.rrule(rrule(freq=YEARLY, count=2, dtstart=datetime(1997,9,2)))
+    rs.rdate(datetime(1998,1,1))
+    r = repr(rs)
+    assert r.startswith('rruleset()')
+    assert '\n.rrule(' in r
+    assert '\n.rdate(' in r
+
+def test_rruleset_copy():
+    rs = rruleset(); rs.rdate(datetime(2020,1,1))
+    rs2 = rs.copy()
+    assert rs == rs2
+    rs2.rdate(datetime(2020,1,2))
+    assert rs != rs2
+
+def test_rruleset_union():
+    rs1 = rruleset(); rs1.rdate(datetime(2020,1,1))
+    rs2 = rruleset(); rs2.rdate(datetime(2020,1,2))
+    u = rs1.union(rs2)
+    assert u.rdates == (datetime(2020,1,1), datetime(2020,1,2))
+    with pytest.raises(TypeError):
+        rs1.union(3)
+
+def test_rruleset_subtract():
+    rs1 = rruleset(); rs1.rdate(datetime(2020,1,1))
+    rs2 = rruleset(); rs2.rdate(datetime(2020,1,2))
+    rs3 = rruleset(); rs3.rrule(rrule(freq=YEARLY, count=1, dtstart=datetime(2020,1,1)))
+    sub = rs1.subtract(rs2)
+    assert sub.exdates == (datetime(2020,1,2),)
+    sub2 = rs1.subtract(rs3)
+    assert len(sub2.exrules) == 1
+    with pytest.raises(TypeError):
+        rs1.subtract(3)
+
+def test_rruleset_to_ical():
+    rs = rruleset()
+    rs.rrule(rrule(freq=YEARLY, count=2, dtstart=datetime(1997,9,2,9,0,tzinfo=NYC)))
+    rs.rdate(datetime(1998,1,1,9,0,tzinfo=NYC))
+    ical = rs.to_ical()
+    assert ical.startswith('BEGIN:VCALENDAR')
+    assert ical.count('BEGIN:VTIMEZONE') == 1
+    assert list(rrulestr(ical)) == list(rs)
+
+def test_rruleset_from_str():
+    rs = rruleset.from_str("DTSTART:19970902T090000\nRRULE:FREQ=YEARLY;COUNT=2")
+    assert isinstance(rs, rruleset)
+
+def test_rruleset_str():
+    rs = rruleset()
+    rs.rrule(rrule(freq=YEARLY, count=2, dtstart=datetime(1997,9,2,9,0)))
+    rs.rdate(datetime(1998,1,1,9,0))
+    s = str(rs)
+    assert s == "DTSTART:19970902T090000\nRRULE:FREQ=YEARLY;COUNT=2\nRDATE:19980101T090000"
+    assert list(rrulestr(s)) == list(rs)
+
+def test_rruleset_str_tzinfo():
+    rs = rruleset()
+    rs.rrule(rrule(freq=YEARLY, count=2, dtstart=datetime(1997,9,2,9,0,tzinfo=NYC)))
+    rs.rdate(datetime(1998,1,1,9,0,tzinfo=NYC))
+    rs.exdate(datetime(1999,1,1,9,0,tzinfo=NYC))
+    s = str(rs)
+    assert 'RDATE;TZID=America/New_York:19980101T090000' in s
+    assert 'EXDATE;TZID=America/New_York:19990101T090000' in s
+    assert list(rrulestr(s)) == list(rs)
+
+# --- rrulestr tests ---
+def test_rdate_tzid():
+    rr = rrulestr("DTSTART:19970902T090000\nRRULE:FREQ=YEARLY;COUNT=1\nRDATE;TZID=America/New_York:19980101T090000")
+    assert rr.rdates[0].tzinfo is not None
+
+def test_rdate_value_date():
+    rr = rrulestr("DTSTART:19970902\nRRULE:FREQ=YEARLY;COUNT=1\nRDATE;VALUE=DATE:19980902")
+    assert rr.rdates[0] == datetime(1998,9,2)
+
+def test_rdate_value_datetime():
+    rr = rrulestr("DTSTART:19970902T090000\nRRULE:FREQ=YEARLY;COUNT=1\nRDATE;VALUE=DATE-TIME:19980902T090000")
+    assert rr.rdates[0] == datetime(1998,9,2,9,0)
+
+def test_vcalendar():
+    s = """BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+DTSTART:19970902T090000
+RRULE:FREQ=YEARLY;COUNT=3
+END:VEVENT
+END:VCALENDAR
+"""
+    rr = rrulestr(s)
+    assert list(rr) == [datetime(1997,9,2,9,0), datetime(1998,9,2,9,0), datetime(1999,9,2,9,0)]
+
+def test_vcalendar_tzid():
+    s = """BEGIN:VCALENDAR
+BEGIN:VTIMEZONE
+TZID:America/New_York
+BEGIN:STANDARD
+DTSTART:19701101T020000
+TZOFFSETFROM:-0400
+TZOFFSETTO:-0500
+TZNAME:EST
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+DTSTART;TZID=America/New_York:19970902T090000
+RRULE:FREQ=YEARLY;COUNT=3
+END:VEVENT
+END:VCALENDAR
+"""
+    rr = rrulestr(s)
+    assert rr.dtstart.tzinfo is not None
+
+def test_vcalendar_inline_priority():
+    from dateutil.tz import tzical
+    from io import StringIO
+    class FakeTZ(tz.tzutc):
+        def tzname(self, dt):
+            return 'FAKE'
+    s = """BEGIN:VCALENDAR
+BEGIN:VTIMEZONE
+TZID:Custom
+BEGIN:STANDARD
+DTSTART:19970101T000000
+TZOFFSETFROM:-0000
+TZOFFSETTO:-0000
+TZNAME:Custom
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+DTSTART;TZID=Custom:19970902T090000
+RRULE:FREQ=YEARLY;COUNT=2
+END:VEVENT
+END:VCALENDAR
+"""
+    rr = rrulestr(s, tzids={'Custom': FakeTZ()})
+    # inline should win; tzical's tzname is Custom
+    assert rr.dtstart.tzinfo.tzname(rr.dtstart) == 'Custom'
+
+def test_vcalendar_unfold():
+    s = """BEGIN:VCALENDAR
+BEGIN:VEVENT
+DTSTART:19970902T090000
+RRULE:FREQ=YEA
+ RLY;COUNT=3
+END:VEVENT
+END:VCALENDAR
+"""
+    rr = rrulestr(s)
+    assert list(rr) == [datetime(1997,9,2,9,0), datetime(1998,9,2,9,0), datetime(1999,9,2,9,0)]
+
+def test_conflicting_tzid_message():
+    with pytest.raises(ValueError, match="date property specifies multiple timezones"):
+        rrulestr("DTSTART;TZID=America/New_York:19970902T090000Z\nRRULE:FREQ=YEARLY;COUNT=3")
+
+print("all tests collected")
+EOF
+cd /app && python -m pytest /tmp/upstream_like_test.py -q 2>&1 | tail -20

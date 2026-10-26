@@ -1,0 +1,42 @@
+
+
+  describe('abort', function() {
+    let runner, reporter;
+
+    beforeEach(function() {
+      reporter = new FakeReporter();
+      let settings = { protocol: 'process' };
+      let config = new Config('ci', { reporter: reporter });
+      let launcher = new Launcher('proc', settings, config);
+      runner = new ProcessTestRunner(launcher, reporter);
+      runner.process = {
+        kill: function() { return Promise.resolve(); }
+      };
+      runner.onStart = function() {};
+      runner.onEnd = function() {};
+      runner.onFinish = function() {};
+    });
+
+    it('is idempotent and finishes without reporting results', function(done) {
+      let killCount = 0;
+      runner.process.kill = function() {
+        killCount++;
+        return Promise.resolve();
+      };
+      runner.abort().then(function() {
+        return runner.abort();
+      }).then(function() {
+        expect(killCount).to.equal(1);
+        expect(runner.finished).to.be.true();
+        expect(reporter.total).to.equal(0);
+        done();
+      }).catch(done);
+    });
+
+    it('suppresses process errors after abort', function() {
+      runner.abort();
+      runner.onProcessError(new Error('killed'));
+      expect(reporter.total).to.equal(0);
+    });
+  });
+

@@ -1,0 +1,1 @@
+cd /app && ls src/schema/types && echo "===inputValue===" && cat src/schema/types/inputValue.ts && echo "===validValue===" && cat src/schema/types/validValue.ts && echo "===writeOptions===" && cat src/schema/types/options.ts

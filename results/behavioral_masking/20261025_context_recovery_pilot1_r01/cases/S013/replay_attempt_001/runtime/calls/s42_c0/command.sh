@@ -1,0 +1,1 @@
+cd /app && sed -n '270,300p' src/load-modules.ts; sed -n '1,40p' src/load-modules.ts

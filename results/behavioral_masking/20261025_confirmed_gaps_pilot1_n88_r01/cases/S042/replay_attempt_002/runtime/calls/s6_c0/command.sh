@@ -1,0 +1,1 @@
+cat packages/core/src/relation/types.ts && echo '---symbols---' && cat packages/core/src/relation/symbols.ts && echo '---relation---' && cat packages/core/src/relation/relation.ts

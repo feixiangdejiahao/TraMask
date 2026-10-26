@@ -1,0 +1,1 @@
+cd /app/backend && go test -count=1 -tags='compliance exclude_frontend' ./internal/bootstrap -run '^TestWiring_SetupRouterRegistersDriftRoutes$' -timeout 60s -v

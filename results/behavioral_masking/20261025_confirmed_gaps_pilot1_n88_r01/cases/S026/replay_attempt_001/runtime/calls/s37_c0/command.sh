@@ -1,0 +1,1 @@
+cd /app && sed -n '1,60p' docs/overview.md && echo "..." && sed -n '718,760p' docs/overview.md && echo "===== manifest =====" && head -80 docs/manifest.md

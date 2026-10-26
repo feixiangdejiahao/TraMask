@@ -1,0 +1,1 @@
+cd /app && grep -n "def send\|def recv_raw\|def send_raw\|def connected\|def close\|def shutdown\|def settimeout\|def recv(\|def _recv\|def recv_all\|def recvall\|def can_recv\|def poll" pwnlib/tubes/tube.py

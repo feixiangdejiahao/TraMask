@@ -1,0 +1,1 @@
+cd /app && git log --oneline -20 && git remote -v && git branch -a && git tag | head

@@ -1,0 +1,1 @@
+find . -type f -name '*.go' | head -100 && echo "---" && cat go.mod && echo "---" && ls -la checkers astwalk 2>/dev/null

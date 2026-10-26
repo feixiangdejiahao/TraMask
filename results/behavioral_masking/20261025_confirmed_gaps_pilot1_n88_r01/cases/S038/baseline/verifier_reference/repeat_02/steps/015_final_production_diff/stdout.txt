@@ -1,0 +1,234 @@
+diff --git a/src/core/index.ts b/src/core/index.ts
+index 2a1500d..5a44c51 100644
+--- a/src/core/index.ts
++++ b/src/core/index.ts
+@@ -1,6 +1,6 @@
+ import { CreateStoreOptions, KeaPlugin } from '../types'
+ import { listeners, ListenersPluginContext, sharedListeners } from './listeners'
+-import { getPluginContext, setPluginContext } from '../kea/context'
++import { getPluginContext, setPluginContext, getContext } from '../kea/context'
+ import { connect } from './connect'
+ import { actions } from './actions'
+ import { defaults } from './defaults'
+@@ -69,6 +69,13 @@ export const corePlugin: KeaPlugin = {
+             }
+           }
+         }
++
++        const { options: contextOptions } = getContext()
++        if (contextOptions.atomicSelectors && previousState !== store.getState()) {
++          const { updateAtomicSignals } = require('../kea/atomic')
++          updateAtomicSignals(previousState, store.getState())
++        }
++
+         return response
+       })
+     },
+diff --git a/src/core/reducers.ts b/src/core/reducers.ts
+index b53967c..567f787 100644
+--- a/src/core/reducers.ts
++++ b/src/core/reducers.ts
+@@ -14,7 +14,7 @@
+ import { Logic, LogicBuilder, PathType, ReducerDefinitions } from '../types'
+ import type { AnyAction } from 'redux'
+ import { combineKeaReducers } from '../kea/reducer'
+-import { getStoreState } from '../kea/context'
++import { getStoreState, getContext } from '../kea/context'
+ import { createSelector } from 'reselect'
+ import { getContextDefaults } from './defaults'
+ import { addSelectorAndValue } from './selectors'
+@@ -130,11 +130,21 @@ export function reducers<L extends Logic = Logic>(
+ 
+       // create selector for reducer
+       if (!logic.selectors[key]) {
+-        addSelectorAndValue(
+-          logic,
+-          key,
+-          createSelector(logic.selector!, (state) => state[key]),
+-        )
++        let finalSelector = createSelector(logic.selector!, (state) => state[key])
++        const { options } = getContext()
++        if (options.atomicSelectors) {
++          const { wrapAtomicSelector, getLogicSelectorHealth } = require('../kea/atomic')
++          const result = wrapAtomicSelector(logic, key, finalSelector, [logic.selector!])
++          finalSelector = result.wrappedSelector
++          if (!logic.selectorHealth) {
++            logic.selectorHealth = () => getLogicSelectorHealth(logic)
++          }
++        }
++        const selectorToRegister: any = finalSelector
++        if (options.atomicSelectors) {
++          selectorToRegister._atomic = true
++        }
++        addSelectorAndValue(logic, key, selectorToRegister)
+       }
+     }
+   }
+diff --git a/src/core/selectors.ts b/src/core/selectors.ts
+index 41c5b1c..b83dc98 100644
+--- a/src/core/selectors.ts
++++ b/src/core/selectors.ts
+@@ -1,6 +1,6 @@
+ import { Logic, LogicBuilder, LogicPropSelectors, Selector, SelectorDefinition, SelectorDefinitions } from '../types'
+ import { createSelector, createSelectorCreator, defaultMemoize, ParametricSelector } from 'reselect'
+-import { getStoreState } from '../kea/context'
++import { getStoreState, getContext } from '../kea/context'
+ 
+ /**
+   Logic builder:
+@@ -68,11 +68,36 @@ export function selectors<L extends Logic = Logic>(
+         const msg = `[KEA] Logic "${logic.pathString}", selector "${key}" has incorrect input: [${argTypes}].`
+         throw new Error(msg)
+       }
+-      builtSelectors[key] = createSelector(args, func, { memoizeOptions })
+ 
+-      addSelectorAndValue(logic, key, (state = getStoreState(), props = logic.props) =>
+-        builtSelectors[key](state, props),
+-      )
++      let atomicMetadata: any = null
++      const wrappedFunc = (...funcArgs: any[]) => {
++        return func(...funcArgs)
++      }
++
++      let finalSelector = createSelector(args, wrappedFunc, { memoizeOptions })
++
++      const options = getContext()?.options || { atomicSelectors: false }
++      if (options.atomicSelectors) {
++        const { wrapAtomicSelector, getLogicSelectorHealth } = require('../kea/atomic')
++        const result = wrapAtomicSelector(logic, key, finalSelector, args)
++        atomicMetadata = result.metadata
++        finalSelector = result.wrappedSelector
++        if (!logic.selectorHealth) {
++          logic.selectorHealth = () => getLogicSelectorHealth(logic)
++        }
++      }
++
++      builtSelectors[key] = finalSelector
++
++      const selectorToRegister: any = (state = getStoreState(), props = logic.props) =>
++        builtSelectors[key](state, props)
++
++      if (options.atomicSelectors) {
++        selectorToRegister._original = finalSelector
++        selectorToRegister._atomic = true
++      }
++
++      addSelectorAndValue(logic, key, selectorToRegister)
+ 
+       if (!logic.values.hasOwnProperty(key)) {
+         Object.defineProperty(logic.values, key, {
+diff --git a/src/kea/context.ts b/src/kea/context.ts
+index 64ae850..ba6a248 100644
+--- a/src/kea/context.ts
++++ b/src/kea/context.ts
+@@ -66,6 +66,7 @@ export function openContext(options: ContextOptions = {}, initial = false): Cont
+       attachStrategy: 'dispatch',
+       detachStrategy: 'dispatch',
+       defaultPath: ['kea', 'logic'],
++      atomicSelectors: false,
+       ...otherOptions,
+     },
+   } as Context
+@@ -89,6 +90,10 @@ export function openContext(options: ContextOptions = {}, initial = false): Cont
+   activatePlugin(corePlugin)
+ 
+   runPlugins('afterOpenContext', newContext, options)
++  if (newContext.options.atomicSelectors) {
++    const { initAtomicContext } = require('./atomic')
++    initAtomicContext()
++  }
+ 
+   if (plugins) {
+     for (const plugin of plugins) {
+diff --git a/src/kea/kea.ts b/src/kea/kea.ts
+index 5cc90e8..ba6a2bc 100644
+--- a/src/kea/kea.ts
++++ b/src/kea/kea.ts
+@@ -181,9 +181,9 @@ export function proxyFieldToLogic<L extends Logic = Logic>(wrapper: LogicWrapper
+ }
+ 
+ export function proxyFields<L extends Logic = Logic>(wrapper: LogicWrapper<L>): void {
+-  const reservedProxiedKeys = ['path', 'pathString', 'props'] as ['path', 'pathString', 'props']
++  const reservedProxiedKeys = ['path', 'pathString', 'props', 'selectorHealth'] as ['path', 'pathString', 'props', 'selectorHealth']
+   for (const key of reservedProxiedKeys) {
+-    proxyFieldToLogic(wrapper, key)
++    proxyFieldToLogic(wrapper, key as keyof L)
+   }
+   for (const key of Object.keys(getContext().plugins.logicFields)) {
+     proxyFieldToLogic(wrapper, key as keyof Logic)
+@@ -194,6 +194,6 @@ export function unmountedActionError(key: string, path: string): string {
+   return `[KEA] Can not access "${key}" on logic "${path}" because it is not mounted!
+ This can happen in several situations:
+ - You may need to add the "connect(otherLogic)" logic builder, or "useMountedLogic(otherLogic)" hook to make sure the logic is mounted.
+-- If "otherLogic" is undefined, your bundler may import and execute code in an unfavourable order. Switch to a function: "connect(() => otherLogic)" 
++- If "otherLogic" is undefined, your bundler may import and execute code in an unfavourable order. Switch to a function: "connect(() => otherLogic)"
+ - It may be that the logic has already unmounted. Do you have a listener that is missing a breakpoint?`
+ }
+diff --git a/src/react/hooks.ts b/src/react/hooks.ts
+index ff97b19..4b39826 100644
+--- a/src/react/hooks.ts
++++ b/src/react/hooks.ts
+@@ -12,7 +12,17 @@ export const isPaused = () => pauseCounter !== 0
+ const getStoreState = () => getContext().store.getState()
+ 
+ export function useSelector(selector: Selector): any {
+-  return useSyncExternalStore(getContext().store.subscribe, () => selector(getStoreState()))
++  const { store, options } = getContext() || { options: {} }
++  const subscribe = useMemo(() => {
++    if (options.atomicSelectors && (selector as any)._atomic) {
++      const { subscribeToAtomicSelector } = require('../kea/atomic')
++      // Subscribe specifically to THIS selector's signals
++      return (cb: () => void) => subscribeToAtomicSelector(selector, cb)
++    }
++    return store?.subscribe || (() => () => { })
++  }, [selector, options.atomicSelectors, store])
++
++  return useSyncExternalStore(subscribe, () => selector(getStoreState()))
+ }
+ 
+ export function useValues<L extends Logic = Logic>(logic: BuiltLogic<L> | LogicWrapper<L>): L['values'] {
+diff --git a/src/types.ts b/src/types.ts
+index fd16a4f..e30e909 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -34,6 +34,7 @@ export interface Logic {
+   reducerOptions: Record<string, any>
+   selector?: Selector
+   selectors: Record<string, Selector>
++  selectorHealth?: () => AtomicSelectorHealth
+   values: Record<string, any>
+   events: {
+     beforeMount?: () => void
+@@ -452,6 +453,7 @@ export interface MakeLogicType<
+   selectors: {
+     [Value in keyof Values]: (state: any, props: LogicProps) => Values[Value]
+   }
++  selectorHealth?: () => AtomicSelectorHealth
+   values: Values
+ 
+   __keaTypeGenInternalSelectorTypes: {
+@@ -538,6 +540,7 @@ export interface InternalContextOptions {
+   detachStrategy: 'dispatch' | 'replace' | 'persist'
+   defaultPath: string[]
+   disableAsyncActions: boolean
++  atomicSelectors: boolean
+   // ...otherOptions
+ }
+ 
+@@ -661,3 +664,16 @@ export interface Context {
+ 
+   options: InternalContextOptions
+ }
++
++export interface AtomicSelectorHealth {
++  selectors: Record<
++    string,
++    {
++      dependencies: string[]
++      evaluations: number
++      dirtyCause?: string | null
++      dependents?: string[]
++    }
++  >
++  topologicalOrder?: string[]
++}

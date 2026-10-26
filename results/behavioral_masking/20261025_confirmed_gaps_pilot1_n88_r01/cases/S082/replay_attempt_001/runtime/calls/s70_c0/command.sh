@@ -1,0 +1,1 @@
+cd /app && grep -n "aborted\|abort()" lib/runners/browser_test_runner.js

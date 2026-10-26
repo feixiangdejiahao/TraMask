@@ -1,0 +1,1 @@
+cd /app && cp /tmp/check_bail.js ./check_bail_tmp.js && node check_bail_tmp.js

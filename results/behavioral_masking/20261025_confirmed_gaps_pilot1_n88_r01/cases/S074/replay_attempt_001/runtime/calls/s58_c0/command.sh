@@ -1,0 +1,1 @@
+cd /app && sed -n '640,675p' parser/parser.go

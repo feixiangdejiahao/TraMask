@@ -1,0 +1,1 @@
+cd /app && npx prettier --check src/schema/actions/requiredIf.unit.test.ts && npx vitest run src/schema/actions/requiredIf.unit.test.ts --reporter=dot 2>&1 | tail -8

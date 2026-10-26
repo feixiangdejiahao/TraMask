@@ -1,0 +1,1 @@
+cd /app && cargo test -p boa_engine --lib --no-run

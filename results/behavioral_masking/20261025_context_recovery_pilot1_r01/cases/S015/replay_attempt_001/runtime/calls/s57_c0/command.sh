@@ -1,0 +1,1 @@
+sed -n '1,80p' tests/unit/core/test_manager.py && echo "..." && grep -n "def test" tests/unit/core/test_manager.py

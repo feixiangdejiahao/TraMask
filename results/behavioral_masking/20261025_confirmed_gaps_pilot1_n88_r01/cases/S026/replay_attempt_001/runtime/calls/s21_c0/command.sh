@@ -1,0 +1,1 @@
+GOROOT=$(go env GOROOT); grep -n "func isName" "$GOROOT/src/go/doc/comment/parse.go"; nl -ba "$GOROOT/src/go/doc/comment/parse.go" | sed -n '1000,1040p'

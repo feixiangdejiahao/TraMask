@@ -1,0 +1,1 @@
+cd /app && grep -n '\[' checkers/testdata/_integration/check_main_only/main.go | head; echo "--- golden ---"; cat checkers/testdata/_integration/check_main_only/linttest.golden

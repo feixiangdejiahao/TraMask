@@ -1,0 +1,1 @@
+cd /app && grep -rn "DocLink\|brokenDocLink\|brokenDoc" --include='*.go' . | head -30; echo "==== docs ===="; ls docs; grep -rn "deprecatedComment" docs/ | head; echo "==== checkers list ===="; cat checkers/analyzer/analyzer.go | head -80

@@ -1,0 +1,1 @@
+sleep 25; tail -25 /tmp/pytest_full.log; echo "---"; ps aux | grep pytest | grep -v grep | head

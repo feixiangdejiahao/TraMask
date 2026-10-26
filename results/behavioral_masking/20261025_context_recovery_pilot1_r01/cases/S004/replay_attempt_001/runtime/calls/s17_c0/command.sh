@@ -1,0 +1,1 @@
+cat -n aiomonitor/webui/app.py | sed -n '140,260p'; echo '=====INIT====='; cat aiomonitor/webui/__init__.py; echo '=====TEMPLATES====='; find aiomonitor/webui/templates -type f -maxdepth 2 | sort; echo '=====STATIC====='; find aiomonitor/webui/static -type f | sort

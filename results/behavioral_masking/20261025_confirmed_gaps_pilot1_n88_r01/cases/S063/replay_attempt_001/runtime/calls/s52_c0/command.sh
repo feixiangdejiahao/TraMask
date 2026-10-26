@@ -1,0 +1,1 @@
+cd /app && sed -i 's/    r2.close()  # kill underlying from client side; but m3 reader may block.../    # r2.close()  # kill underlying from client side; but m3 reader may block.../' /tmp/test_halfclose.py && timeout 30 python /tmp/test_halfclose.py

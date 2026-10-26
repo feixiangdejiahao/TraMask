@@ -1,0 +1,1 @@
+cd /app && grep -rn 'nosec' tests/ | head -80 && echo '=====' && ls tests/functional examples

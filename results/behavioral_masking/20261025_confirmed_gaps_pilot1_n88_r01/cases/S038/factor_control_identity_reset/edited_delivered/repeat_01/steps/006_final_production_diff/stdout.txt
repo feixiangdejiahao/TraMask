@@ -1,0 +1,1734 @@
+diff --git a/src/core/atomic-selectors.ts b/src/core/atomic-selectors.ts
+new file mode 100644
+index 0000000..a7efb2d
+--- /dev/null
++++ b/src/core/atomic-selectors.ts
+@@ -0,0 +1,1560 @@
++import {
++  BuiltLogic,
++  KeaPlugin,
++  Logic,
++  LogicBuilder,
++  LogicPropSelectors,
++  Selector,
++  SelectorDefinition,
++  SelectorDefinitions,
++  SelectorHealth,
++} from '../types'
++import { getContext, getStoreState } from '../kea/context'
++
++/**
++ * Atomic Signal Selector Engine
++ *
++ * When enabled through `resetContext({ atomicSelectors: true })` Kea tracks
++ * selector dependencies at the exact leaf level (e.g. `user.name`), supports
++ * fine-grained access into Maps, Sets and Arrays, propagates changes only to
++ * affected selectors and exposes `logic.selectorHealth()`.
++ */
++
++// ---------------------------------------------------------------------------
++// Internal types
++// ---------------------------------------------------------------------------
++
++const RAW = Symbol('kea.atomic.raw')
++
++type DepSegment =
++  | { kind: 'prop'; key: string | number }
++  | { kind: 'index'; key: number }
++  | { kind: 'mapKey'; key: any }
++  | { kind: 'setValue'; value: any }
++
++interface AtomicDependency {
++  id: string
++  type: 'leaf' | 'selector' | 'props'
++  segments?: DepSegment[]
++  selectorName?: string
++  foreignFn?: Selector
++  value: any
++  explicit?: boolean
++}
++
++interface AtomicSelectorMeta {
++  name: string
++  rootDerived: boolean
++  reducerKey?: string
++  inputFns?: Selector[]
++  computeFn?: (...args: any[]) => any
++  memoizeOptions?: Record<string, any>
++  value: any
++  proxy: any
++  dependencies: AtomicDependency[]
++  dependents: string[]
++  evaluations: number
++  dirtyCause: string | null
++  dirty: boolean
++  hasEvaluated: boolean
++}
++
++interface RecomputeSession {
++  processed: Set<string>
++  visiting: Set<string>
++  state: any
++  props: any
++}
++
++interface AtomicLogicState {
++  logic: BuiltLogic
++  metas: Record<string, AtomicSelectorMeta>
++  lastState: any
++  lastProps: any
++  mounted: boolean
++  proxyCache: WeakMap<object, Map<string, any>>
++  recomputeSession: RecomputeSession | null
++}
++
++interface InputValue {
++  value: any
++  baseDep: AtomicDependency | null
++}
++
++interface AtomicSelectorFnMeta {
++  logic: BuiltLogic
++  name: string
++  rootDerived: boolean
++  props?: boolean
++}
++
++type AtomicSelectorFn = Selector & { _keaAtomicMeta?: AtomicSelectorFnMeta }
++
++// ---------------------------------------------------------------------------
++// Tracker
++// ---------------------------------------------------------------------------
++
++let activeTracker: Tracker | null = null
++
++class Tracker {
++  ls: AtomicLogicState
++  deps = new Map<string, AtomicDependency>()
++
++  constructor(ls: AtomicLogicState) {
++    this.ls = ls
++  }
++
++  addDep(dep: AtomicDependency): void {
++    if (!this.deps.has(dep.id)) {
++      this.deps.set(dep.id, { ...dep, value: unwrapProxy(dep.value) })
++    }
++  }
++
++  addLeaf(segments: DepSegment[], value: any): void {
++    const id = segmentsToId(segments)
++    if (!this.deps.has(id)) {
++      this.deps.set(id, { id, type: 'leaf', segments, value: unwrapProxy(value) })
++    }
++  }
++
++  addSelector(name: string, value: any): void {
++    const id = `selector:${name}`
++    if (!this.deps.has(id)) {
++      this.deps.set(id, { id, type: 'selector', selectorName: name, value: unwrapProxy(value) })
++    }
++  }
++
++  addSelectorLeaf(name: string, segments: DepSegment[], value: any): void {
++    const id = segments.length > 0 ? `${name}.${segmentsToId(segments)}` : `selector:${name}`
++    if (!this.deps.has(id)) {
++      this.deps.set(id, {
++        id,
++        type: 'selector',
++        selectorName: name,
++        segments,
++        value: unwrapProxy(value),
++      })
++    }
++  }
++
++  addProps(segments: DepSegment[], value: any): void {
++    const id = `props:${segmentsToId(segments)}`
++    if (!this.deps.has(id)) {
++      this.deps.set(id, { id, type: 'props', segments, value: unwrapProxy(value) })
++    }
++  }
++}
++
++function recordLeaf(ls: AtomicLogicState, segments: DepSegment[], value: any): void {
++  const t = activeTracker
++  if (t && t.ls === ls) {
++    t.addLeaf(segments, value)
++  }
++}
++
++function recordSelector(ls: AtomicLogicState, name: string, value: any): void {
++  const t = activeTracker
++  if (t && t.ls === ls && name) {
++    t.addSelector(name, value)
++  }
++}
++
++function recordSelectorLeaf(ls: AtomicLogicState, name: string, segments: DepSegment[], value: any): void {
++  const t = activeTracker
++  if (t && t.ls === ls && name) {
++    t.addSelectorLeaf(name, segments, value)
++  }
++}
++
++function recordProps(ls: AtomicLogicState, segments: DepSegment[], value: any): void {
++  const t = activeTracker
++  if (t && t.ls === ls) {
++    t.addProps(segments, value)
++  }
++}
++
++function recordCollectionSize(ls: AtomicLogicState, base: DepSegment[], target: any[] | Map<any, any> | Set<any>): void {
++  const segment: DepSegment = { kind: 'prop', key: 'length' }
++  if (Array.isArray(target)) {
++    recordLeaf(ls, [...base, segment], target.length)
++  } else {
++    recordLeaf(ls, [...base, { kind: 'prop', key: 'size' }], target.size)
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Helpers
++// ---------------------------------------------------------------------------
++
++function isTrackableObject(value: any): boolean {
++  return value !== null && (typeof value === 'object' || typeof value === 'function')
++}
++
++function unwrapProxy(value: any): any {
++  if (isTrackableObject(value)) {
++    try {
++      if (value[RAW] !== undefined) {
++        return value[RAW]
++      }
++    } catch (e) {
++      // ignore
++    }
++  }
++  return value
++}
++
++function segmentToId(seg: DepSegment): string {
++  if (seg.kind === 'prop') return String(seg.key)
++  if (seg.kind === 'index') return String(seg.key)
++  if (seg.kind === 'mapKey') return `map:${String(seg.key)}`
++  return `set:${String(seg.value)}`
++}
++
++function segmentsToId(segments: DepSegment[]): string {
++  return segments.map(segmentToId).join('.')
++}
++
++function segIndex(i: number): DepSegment {
++  return { kind: 'index', key: i }
++}
++
++function isPrunablePrefix(dep: AtomicDependency): boolean {
++  if (dep.explicit) return false
++  if (!dep.segments || dep.segments.length === 0) return false
++  const last = dep.segments[dep.segments.length - 1]
++  return last.kind === 'prop' || last.kind === 'index'
++}
++
++function pruneDependencies(deps: AtomicDependency[]): AtomicDependency[] {
++  const ids = deps.map((d) => d.id)
++  return deps.filter((d) => {
++    if (!isPrunablePrefix(d)) return true
++    const prefix = d.id + '.'
++    return !ids.some((other) => other !== d.id && other.startsWith(prefix))
++  })
++}
++
++function isArrayIndex(str: string): number | null {
++  if (str === '') return null
++  const n = Number(str)
++  return Number.isInteger(n) && n >= 0 && String(n) === str ? n : null
++}
++
++function getLogicRootRaw(logic: BuiltLogic, state: any): any {
++  if (!state) return undefined
++  return logic.path.reduce((v, part) => (v == null ? v : v[part as any]), state)
++}
++
++function readValueBySegments(raw: any, segments: DepSegment[]): any {
++  let cur = raw
++  for (const seg of segments) {
++    if (cur == null) return undefined
++    if (seg.kind === 'prop') cur = cur[seg.key]
++    else if (seg.kind === 'index') cur = cur[seg.key]
++    else if (seg.kind === 'mapKey') cur = cur instanceof Map ? cur.get(seg.key) : cur[seg.key]
++    else if (seg.kind === 'setValue') cur = cur instanceof Set ? cur.has(seg.value) : false
++  }
++  return unwrapProxy(cur)
++}
++
++function readDependencyValue(dep: AtomicDependency, ls: AtomicLogicState, state: any, props: any): any {
++  if (dep.type === 'leaf' && dep.segments) {
++    return readValueBySegments(getLogicRootRaw(ls.logic, state), dep.segments)
++  }
++  if (dep.type === 'props' && dep.segments) {
++    return readValueBySegments(props, dep.segments)
++  }
++  if (dep.type === 'selector') {
++    let raw: any
++    if (dep.foreignFn) {
++      raw = unwrapProxy(dep.foreignFn(state, props))
++    } else {
++      const meta = dep.selectorName ? ls.metas[dep.selectorName] : undefined
++      raw = meta ? meta.value : undefined
++    }
++    if (dep.segments && dep.segments.length > 0) {
++      return readValueBySegments(raw, dep.segments)
++    }
++    return raw
++  }
++  return undefined
++}
++
++function dependencyEqual(dep: AtomicDependency, current: any, ls: AtomicLogicState): boolean {
++  if (dep.type === 'selector' && dep.selectorName) {
++    if (dep.segments && dep.segments.length > 0) {
++      return Object.is(dep.value, current)
++    }
++    const target = ls.metas[dep.selectorName]
++    const eq = target && target.memoizeOptions && target.memoizeOptions.resultEqualityCheck
++    if (typeof eq === 'function') {
++      return eq(dep.value, current)
++    }
++  }
++  return Object.is(dep.value, current)
++}
++
++function sameValue(a: any, b: any, memoizeOptions?: Record<string, any>): boolean {
++  const eq = memoizeOptions && memoizeOptions.resultEqualityCheck
++  if (typeof eq === 'function') {
++    return eq(a, b)
++  }
++  return Object.is(a, b)
++}
++
++function defineValue(logic: BuiltLogic, key: string): void {
++  if (!logic.values.hasOwnProperty(key)) {
++    Object.defineProperty(logic.values, key, {
++      get: function () {
++        return logic.selectors[key](getStoreState(), logic.props)
++      },
++      enumerable: true,
++    })
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Proxies
++// ---------------------------------------------------------------------------
++
++function cachedProxy(ls: AtomicLogicState, raw: object, pathKey: string, create: () => any): any {
++  let m = ls.proxyCache.get(raw)
++  if (!m) {
++    m = new Map()
++    ls.proxyCache.set(raw, m)
++  }
++  let p = m.get(pathKey)
++  if (!p) {
++    p = create()
++    m.set(pathKey, p)
++  }
++  return p
++}
++
++function createStateProxy(raw: any, base: DepSegment[], ls: AtomicLogicState): any {
++  raw = unwrapProxy(raw)
++  if (!isTrackableObject(raw) || typeof raw === 'function') return raw
++  if (Array.isArray(raw)) {
++    const pathKey = `a:${segmentsToId(base)}`
++    return cachedProxy(ls, raw, pathKey, () => new Proxy(raw, arrayHandler(ls, base)))
++  }
++  if (raw instanceof Map) {
++    const pathKey = `m:${segmentsToId(base)}`
++    return cachedProxy(ls, raw, pathKey, () => new Proxy(raw, mapHandler(ls, base)))
++  }
++  if (raw instanceof Set) {
++    const pathKey = `s:${segmentsToId(base)}`
++    return cachedProxy(ls, raw, pathKey, () => new Proxy(raw, setHandler(ls, base)))
++  }
++  const pathKey = `o:${segmentsToId(base)}`
++  return cachedProxy(ls, raw, pathKey, () => new Proxy(raw, objectHandler(ls, base)))
++}
++
++function wrapReadValue(ls: AtomicLogicState, value: any, segments: DepSegment[]): any {
++  const raw = unwrapProxy(value)
++  if (typeof raw === 'function') return raw
++  return createStateProxy(raw, segments, ls)
++}
++
++const objectHandler = (ls: AtomicLogicState, base: DepSegment[]) => ({
++  get(target: any, prop: string | symbol, receiver: any): any {
++    if (prop === RAW) return target
++    if (typeof prop === 'symbol') {
++      return Reflect.get(target, prop, target)
++    }
++    const segment: DepSegment = { kind: 'prop', key: prop }
++    const value = Reflect.get(target, prop, target)
++    recordLeaf(ls, [...base, segment], value)
++    if (typeof value === 'function') return value
++    return wrapReadValue(ls, value, [...base, segment])
++  },
++  has(target: any, prop: string | symbol): boolean {
++    if (typeof prop === 'symbol') return Reflect.has(target, prop)
++    const segment: DepSegment = { kind: 'prop', key: prop }
++    recordLeaf(ls, [...base, segment], Reflect.get(target, prop))
++    return Reflect.has(target, prop)
++  },
++  ownKeys(target: any): ArrayLike<string | symbol> {
++    const keys = Reflect.ownKeys(target)
++    for (const key of keys) {
++      if (typeof key === 'string') {
++        recordLeaf(ls, [...base, { kind: 'prop', key }], Reflect.get(target, key))
++      }
++    }
++    return keys
++  },
++  getOwnPropertyDescriptor(target: any, prop: string | symbol): PropertyDescriptor | undefined {
++    if (typeof prop === 'string') {
++      recordLeaf(ls, [...base, { kind: 'prop', key: prop }], Reflect.get(target, prop))
++    }
++    return Reflect.getOwnPropertyDescriptor(target, prop)
++  },
++})
++
++function arrayIterator(ls: AtomicLogicState, base: DepSegment[], target: any[], mode: 'values' | 'entries'): IterableIterator<any> {
++  let i = 0
++  recordCollectionSize(ls, base, target)
++  return {
++    next(): IteratorResult<any> {
++      if (i < target.length) {
++        const idx = i
++        const segments = [...base, segIndex(idx)]
++        recordLeaf(ls, segments, target[idx])
++        const value = wrapReadValue(ls, target[idx], segments)
++        i++
++        if (mode === 'entries') {
++          return { value: [idx, value], done: false }
++        }
++        return { value, done: false }
++      }
++      return { value: undefined, done: true }
++    },
++    [Symbol.iterator]() {
++      return this
++    },
++  }
++}
++
++function wrapArrayMethod(ls: AtomicLogicState, base: DepSegment[], target: any[], prop: string): (...args: any[]) => any {
++  const recordIndex = (i: number) => recordLeaf(ls, [...base, segIndex(i)], target[i])
++  const proxyArray = createStateProxy(target, base, ls)
++
++  switch (prop) {
++    case 'includes':
++      return (searchElement: any, fromIndex?: number) => {
++        const start = fromIndex === undefined ? 0 : Math.max(fromIndex >= 0 ? fromIndex : target.length + fromIndex, 0)
++        for (let i = start; i < target.length; i++) {
++          recordIndex(i)
++          if (Object.is(target[i], searchElement)) return true
++        }
++        recordCollectionSize(ls, base, target)
++        return false
++      }
++    case 'indexOf':
++      return (searchElement: any, fromIndex?: number) => {
++        const start = fromIndex === undefined ? 0 : Math.max(fromIndex >= 0 ? fromIndex : target.length + fromIndex, 0)
++        for (let i = start; i < target.length; i++) {
++          recordIndex(i)
++          if (target[i] === searchElement) return i
++        }
++        recordCollectionSize(ls, base, target)
++        return -1
++      }
++    case 'lastIndexOf':
++      return (searchElement: any, fromIndex?: number) => {
++        const start =
++          fromIndex === undefined
++            ? target.length - 1
++            : Math.min(fromIndex >= 0 ? fromIndex : target.length + fromIndex, target.length - 1)
++        for (let i = start; i >= 0; i--) {
++          recordIndex(i)
++          if (target[i] === searchElement) return i
++        }
++        recordCollectionSize(ls, base, target)
++        return -1
++      }
++    case 'map':
++      return (cb: (item: any, index: number, array: any[]) => any, thisArg?: any) => {
++        recordCollectionSize(ls, base, target)
++        const result: any[] = []
++        for (let i = 0; i < target.length; i++) {
++          recordIndex(i)
++          const segments = [...base, segIndex(i)]
++          result.push(unwrapProxy(cb.call(thisArg, wrapReadValue(ls, target[i], segments), i, proxyArray)))
++        }
++        return result
++      }
++    case 'filter':
++      return (cb: (item: any, index: number, array: any[]) => any, thisArg?: any) => {
++        recordCollectionSize(ls, base, target)
++        const result: any[] = []
++        for (let i = 0; i < target.length; i++) {
++          recordIndex(i)
++          const segments = [...base, segIndex(i)]
++          if (cb.call(thisArg, wrapReadValue(ls, target[i], segments), i, proxyArray)) {
++            result.push(unwrapProxy(target[i]))
++          }
++        }
++        return result
++      }
++    case 'forEach':
++      return (cb: (item: any, index: number, array: any[]) => void, thisArg?: any) => {
++        recordCollectionSize(ls, base, target)
++        for (let i = 0; i < target.length; i++) {
++          recordIndex(i)
++          const segments = [...base, segIndex(i)]
++          cb.call(thisArg, wrapReadValue(ls, target[i], segments), i, proxyArray)
++        }
++      }
++    case 'some':
++      return (cb: (item: any, index: number, array: any[]) => any, thisArg?: any) => {
++        recordCollectionSize(ls, base, target)
++        for (let i = 0; i < target.length; i++) {
++          recordIndex(i)
++          const segments = [...base, segIndex(i)]
++          if (cb.call(thisArg, wrapReadValue(ls, target[i], segments), i, proxyArray)) return true
++        }
++        return false
++      }
++    case 'every':
++      return (cb: (item: any, index: number, array: any[]) => any, thisArg?: any) => {
++        recordCollectionSize(ls, base, target)
++        for (let i = 0; i < target.length; i++) {
++          recordIndex(i)
++          const segments = [...base, segIndex(i)]
++          if (!cb.call(thisArg, wrapReadValue(ls, target[i], segments), i, proxyArray)) return false
++        }
++        return true
++      }
++    case 'find':
++      return (cb: (item: any, index: number, array: any[]) => any, thisArg?: any) => {
++        recordCollectionSize(ls, base, target)
++        for (let i = 0; i < target.length; i++) {
++          recordIndex(i)
++          const segments = [...base, segIndex(i)]
++          if (cb.call(thisArg, wrapReadValue(ls, target[i], segments), i, proxyArray)) {
++            return wrapReadValue(ls, target[i], segments)
++          }
++        }
++        return undefined
++      }
++    case 'findIndex':
++      return (cb: (item: any, index: number, array: any[]) => any, thisArg?: any) => {
++        recordCollectionSize(ls, base, target)
++        for (let i = 0; i < target.length; i++) {
++          recordIndex(i)
++          const segments = [...base, segIndex(i)]
++          if (cb.call(thisArg, wrapReadValue(ls, target[i], segments), i, proxyArray)) return i
++        }
++        return -1
++      }
++    case 'reduce':
++      return (cb: (acc: any, item: any, index: number, array: any[]) => any, initialValue?: any) => {
++        recordCollectionSize(ls, base, target)
++        let acc = initialValue
++        let start = 0
++        if (arguments.length < 2) {
++          if (target.length === 0) throw new TypeError('Reduce of empty array with no initial value')
++          acc = target[0]
++          start = 1
++        }
++        for (let i = start; i < target.length; i++) {
++          recordIndex(i)
++          const segments = [...base, segIndex(i)]
++          acc = cb.call(undefined, acc, wrapReadValue(ls, target[i], segments), i, proxyArray)
++        }
++        return acc
++      }
++    case 'reduceRight':
++      return (cb: (acc: any, item: any, index: number, array: any[]) => any, initialValue?: any) => {
++        recordCollectionSize(ls, base, target)
++        let acc = initialValue
++        let start = target.length - 1
++        if (arguments.length < 2) {
++          if (target.length === 0) throw new TypeError('Reduce of empty array with no initial value')
++          acc = target[target.length - 1]
++          start = target.length - 2
++        }
++        for (let i = start; i >= 0; i--) {
++          recordIndex(i)
++          const segments = [...base, segIndex(i)]
++          acc = cb.call(undefined, acc, wrapReadValue(ls, target[i], segments), i, proxyArray)
++        }
++        return acc
++      }
++    case 'at':
++      return (index: number) => {
++        const idx = index < 0 ? target.length + index : index
++        if (idx >= 0 && idx < target.length) {
++          recordIndex(idx)
++          const segments = [...base, segIndex(idx)]
++          return wrapReadValue(ls, target[idx], segments)
++        }
++        return undefined
++      }
++    case 'values':
++      return () => arrayIterator(ls, base, target, 'values')
++    case 'entries':
++      return () => arrayIterator(ls, base, target, 'entries')
++    default:
++      return (...args: any[]) => {
++        if (prop === 'keys') {
++          recordCollectionSize(ls, base, target)
++          const result: number[] = []
++          for (let i = 0; i < target.length; i++) {
++            recordIndex(i)
++            result.push(i)
++          }
++          return result[Symbol.iterator] ? result.values() : result
++        }
++        recordCollectionSize(ls, base, target)
++        for (let i = 0; i < target.length; i++) recordIndex(i)
++        return (target as any)[prop](...args)
++      }
++  }
++}
++
++const arrayHandler = (ls: AtomicLogicState, base: DepSegment[]) => {
++  const obj = objectHandler(ls, base)
++  return {
++    ...obj,
++    get(target: any, prop: string | symbol, receiver: any): any {
++      if (prop === RAW) return target
++      if (typeof prop === 'symbol') {
++        if (prop === Symbol.iterator) {
++          return function () {
++            return arrayIterator(ls, base, target, 'values')
++          }
++        }
++        return Reflect.get(target, prop, target)
++      }
++      const idx = isArrayIndex(String(prop))
++      if (idx !== null) {
++        const segment: DepSegment = segIndex(idx)
++        recordLeaf(ls, [...base, segment], target[idx])
++        return wrapReadValue(ls, target[idx], [...base, segment])
++      }
++      if (typeof target[prop] === 'function') {
++        return wrapArrayMethod(ls, base, target, String(prop))
++      }
++      const segment: DepSegment = { kind: 'prop', key: prop }
++      recordLeaf(ls, [...base, segment], target[prop])
++      return wrapReadValue(ls, target[prop], [...base, segment])
++    },
++  }
++}
++
++function wrapMapIterator(
++  ls: AtomicLogicState,
++  base: DepSegment[],
++  target: Map<any, any>,
++  mode: 'keys' | 'values' | 'entries',
++): IterableIterator<any> {
++  recordCollectionSize(ls, base, target)
++  const entries = Array.from(target.entries())
++  let i = 0
++  return {
++    next(): IteratorResult<any> {
++      if (i < entries.length) {
++        const [key, value] = entries[i]
++        const segment: DepSegment = { kind: 'mapKey', key }
++        recordLeaf(ls, [...base, segment], target.get(key))
++        const trackedValue = wrapReadValue(ls, value, [...base, segment])
++        i++
++        if (mode === 'keys') return { value: key, done: false }
++        if (mode === 'values') return { value: trackedValue, done: false }
++        return { value: [key, trackedValue], done: false }
++      }
++      return { value: undefined, done: true }
++    },
++    [Symbol.iterator]() {
++      return this
++    },
++  }
++}
++
++const mapHandler = (ls: AtomicLogicState, base: DepSegment[]) => ({
++  get(target: Map<any, any>, prop: string | symbol, receiver: any): any {
++    if (prop === RAW) return target
++    if (typeof prop === 'symbol') {
++      if (prop === Symbol.iterator) {
++        return function () {
++          return wrapMapIterator(ls, base, target, 'entries')
++        }
++      }
++      return Reflect.get(target, prop, target)
++    }
++    if (prop === 'size') {
++      recordLeaf(ls, [...base, { kind: 'prop', key: 'size' }], target.size)
++      return target.size
++    }
++    switch (prop) {
++      case 'get':
++        return (key: any) => {
++          const segment: DepSegment = { kind: 'mapKey', key }
++          recordLeaf(ls, [...base, segment], target.get(key))
++          return wrapReadValue(ls, target.get(key), [...base, segment])
++        }
++      case 'has':
++        return (key: any) => {
++          const segment: DepSegment = { kind: 'mapKey', key }
++          recordLeaf(ls, [...base, segment], target.has(key))
++          return target.has(key)
++        }
++      case 'forEach':
++        return (cb: (value: any, key: any, map: Map<any, any>) => void, thisArg?: any) => {
++          recordCollectionSize(ls, base, target)
++          for (const [key, value] of target.entries()) {
++            const segment: DepSegment = { kind: 'mapKey', key }
++            recordLeaf(ls, [...base, segment], value)
++            cb.call(thisArg, wrapReadValue(ls, value, [...base, segment]), key, createStateProxy(target, base, ls))
++          }
++        }
++      case 'keys':
++        return () => wrapMapIterator(ls, base, target, 'keys')
++      case 'values':
++        return () => wrapMapIterator(ls, base, target, 'values')
++      case 'entries':
++        return () => wrapMapIterator(ls, base, target, 'entries')
++      case 'set':
++      case 'delete':
++      case 'clear':
++        return (keyOrValue?: any, value?: any) => {
++          if (typeof keyOrValue !== 'undefined') {
++            const segment: DepSegment = { kind: 'mapKey', key: keyOrValue }
++            recordLeaf(ls, [...base, segment], target.get(keyOrValue))
++          }
++          return createStateProxy(target, base, ls)
++        }
++      default:
++        return Reflect.get(target, prop, target)
++    }
++  },
++  has(target: Map<any, any>, prop: string | symbol): boolean {
++    if (typeof prop === 'symbol') return Reflect.has(target, prop)
++    recordLeaf(ls, [...base, { kind: 'mapKey', key: prop }], target.has(prop))
++    return Reflect.has(target, prop)
++  },
++})
++
++function wrapSetIterator(ls: AtomicLogicState, base: DepSegment[], target: Set<any>, mode: 'values' | 'entries'): IterableIterator<any> {
++  recordCollectionSize(ls, base, target)
++  const values = Array.from(target.values())
++  let i = 0
++  return {
++    next(): IteratorResult<any> {
++      if (i < values.length) {
++        const value = values[i]
++        const segment: DepSegment = { kind: 'setValue', value }
++        recordLeaf(ls, [...base, segment], true)
++        const trackedValue = wrapReadValue(ls, value, [...base, segment])
++        i++
++        if (mode === 'values') return { value: trackedValue, done: false }
++        return { value: [trackedValue, trackedValue], done: false }
++      }
++      return { value: undefined, done: true }
++    },
++    [Symbol.iterator]() {
++      return this
++    },
++  }
++}
++
++const setHandler = (ls: AtomicLogicState, base: DepSegment[]) => ({
++  get(target: Set<any>, prop: string | symbol, receiver: any): any {
++    if (prop === RAW) return target
++    if (typeof prop === 'symbol') {
++      if (prop === Symbol.iterator) {
++        return function () {
++          return wrapSetIterator(ls, base, target, 'values')
++        }
++      }
++      return Reflect.get(target, prop, target)
++    }
++    if (prop === 'size') {
++      recordLeaf(ls, [...base, { kind: 'prop', key: 'size' }], target.size)
++      return target.size
++    }
++    switch (prop) {
++      case 'has':
++        return (value: any) => {
++          const segment: DepSegment = { kind: 'setValue', value }
++          recordLeaf(ls, [...base, segment], target.has(value))
++          return target.has(value)
++        }
++      case 'forEach':
++        return (cb: (value: any, value2: any, set: Set<any>) => void, thisArg?: any) => {
++          recordCollectionSize(ls, base, target)
++          for (const value of target.values()) {
++            const segment: DepSegment = { kind: 'setValue', value }
++            recordLeaf(ls, [...base, segment], true)
++            cb.call(thisArg, wrapReadValue(ls, value, [...base, segment]), wrapReadValue(ls, value, [...base, segment]), createStateProxy(target, base, ls))
++          }
++        }
++      case 'keys':
++      case 'values':
++        return () => wrapSetIterator(ls, base, target, 'values')
++      case 'entries':
++        return () => wrapSetIterator(ls, base, target, 'entries')
++      case 'add':
++      case 'delete':
++      case 'clear':
++        return (value?: any) => {
++          if (typeof value !== 'undefined') {
++            recordLeaf(ls, [...base, { kind: 'setValue', value }], target.has(value))
++          }
++          return createStateProxy(target, base, ls)
++        }
++      default:
++        return Reflect.get(target, prop, target)
++    }
++  },
++  has(target: Set<any>, prop: string | symbol): boolean {
++    if (typeof prop === 'symbol') return Reflect.has(target, prop)
++    recordLeaf(ls, [...base, { kind: 'setValue', value: prop }], target.has(prop))
++    return Reflect.has(target, prop)
++  },
++})
++
++function createDerivedProxy(raw: any, name: string, ls: AtomicLogicState): any {
++  return createDerivedLeafProxy(raw, name, [], ls)
++}
++
++function createDerivedLeafProxy(raw: any, name: string, baseSegments: DepSegment[], ls: AtomicLogicState): any {
++  raw = unwrapProxy(raw)
++  if (!isTrackableObject(raw)) return raw
++  if (Array.isArray(raw)) {
++    return new Proxy(raw, {
++      get(target: any, prop: string | symbol, receiver: any): any {
++        if (prop === RAW) return target
++        if (typeof prop === 'symbol') {
++          if (prop === Symbol.iterator) {
++            recordSelector(ls, name, target)
++          }
++          return Reflect.get(target, prop, target)
++        }
++        const idx = isArrayIndex(String(prop))
++        if (idx !== null) {
++          const segments = [...baseSegments, segIndex(idx)]
++          recordSelectorLeaf(ls, name, segments, target[idx])
++          return createDerivedLeafProxy(target[idx], name, segments, ls)
++        }
++        const segment: DepSegment = { kind: 'prop', key: prop as string }
++        const segments = [...baseSegments, segment]
++        if (typeof target[prop] === 'function') {
++          recordSelector(ls, name, target)
++          return Reflect.get(target, prop, target)
++        }
++        recordSelectorLeaf(ls, name, segments, target[prop])
++        return createDerivedLeafProxy(target[prop], name, segments, ls)
++      },
++      has(target: any, prop: string | symbol): boolean {
++        recordSelector(ls, name, target)
++        return Reflect.has(target, prop)
++      },
++      ownKeys(target: any): ArrayLike<string | symbol> {
++        recordSelector(ls, name, target)
++        return Reflect.ownKeys(target)
++      },
++      getOwnPropertyDescriptor(target: any, prop: string | symbol): PropertyDescriptor | undefined {
++        recordSelector(ls, name, target)
++        return Reflect.getOwnPropertyDescriptor(target, prop)
++      },
++    })
++  }
++  return new Proxy(raw, {
++    get(target: any, prop: string | symbol, receiver: any): any {
++      if (prop === RAW) return target
++      if (typeof prop === 'symbol') {
++        recordSelector(ls, name, target)
++        return Reflect.get(target, prop, target)
++      }
++      const segment: DepSegment = { kind: 'prop', key: prop as string }
++      const segments = [...baseSegments, segment]
++      if (typeof target[prop] === 'function') {
++        recordSelector(ls, name, target)
++        return Reflect.get(target, prop, target)
++      }
++      recordSelectorLeaf(ls, name, segments, target[prop])
++      return createDerivedLeafProxy(target[prop], name, segments, ls)
++    },
++    has(target: any, prop: string | symbol): boolean {
++      recordSelector(ls, name, target)
++      return Reflect.has(target, prop)
++    },
++    ownKeys(target: any): ArrayLike<string | symbol> {
++      recordSelector(ls, name, target)
++      return Reflect.ownKeys(target)
++    },
++    getOwnPropertyDescriptor(target: any, prop: string | symbol): PropertyDescriptor | undefined {
++      recordSelector(ls, name, target)
++      return Reflect.getOwnPropertyDescriptor(target, prop)
++    },
++  })
++}
++
++function createForeignProxy(raw: any, name: string, ls: AtomicLogicState): any {
++  return createDerivedLeafProxy(raw, name, [], ls)
++}
++
++function createPropsProxy(raw: any, segments: DepSegment[], ls: AtomicLogicState): any {
++  if (!isTrackableObject(raw)) return raw
++  return new Proxy(raw, {
++    get(target: any, prop: string | symbol, receiver: any): any {
++      if (prop === RAW) return target
++      if (typeof prop === 'symbol') return Reflect.get(target, prop, target)
++      const next: DepSegment[] = [...segments, { kind: 'prop', key: prop }]
++      const value = Reflect.get(target, prop, target)
++      recordProps(ls, next, value)
++      return createPropsProxy(value, next, ls)
++    },
++    has(target: any, prop: string | symbol): boolean {
++      if (typeof prop === 'symbol') return Reflect.has(target, prop)
++      recordProps(ls, [...segments, { kind: 'prop', key: prop }], Reflect.get(target, prop))
++      return Reflect.has(target, prop)
++    },
++    ownKeys(target: any): ArrayLike<string | symbol> {
++      const keys = Reflect.ownKeys(target)
++      for (const key of keys) {
++        if (typeof key === 'string') recordProps(ls, [...segments, { kind: 'prop', key }], Reflect.get(target, key))
++      }
++      return keys
++    },
++    getOwnPropertyDescriptor(target: any, prop: string | symbol): PropertyDescriptor | undefined {
++      if (typeof prop === 'string') recordProps(ls, [...segments, { kind: 'prop', key: prop }], Reflect.get(target, prop))
++      return Reflect.getOwnPropertyDescriptor(target, prop)
++    },
++  })
++}
++
++// ---------------------------------------------------------------------------
++// Engine state
++// ---------------------------------------------------------------------------
++
++export function isAtomicSelectorsEnabled(): boolean {
++  return !!getContext().options.atomicSelectors
++}
++
++function ensureAtomicLogicState(logic: BuiltLogic): AtomicLogicState {
++  const ctx = getContext()
++  let ls = ctx.atomic.logics.get(logic) as AtomicLogicState | undefined
++  if (!ls) {
++    ls = {
++      logic,
++      metas: {},
++      lastState: undefined,
++      lastProps: undefined,
++      mounted: false,
++      proxyCache: new WeakMap(),
++      recomputeSession: null,
++    }
++    ctx.atomic.logics.set(logic, ls)
++  }
++  return ls
++}
++
++function getAtomicLogicState(logic: BuiltLogic): AtomicLogicState | undefined {
++  return getContext().atomic.logics.get(logic) as AtomicLogicState | undefined
++}
++
++function registerAtomicSelector(
++  ls: AtomicLogicState,
++  name: string,
++  input: Partial<AtomicSelectorMeta>,
++): AtomicSelectorMeta {
++  const meta: AtomicSelectorMeta = {
++    name,
++    rootDerived: false,
++    value: undefined,
++    proxy: undefined,
++    dependencies: [],
++    dependents: [],
++    evaluations: 0,
++    dirtyCause: null,
++    dirty: false,
++    hasEvaluated: false,
++    ...input,
++  }
++  ls.metas[name] = meta
++  return meta
++}
++
++function makeAtomicSelectorFn(ls: AtomicLogicState, name: string, rootDerived: boolean, getter: Selector): AtomicSelectorFn {
++  const fn = ((state: any = getStoreState(), props: any = ls.logic.props) => getter(state, props)) as AtomicSelectorFn
++  fn._keaAtomicMeta = { logic: ls.logic, name, rootDerived }
++  return fn
++}
++
++// ---------------------------------------------------------------------------
++// Evaluation
++// ---------------------------------------------------------------------------
++
++function evaluateAtomicSelector(ls: AtomicLogicState, name: string, state: any, props: any): any {
++  if (state === undefined) state = getStoreState()
++  if (props === undefined) props = ls.logic.props
++  invalidateLogic(ls, state, props)
++  const meta = ls.metas[name]
++  if (!meta) {
++    throw new Error(`[KEA] Atomic selector "${name}" not found in logic "${ls.logic.pathString}"`)
++  }
++  const hasDirty = Object.values(ls.metas).some((m) => m.dirty)
++  if (meta.hasEvaluated && !meta.dirty && !hasDirty) {
++    return meta.proxy
++  }
++  recompute(ls, state, props)
++  return ls.metas[name].proxy
++}
++
++function invalidateLogic(ls: AtomicLogicState, state: any, props: any): void {
++  const stateSame = state === ls.lastState
++  const propsSame = props === ls.lastProps
++  if (stateSame && propsSame) {
++    // Props may be mutated in place, so always re-check props dependencies.
++    for (const meta of Object.values(ls.metas)) {
++      if (!meta.hasEvaluated || meta.dirty) continue
++      for (const dep of meta.dependencies) {
++        if (dep.type !== 'props') continue
++        const current = readDependencyValue(dep, ls, state, props)
++        if (!Object.is(dep.value, current)) {
++          meta.dirty = true
++          if (meta.dirtyCause === null) meta.dirtyCause = dep.id
++          break
++        }
++      }
++    }
++    return
++  }
++  ls.lastState = state
++  ls.lastProps = props
++  for (const meta of Object.values(ls.metas)) {
++    if (!meta.hasEvaluated) continue
++    for (const dep of meta.dependencies) {
++      const current = readDependencyValue(dep, ls, state, props)
++      if (!dependencyEqual(dep, current, ls)) {
++        meta.dirty = true
++        if (meta.dirtyCause === null) {
++          meta.dirtyCause = dep.id
++        }
++        break
++      }
++    }
++  }
++}
++
++function createSession(ls: AtomicLogicState, state: any, props: any): RecomputeSession {
++  for (const meta of Object.values(ls.metas)) {
++    if (!meta.hasEvaluated) meta.dirty = true
++  }
++  const session: RecomputeSession = { processed: new Set(), visiting: new Set(), state, props }
++  ls.recomputeSession = session
++  return session
++}
++
++function recompute(ls: AtomicLogicState, state: any, props: any): void {
++  const previous = ls.recomputeSession
++  const nested = previous !== null && previous.state === state
++  const session = nested ? previous : createSession(ls, state, props)
++
++  try {
++    const order = buildTopologicalOrder(ls)
++    for (const name of order) {
++      evaluateDirty(ls, name, session)
++    }
++
++    if (!nested) {
++      for (const meta of Object.values(ls.metas)) {
++        if (meta.dirty) {
++          throw new Error('[KEA] Circular dependency detected')
++        }
++      }
++    }
++  } finally {
++    if (!nested) {
++      ls.recomputeSession = previous
++    }
++  }
++}
++
++function evaluateDirty(ls: AtomicLogicState, name: string, session: RecomputeSession): void {
++  const meta = ls.metas[name]
++  if (!meta) return
++  if (!meta.dirty || session.processed.has(name)) return
++  if (session.visiting.has(name)) {
++    throw new Error('[KEA] Circular dependency detected')
++  }
++  session.visiting.add(name)
++  try {
++    // evaluate local selector dependencies first
++    for (const dep of meta.dependencies) {
++      if (dep.type === 'selector' && !dep.foreignFn && dep.selectorName && ls.metas[dep.selectorName]?.dirty) {
++        evaluateDirty(ls, dep.selectorName, session)
++      }
++    }
++    if (session.processed.has(name)) return
++    if (!meta.dirty) return
++    evaluateOne(ls, name, session.state, session.props)
++    session.processed.add(name)
++  } finally {
++    session.visiting.delete(name)
++  }
++}
++
++function getLocalAtomicValue(ls: AtomicLogicState, name: string, state: any, props: any): any {
++  const meta = ls.metas[name]
++  if (meta.hasEvaluated && !meta.dirty) return meta.proxy
++  const existing = ls.recomputeSession
++  const useExisting = existing !== null && existing.state === state
++  const session = useExisting ? existing : createSession(ls, state, props)
++  try {
++    evaluateDirty(ls, name, session)
++  } finally {
++    if (!useExisting) {
++      ls.recomputeSession = existing
++    }
++  }
++  return ls.metas[name].proxy
++}
++
++function evaluateOne(ls: AtomicLogicState, name: string, state: any, props: any): void {
++  const meta = ls.metas[name]
++  const oldValue = meta.value
++  const hadEvaluated = meta.hasEvaluated
++
++  const tracker = new Tracker(ls)
++  const previousTracker = activeTracker
++  activeTracker = tracker
++  let rawResult: any
++  try {
++    if (meta.rootDerived) {
++      const rootRaw = getLogicRootRaw(ls.logic, state)
++      const key = meta.reducerKey || name
++      const raw = rootRaw == null ? undefined : rootRaw[key]
++      tracker.addLeaf([{ kind: 'prop', key }], raw)
++      rawResult = raw
++    } else {
++      rawResult = evaluateCompute(ls, meta, state, props, tracker)
++    }
++  } finally {
++    activeTracker = previousTracker
++  }
++
++  const newRaw = unwrapProxy(rawResult)
++  const resultUnchanged = hadEvaluated && sameValue(oldValue, newRaw, meta.memoizeOptions)
++  meta.value = resultUnchanged ? oldValue : newRaw
++  meta.proxy = meta.rootDerived
++    ? createStateProxy(meta.value, meta.reducerKey ? [{ kind: 'prop', key: meta.reducerKey }] : [], ls)
++    : createDerivedProxy(meta.value, name, ls)
++  meta.dependencies = pruneDependencies(Array.from(tracker.deps.values()))
++  meta.evaluations += 1
++  meta.hasEvaluated = true
++  meta.dirty = false
++
++  rebuildDependents(ls)
++
++  if (resultUnchanged) {
++    return
++  }
++
++  for (const depName of meta.dependents) {
++    const depMeta = ls.metas[depName]
++    if (!depMeta || depMeta.dirty) continue
++    let changed = false
++    for (const d of depMeta.dependencies) {
++      if (d.type !== 'selector' || d.selectorName !== name) continue
++      if (d.segments && d.segments.length > 0) {
++        if (!Object.is(readValueBySegments(oldValue, d.segments), readValueBySegments(newRaw, d.segments))) {
++          changed = true
++          break
++        }
++      } else if (!hadEvaluated || !sameValue(oldValue, newRaw, meta.memoizeOptions)) {
++        changed = true
++        break
++      }
++    }
++    if (changed) {
++      depMeta.dirty = true
++      depMeta.dirtyCause = `selector:${name}`
++    }
++  }
++}
++
++function evaluateCompute(
++  ls: AtomicLogicState,
++  meta: AtomicSelectorMeta,
++  state: any,
++  props: any,
++  tracker: Tracker,
++): any {
++  const inputFns = meta.inputFns || []
++  const inputValues: any[] = []
++  const inputBases: (AtomicDependency | null)[] = []
++
++  for (const fn of inputFns) {
++    const input = getInputValue(ls, fn, state, props)
++    inputValues.push(input.value)
++    inputBases.push(input.baseDep)
++    if (input.baseDep && !isTrackableObject(unwrapProxy(input.value))) {
++      tracker.addDep({ ...input.baseDep, explicit: true })
++    }
++  }
++
++  const result = meta.computeFn ? meta.computeFn(...inputValues) : undefined
++
++  // If the result is exactly one of the input values (identity selector),
++  // record the base dependency so the whole object is tracked.
++  for (let i = 0; i < inputValues.length; i++) {
++    if (inputBases[i]) {
++      const unwrappedInput = unwrapProxy(inputValues[i])
++      if (result === inputValues[i] || (isTrackableObject(result) && unwrapProxy(result) === unwrappedInput)) {
++        tracker.addDep({ ...(inputBases[i] as AtomicDependency), explicit: true })
++      }
++    }
++  }
++
++  // If any input proxy is embedded inside the result (e.g. `{ user }`), we
++  // still depend on the whole input value.
++  if (isTrackableObject(result)) {
++    const visited = new Set<any>()
++    let stack: any[] = [result]
++    for (let depth = 0; stack.length > 0 && depth < 6; depth++) {
++      const next: any[] = []
++      for (const item of stack) {
++        if (visited.has(item)) continue
++        visited.add(item)
++        const raw = unwrapProxy(item)
++        if (!isTrackableObject(raw)) continue
++        for (let i = 0; i < inputValues.length; i++) {
++          if (inputBases[i] && (item === inputValues[i] || raw === unwrapProxy(inputValues[i]))) {
++            tracker.addDep({ ...(inputBases[i] as AtomicDependency), explicit: true })
++          }
++        }
++        if (Array.isArray(raw)) {
++          for (const v of raw) if (isTrackableObject(v)) next.push(v)
++        } else if (raw instanceof Map) {
++          for (const v of raw.values()) if (isTrackableObject(v)) next.push(v)
++        } else if (raw instanceof Set) {
++          for (const v of raw.values()) if (isTrackableObject(v)) next.push(v)
++        } else {
++          for (const key of Object.keys(raw)) {
++            const v = raw[key]
++            if (isTrackableObject(v)) next.push(v)
++          }
++        }
++      }
++      stack = next
++    }
++  }
++
++  return result
++}
++
++function getInputValue(ls: AtomicLogicState, fn: AtomicSelectorFn, state: any, props: any): InputValue {
++  const m = fn._keaAtomicMeta
++
++  if (m && m.props) {
++    const raw = props == null ? undefined : props[m.name]
++    const segments: DepSegment[] = [{ kind: 'prop', key: m.name }]
++    const value = createPropsProxy(raw, segments, ls)
++    return { value, baseDep: { id: `props:${segmentsToId(segments)}`, type: 'props', segments, value: unwrapProxy(value) } }
++  }
++
++  if (m && m.logic === ls.logic) {
++    const value = getLocalAtomicValue(ls, m.name, state, props)
++    if (m.rootDerived) {
++      const segments: DepSegment[] = [{ kind: 'prop', key: m.name }]
++      return { value, baseDep: { id: segmentsToId(segments), type: 'leaf', segments, value: unwrapProxy(value) } }
++    }
++    return { value, baseDep: { id: `selector:${m.name}`, type: 'selector', selectorName: m.name, value: unwrapProxy(value) } }
++  }
++
++  // foreign / plain selector
++  const rawValue = unwrapProxy(fn(state, props))
++  const localName = findLocalSelectorName(ls, fn)
++  const name = localName || 'external'
++  const value = createForeignProxy(rawValue, name, ls)
++  const dep: AtomicDependency = {
++    id: `selector:${name}`,
++    type: 'selector',
++    selectorName: name,
++    foreignFn: fn,
++    value: rawValue,
++  }
++  return { value, baseDep: dep }
++}
++
++function findLocalSelectorName(ls: AtomicLogicState, fn: Selector): string | null {
++  for (const [name, sel] of Object.entries(ls.logic.selectors)) {
++    if (sel === fn) return name
++  }
++  return null
++}
++
++function rebuildDependents(ls: AtomicLogicState): void {
++  for (const meta of Object.values(ls.metas)) {
++    meta.dependents = []
++  }
++  for (const [name, meta] of Object.entries(ls.metas)) {
++    for (const dep of meta.dependencies) {
++      if (dep.type === 'selector' && dep.selectorName && dep.selectorName !== name && ls.metas[dep.selectorName]) {
++        ls.metas[dep.selectorName].dependents.push(name)
++      } else if (dep.type === 'leaf' && dep.segments && dep.segments.length > 0) {
++        const firstSeg = dep.segments[0] as any
++        const root = String(firstSeg.key !== undefined ? firstSeg.key : firstSeg.value)
++        if (root !== name && ls.metas[root]) {
++          ls.metas[root].dependents.push(name)
++        }
++      }
++    }
++  }
++}
++
++function buildTopologicalOrder(ls: AtomicLogicState): string[] {
++  const result: string[] = []
++  const visited = new Set<string>()
++  const visiting = new Set<string>()
++
++  const visit = (name: string) => {
++    if (visited.has(name)) return
++    if (visiting.has(name)) {
++      throw new Error('[KEA] Circular dependency detected')
++    }
++    visiting.add(name)
++    const meta = ls.metas[name]
++    if (meta) {
++      for (const dep of meta.dependencies) {
++        if (dep.type === 'selector' && !dep.foreignFn && dep.selectorName && ls.metas[dep.selectorName]) {
++          visit(dep.selectorName)
++        }
++      }
++    }
++    visiting.delete(name)
++    visited.add(name)
++    result.push(name)
++  }
++
++  for (const name of Object.keys(ls.metas)) {
++    visit(name)
++  }
++  return result
++}
++
++// ---------------------------------------------------------------------------
++// Builders
++// ---------------------------------------------------------------------------
++
++export function atomicSelectors<L extends Logic = Logic>(
++  input: SelectorDefinitions<L> | ((logic: L) => SelectorDefinitions<L>),
++): LogicBuilder<L> {
++  return (logic) => {
++    const selectorInputs = typeof input === 'function' ? input(logic) : input
++    const ls = ensureAtomicLogicState(logic)
++
++    // create placeholder selector functions so cross-references resolve regardless of order
++    for (const key of Object.keys(selectorInputs)) {
++      if (typeof logic.selectors[key] !== 'undefined') {
++        throw new Error(`[KEA] Logic "${logic.pathString}" selector "${key}" already exists`)
++      }
++      const placeholder = makeAtomicSelectorFn(ls, key, false, (state, props) => logic.selectors[key](state, props))
++      logic.selectors[key] = placeholder
++      defineValue(logic, key)
++    }
++
++    const propSelectors = createAtomicPropSelectors(logic, ls)
++
++    for (const entry of Object.entries(selectorInputs)) {
++      const [key, arr]: [string, SelectorDefinition<any, any, any> | undefined] = entry
++      if (!arr) {
++        throw new Error(`[KEA] Logic "${logic.pathString}" selector "${key}" is undefined`)
++      }
++      const [input, func, memoizeOptions] = arr
++      const inputFns = input(logic.selectors, propSelectors) as Selector[]
++
++      if (inputFns.filter((a) => typeof a !== 'function').length > 0) {
++        const argTypes = inputFns.map((a) => typeof a).join(', ')
++        const msg = `[KEA] Logic "${logic.pathString}", selector "${key}" has incorrect input: [${argTypes}].`
++        throw new Error(msg)
++      }
++
++      registerAtomicSelector(ls, key, {
++        rootDerived: false,
++        inputFns,
++        computeFn: func,
++        memoizeOptions,
++      })
++
++      const realFn = makeAtomicSelectorFn(ls, key, false, (state, props) => evaluateAtomicSelector(ls, key, state, props))
++      logic.selectors[key] = realFn
++      defineValue(logic, key)
++    }
++  }
++}
++
++export function addAtomicReducerSelector(logic: BuiltLogic, key: string): Selector {
++  const ls = ensureAtomicLogicState(logic)
++  if (!logic.selector) {
++    logic.selector = createAtomicRootSelector(logic)
++  }
++  registerAtomicSelector(ls, key, { rootDerived: true, reducerKey: key })
++  const fn = makeAtomicSelectorFn(ls, key, true, (state, props) => evaluateAtomicSelector(ls, key, state, props))
++  logic.selectors[key] = fn
++  defineValue(logic, key)
++  return fn
++}
++
++export function createAtomicRootSelector(logic: BuiltLogic): Selector {
++  const ls = ensureAtomicLogicState(logic)
++  const fn = ((state: any = getStoreState(), props: any = logic.props) =>
++    createStateProxy(getLogicRootRaw(logic, state), [], ls)) as AtomicSelectorFn
++  fn._keaAtomicMeta = { logic, name: '*', rootDerived: true }
++  return fn
++}
++
++function createAtomicPropSelectors<L extends Logic = Logic>(logic: BuiltLogic, ls: AtomicLogicState): LogicPropSelectors<L> {
++  const makePropSelector = (key: string): Selector => {
++    const fn = ((state: any, props: any = logic.props) => {
++      const segments: DepSegment[] = [{ kind: 'prop', key }]
++      const raw = props == null ? undefined : props[key]
++      return createPropsProxy(raw, segments, ls)
++    }) as AtomicSelectorFn
++    fn._keaAtomicMeta = { logic, name: key, rootDerived: false, props: true }
++    return fn
++  }
++
++  if (typeof Proxy !== 'undefined') {
++    return new Proxy(logic.props, {
++      get(target, prop) {
++        if (!(prop in target)) {
++          throw new Error(
++            `[KEA] Prop "${String(prop)}" not found for logic "${logic.pathString}". Attempted to use in a selector. Please specify a default via props({ ${String(
++              prop,
++            )}: '' }) to resolve.`,
++          )
++        }
++        return makePropSelector(String(prop))
++      },
++    }) as LogicPropSelectors<L>
++  }
++
++  return Object.fromEntries(
++    Object.keys(logic.props).map((key) => [key, makePropSelector(key)]),
++  ) as LogicPropSelectors<L>
++}
++
++// ---------------------------------------------------------------------------
++// Health API
++// ---------------------------------------------------------------------------
++
++function getHealth(logic: BuiltLogic): SelectorHealth {
++  const ls = getAtomicLogicState(logic)
++  if (!ls) {
++    return { selectors: {}, topologicalOrder: [] }
++  }
++  const selectors: Record<string, any> = {}
++  for (const [name, meta] of Object.entries(ls.metas)) {
++    selectors[name] = {
++      dependencies: meta.dependencies.map((d) =>
++        d.type === 'selector' && d.segments && d.segments.length > 0
++          ? d.id
++          : d.type === 'selector'
++          ? d.selectorName || 'external'
++          : d.id,
++      ),
++      dependents: [...meta.dependents],
++      evaluations: meta.evaluations,
++      dirtyCause: meta.dirtyCause,
++    }
++  }
++  return { selectors, topologicalOrder: buildTopologicalOrder(ls) }
++}
++
++// ---------------------------------------------------------------------------
++// Build-time cycle detection
++// ---------------------------------------------------------------------------
++
++function detectCycles(ls: AtomicLogicState): void {
++  const visited = new Set<string>()
++  const visiting = new Set<string>()
++
++  const visit = (name: string) => {
++    if (visited.has(name)) return
++    if (visiting.has(name)) {
++      throw new Error('[KEA] Circular dependency detected')
++    }
++    visiting.add(name)
++    const meta = ls.metas[name]
++    if (meta && meta.inputFns) {
++      for (const fn of meta.inputFns) {
++        const m = (fn as AtomicSelectorFn)._keaAtomicMeta
++        if (m && m.logic === ls.logic && m.name && !m.props) {
++          visit(m.name)
++        }
++      }
++    }
++    visiting.delete(name)
++    visited.add(name)
++  }
++
++  for (const name of Object.keys(ls.metas)) {
++    visit(name)
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Subscription
++// ---------------------------------------------------------------------------
++
++function ensureSubscription(): void {
++  const ctx = getContext()
++  if (ctx.atomic.subscribed) return
++  const store = (ctx as any).__store
++  if (!store) return
++  ctx.atomic.subscribed = true
++  ctx.atomic.unsubscribe = store.subscribe(() => {
++    invalidateAllMountedLogics()
++  })
++}
++
++function invalidateAllMountedLogics(): void {
++  const ctx = getContext()
++  const store = (ctx as any).__store
++  if (!store) return
++  const state = store.getState()
++  for (const ls of ctx.atomic.logics.values()) {
++    if (ls.mounted) {
++      invalidateLogic(ls, state, ls.logic.props)
++      recompute(ls, state, ls.logic.props)
++    }
++  }
++}
++
++function finalizeAtomicLogic(logic: BuiltLogic): void {
++  const ls = getAtomicLogicState(logic)
++  logic.selectorHealth = () => getHealth(logic)
++  if (ls) {
++    detectCycles(ls)
++  }
++  ensureSubscription()
++}
++
++// ---------------------------------------------------------------------------
++// Plugin
++// ---------------------------------------------------------------------------
++
++export const atomicSelectorsPlugin: KeaPlugin = {
++  name: 'atomicSelectors',
++
++  defaults: () => ({
++    selectorHealth: undefined,
++  }),
++
++  events: {
++    afterReduxStore(): void {
++      ensureSubscription()
++    },
++    afterBuild(logic: BuiltLogic): void {
++      if (getContext().options.atomicSelectors) {
++        finalizeAtomicLogic(logic)
++      }
++    },
++    afterMount(logic: BuiltLogic): void {
++      const ls = getAtomicLogicState(logic)
++      if (ls) ls.mounted = true
++    },
++    beforeUnmount(logic: BuiltLogic): void {
++      const ls = getAtomicLogicState(logic)
++      if (ls) ls.mounted = false
++    },
++    afterUnmount(logic: BuiltLogic): void {
++      const ls = getAtomicLogicState(logic)
++      if (ls) ls.mounted = false
++    },
++    beforeCloseContext(): void {
++      const ctx = getContext()
++      if (ctx.atomic.unsubscribe) {
++        ctx.atomic.unsubscribe()
++        ctx.atomic.unsubscribe = null
++      }
++      ctx.atomic.subscribed = false
++    },
++  },
++}
+diff --git a/src/core/reducers.ts b/src/core/reducers.ts
+index b53967c..ad024bf 100644
+--- a/src/core/reducers.ts
++++ b/src/core/reducers.ts
+@@ -18,6 +18,7 @@ import { getStoreState } from '../kea/context'
+ import { createSelector } from 'reselect'
+ import { getContextDefaults } from './defaults'
+ import { addSelectorAndValue } from './selectors'
++import { addAtomicReducerSelector, createAtomicRootSelector, isAtomicSelectorsEnabled } from './atomic-selectors'
+ 
+ export function rootReducer<L extends Logic = Logic>(): LogicBuilder<L> {
+   return (logic) => {
+@@ -29,7 +30,11 @@ export function rootReducer<L extends Logic = Logic>(): LogicBuilder<L> {
+ }
+ export function rootSelector<L extends Logic = Logic>(): LogicBuilder<L> {
+   return (logic) => {
+-    logic.selector = (state = getStoreState()) => pathSelector(logic.path, state)
++    if (isAtomicSelectorsEnabled()) {
++      logic.selector = createAtomicRootSelector(logic)
++    } else {
++      logic.selector = (state = getStoreState()) => pathSelector(logic.path, state)
++    }
+   }
+ }
+ 
+@@ -130,11 +135,15 @@ export function reducers<L extends Logic = Logic>(
+ 
+       // create selector for reducer
+       if (!logic.selectors[key]) {
+-        addSelectorAndValue(
+-          logic,
+-          key,
+-          createSelector(logic.selector!, (state) => state[key]),
+-        )
++        if (isAtomicSelectorsEnabled()) {
++          addAtomicReducerSelector(logic, key)
++        } else {
++          addSelectorAndValue(
++            logic,
++            key,
++            createSelector(logic.selector!, (state) => state[key]),
++          )
++        }
+       }
+     }
+   }
+diff --git a/src/core/selectors.ts b/src/core/selectors.ts
+index 41c5b1c..bc681ff 100644
+--- a/src/core/selectors.ts
++++ b/src/core/selectors.ts
+@@ -1,5 +1,6 @@
+ import { Logic, LogicBuilder, LogicPropSelectors, Selector, SelectorDefinition, SelectorDefinitions } from '../types'
+ import { createSelector, createSelectorCreator, defaultMemoize, ParametricSelector } from 'reselect'
++import { atomicSelectors, isAtomicSelectorsEnabled } from './atomic-selectors'
+ import { getStoreState } from '../kea/context'
+ 
+ /**
+@@ -24,6 +25,10 @@ export function selectors<L extends Logic = Logic>(
+   input: SelectorDefinitions<L> | ((logic: L) => SelectorDefinitions<L>),
+ ): LogicBuilder<L> {
+   return (logic) => {
++    if (isAtomicSelectorsEnabled()) {
++      return atomicSelectors(input)(logic)
++    }
++
+     const selectorInputs = typeof input === 'function' ? input(logic) : input
+ 
+     // small cache so the order would not count
+diff --git a/src/kea/context.ts b/src/kea/context.ts
+index 64ae850..1d9e841 100644
+--- a/src/kea/context.ts
++++ b/src/kea/context.ts
+@@ -3,6 +3,7 @@ import { createStore } from './store'
+ import { Context, ContextOptions } from '../types'
+ import type { Store } from 'redux'
+ import { corePlugin } from '../core'
++import { atomicSelectorsPlugin } from '../core/atomic-selectors'
+ 
+ let context: Context
+ 
+@@ -56,6 +57,12 @@ export function openContext(options: ContextOptions = {}, initial = false): Cont
+       combined: undefined,
+     },
+ 
++    atomic: {
++      logics: new Map(),
++      subscribed: false,
++      unsubscribe: null,
++    },
++
+     store: undefined as unknown as Store, // will be redefined below
+     __store: undefined,
+ 
+@@ -66,6 +73,7 @@ export function openContext(options: ContextOptions = {}, initial = false): Cont
+       attachStrategy: 'dispatch',
+       detachStrategy: 'dispatch',
+       defaultPath: ['kea', 'logic'],
++      atomicSelectors: false,
+       ...otherOptions,
+     },
+   } as Context
+@@ -88,6 +96,10 @@ export function openContext(options: ContextOptions = {}, initial = false): Cont
+ 
+   activatePlugin(corePlugin)
+ 
++  if (newContext.options.atomicSelectors) {
++    activatePlugin(atomicSelectorsPlugin)
++  }
++
+   runPlugins('afterOpenContext', newContext, options)
+ 
+   if (plugins) {
+diff --git a/src/types.ts b/src/types.ts
+index fd16a4f..84e6892 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -11,6 +11,20 @@ export type Props = Record<string, any> // nb! used in kea and react
+ export type PartialRecord<K extends keyof any, T> = Partial<Record<K, T>>
+ 
+ // logic base class
++
++// atomic selector health
++export interface SelectorHealthInfo {
++  dependencies: string[]
++  dependents: string[]
++  evaluations: number
++  dirtyCause: string | null
++}
++
++export interface SelectorHealth {
++  selectors: Record<string, SelectorHealthInfo>
++  topologicalOrder: string[]
++}
++
+ export interface Logic {
+   // logic
+   path: PathType
+@@ -43,6 +57,9 @@ export interface Logic {
+     propsChanged?: (props: any, oldProps: any) => void
+   }
+ 
++  // atomic selector health (only when atomicSelectors enabled)
++  selectorHealth?: () => SelectorHealth
++
+   // listeners
+   listeners?: Record<string, ListenerFunctionWrapper[]>
+   sharedListeners?: Record<string, ListenerFunction>
+@@ -538,6 +555,7 @@ export interface InternalContextOptions {
+   detachStrategy: 'dispatch' | 'replace' | 'persist'
+   defaultPath: string[]
+   disableAsyncActions: boolean
++  atomicSelectors: boolean
+   // ...otherOptions
+ }
+ 
+@@ -654,6 +672,12 @@ export interface Context {
+     combined: ReducerFunction | undefined
+   }
+ 
++  atomic: {
++    logics: Map<BuiltLogic, any>
++    subscribed: boolean
++    unsubscribe: (() => void) | null
++  }
++
+   // getter that always returns something
+   store: Store
+   // the created store if present

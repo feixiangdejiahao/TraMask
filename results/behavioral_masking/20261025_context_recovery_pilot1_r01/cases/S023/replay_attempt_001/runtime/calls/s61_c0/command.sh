@@ -1,0 +1,1 @@
+cd /app && timeout 20 python -m pytest tests/test_baseconverter.py tests/test_converter.py tests/test_structure_attrs.py tests/test_typeddicts.py --collect-only -q -o addopts="" 2>&1 | tail -5

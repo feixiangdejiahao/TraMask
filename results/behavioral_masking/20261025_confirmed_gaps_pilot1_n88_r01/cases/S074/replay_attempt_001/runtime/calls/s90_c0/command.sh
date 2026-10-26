@@ -1,0 +1,1 @@
+cd /app && git diff --stat && git diff objects.go | head -250

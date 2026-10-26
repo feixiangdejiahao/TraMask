@@ -1,0 +1,1 @@
+cd /app && npx mocha tests/ci/reporter_tests.js 2>&1 | tail -40

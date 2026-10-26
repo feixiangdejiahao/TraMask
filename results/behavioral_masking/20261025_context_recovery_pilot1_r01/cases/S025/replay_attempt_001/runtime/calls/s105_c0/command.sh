@@ -1,0 +1,1 @@
+cd /app && pnpm types 2>&1 | grep -v 'npm warn' | tail -3 && pnpm test 2>&1 | grep -E "Test Files|Tests |failed|FAIL" | tail -20

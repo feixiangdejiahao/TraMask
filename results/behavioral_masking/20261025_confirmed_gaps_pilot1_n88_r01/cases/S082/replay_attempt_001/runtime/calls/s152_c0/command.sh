@@ -1,0 +1,1 @@
+cd /app && git diff lib/reporters/ lib/utils/displayutils.js

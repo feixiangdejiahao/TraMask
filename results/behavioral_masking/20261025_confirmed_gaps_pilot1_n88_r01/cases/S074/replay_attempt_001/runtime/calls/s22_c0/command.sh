@@ -1,0 +1,1 @@
+cd /app && grep -rn "export" --include="*.tengo" --include="*.go" . | grep -v "_test.go\|compiler.go" | head -50

@@ -1,0 +1,1 @@
+cd /app && cat src/kea/reducer.ts && echo '=== hooks ===' && cat src/react/hooks.ts && echo '=== wrap ===' && cat src/react/wrap.ts

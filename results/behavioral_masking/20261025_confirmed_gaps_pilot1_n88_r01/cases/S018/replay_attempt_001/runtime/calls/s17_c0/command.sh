@@ -1,0 +1,1 @@
+grep -m1 '__version__' /root/.local/share/uv/tools/mini-swe-agent/lib/python3.12/site-packages/dateutil/__init__.py; grep -n "to_ical\|from_str\|VCALENDAR\|VTIMEZONE\|def __str__\|def __repr__\|def __eq__\|def __hash__\|tzids\|_tzid" /root/.local/share/uv/tools/mini-swe-agent/lib/python3.12/site-packages/dateutil/rrule.py | head -60

@@ -1,0 +1,1 @@
+cd /app && go test -count=1 ./vm -run '^TestDefaultArguments$' -v

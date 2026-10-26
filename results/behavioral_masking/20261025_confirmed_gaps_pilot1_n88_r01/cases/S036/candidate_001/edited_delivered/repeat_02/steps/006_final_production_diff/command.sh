@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary 56b1fffecd743df1e7490235e69b51c44701f34c -- mux.go mux_defs.go snmp.go

@@ -1,0 +1,1 @@
+cd /app && sed -n '1,260p' lib/runners/browser_test_runner.js

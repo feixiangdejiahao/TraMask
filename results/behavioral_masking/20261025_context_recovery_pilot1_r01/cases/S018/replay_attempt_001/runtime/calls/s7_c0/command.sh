@@ -1,0 +1,1 @@
+cd /app && grep -rn 'nosec' bandit/core/*.py bandit/cli/*.py | head -100

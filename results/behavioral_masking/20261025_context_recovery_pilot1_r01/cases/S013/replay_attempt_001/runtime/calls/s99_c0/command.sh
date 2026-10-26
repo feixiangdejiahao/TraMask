@@ -1,0 +1,1 @@
+cd /app && git diff src/resolvers.ts src/errors.ts src/awilix.ts

@@ -1,0 +1,1 @@
+cd /app/cmd/makedocs && go run main.go >/dev/null 2>&1 && cd /app && git diff --stat docs/overview.md && git status --porcelain docs/overview.md

@@ -1,0 +1,1 @@
+cd /app && python3 -m pytest -q 2>&1 | tail -5 && python3 -m sqlite_utils --help 2>&1 | grep -A1 "safe-import\|import-invariant" | head -30

@@ -1,0 +1,1 @@
+cd /app && python -m bandit -f json /tmp/bandit_repro/test_nosec_directives.py 2>&1 | grep -E 'WARNING|metrics|line_number|test_id' | head -60

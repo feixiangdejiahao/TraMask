@@ -1,0 +1,1 @@
+timeout 15 curl -sL https://api.github.com/repos/testem/testem/commits?per_page=5 2>&1 | head -20; echo "EXIT: $?"

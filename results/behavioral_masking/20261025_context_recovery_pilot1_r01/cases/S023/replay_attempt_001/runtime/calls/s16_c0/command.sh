@@ -1,0 +1,1 @@
+sed -n '328,560p' src/cattrs/gen/__init__.py

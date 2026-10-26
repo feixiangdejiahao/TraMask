@@ -1,0 +1,1 @@
+cd /app && sed -n '1,20p' tests/utils/reporter_tests.js

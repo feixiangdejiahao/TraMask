@@ -1,0 +1,1 @@
+cd /app && sed -n '1,20p' tests/runners/process_test_runner_tests.js && echo '---' && sed -n '1,20p' tests/runners/tap_process_test_runner_tests.js

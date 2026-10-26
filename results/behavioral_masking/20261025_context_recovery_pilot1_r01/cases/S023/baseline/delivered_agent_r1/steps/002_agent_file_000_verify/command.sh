@@ -1,0 +1,6 @@
+python3 -I -c '
+import hashlib,json,sys
+data=open(sys.argv[1],'"'"'rb'"'"').read();actual=hashlib.sha256(data).hexdigest()
+print(json.dumps({'"'"'path'"'"':sys.argv[1],'"'"'bytes'"'"':len(data),'"'"'sha256'"'"':actual}))
+if actual!=sys.argv[2]:raise RuntimeError('"'"'docker_copy_bytes_changed'"'"')
+' /app/tests/test_partial.py 6db5e8b8f50ed7f0fcf3d80e0fb1941ed439ff982af72aeb3a6f2f03a31cbe68

@@ -1,0 +1,128 @@
+cd /app && python - <<'EOF'
+path = 'tests/test_rrule.py'
+with open(path) as f:
+    src = f.read()
+
+# Tests to insert before the RRuleSetTest class
+rrule_tests = r'''
+
+@pytest.mark.rrule
+class RRuleTZInteropTest(unittest.TestCase):
+    def testToStrTzinfo(self):
+        NYC = tz.gettz('America/New_York')
+        rule = rrule(YEARLY, count=3,
+                     dtstart=datetime(1997, 9, 2, 9, 0, tzinfo=NYC))
+        self._rrulestr_reverse_test(rule)
+        self.assertIn('TZID=', str(rule))
+
+    def testToStrTzinfoUTC(self):
+        rule = rrule(YEARLY, count=3,
+                     dtstart=datetime(1997, 9, 2, 9, 0, tzinfo=tz.UTC))
+        self._rrulestr_reverse_test(rule)
+        self.assertIn('DTSTART:19970902T090000Z', str(rule))
+
+    def testRRuleEquality(self):
+        rule1 = rrule(YEARLY, count=3,
+                      dtstart=datetime(1997, 9, 2, 9, 0),
+                      byweekday=(MO, TU))
+        rule2 = rrule(YEARLY, count=3,
+                      dtstart=datetime(1997, 9, 2, 9, 0),
+                      byweekday=(TU, MO))
+        self.assertEqual(rule1, rule2)
+        self.assertNotEqual(rule1, rrule(MONTHLY, count=3,
+                                         dtstart=datetime(1997, 9, 2, 9, 0),
+                                         byweekday=(MO, TU)))
+
+    def testRRuleHash(self):
+        rule1 = rrule(YEARLY, count=3,
+                      dtstart=datetime(1997, 9, 2, 9, 0))
+        rule2 = rrule(YEARLY, count=3,
+                      dtstart=datetime(1997, 9, 2, 9, 0))
+        self.assertEqual(hash(rule1), hash(rule2))
+
+    def testRRuleRepr(self):
+        rule = rrule(YEARLY, count=3,
+                     dtstart=datetime(1997, 9, 2, 9, 0),
+                     byweekday=(MO, TU))
+        self.assertEqual(eval(repr(rule)), rule)
+
+    def testRRuleProperties(self):
+        rule = rrule(YEARLY, interval=2, count=3,
+                     dtstart=datetime(1997, 9, 2, 9, 0))
+        self.assertEqual(rule.dtstart, datetime(1997, 9, 2, 9, 0))
+        self.assertEqual(rule.freq, YEARLY)
+        self.assertEqual(rule.interval, 2)
+        self.assertIsNone(rule.until)
+
+    def testRRuleCount(self):
+        rule = rrule(YEARLY, count=5,
+                     dtstart=datetime(1997, 9, 2, 9, 0))
+        self.assertEqual(rule.count(), 5)
+
+    def testToIcal(self):
+        NYC = tz.gettz('America/New_York')
+        rule = rrule(YEARLY, count=3,
+                     dtstart=datetime(1997, 9, 2, 9, 0, tzinfo=NYC))
+        ical = rule.to_ical()
+        self.assertTrue(ical.startswith('BEGIN:VCALENDAR'))
+        self.assertIn('BEGIN:VEVENT', ical)
+        self.assertIn('END:VEVENT', ical)
+        self.assertIn('END:VCALENDAR', ical)
+        self.assertIn('BEGIN:VTIMEZONE', ical)
+        self.assertEqual(list(rrulestr(ical)), list(rule))
+
+    def testStrRDateTZID(self):
+        rr = rrulestr("DTSTART:19970902T090000\n"
+                      "RRULE:FREQ=YEARLY;COUNT=1\n"
+                      "RDATE;TZID=America/New_York:19980101T090000")
+        self.assertIsNotNone(rr.rdates[0].tzinfo)
+
+    def testStrRDateValueDate(self):
+        rr = rrulestr("DTSTART:19970902\n"
+                      "RRULE:FREQ=YEARLY;COUNT=1\n"
+                      "RDATE;VALUE=DATE:19980902")
+        self.assertEqual(rr.rdates[0], datetime(1998, 9, 2))
+
+    def testStrVCalendar(self):
+        s = ("BEGIN:VCALENDAR\n"
+             "VERSION:2.0\n"
+             "BEGIN:VEVENT\n"
+             "DTSTART:19970902T090000\n"
+             "RRULE:FREQ=YEARLY;COUNT=3\n"
+             "END:VEVENT\n"
+             "END:VCALENDAR\n")
+        self.assertEqual(list(rrulestr(s)),
+                         [datetime(1997, 9, 2, 9, 0),
+                          datetime(1998, 9, 2, 9, 0),
+                          datetime(1999, 9, 2, 9, 0)])
+
+    def testStrVCalendarTZID(self):
+        s = ("BEGIN:VCALENDAR\n"
+             "BEGIN:VTIMEZONE\n"
+             "TZID:America/New_York\n"
+             "BEGIN:STANDARD\n"
+             "DTSTART:19701101T020000\n"
+             "TZOFFSETFROM:-0400\n"
+             "TZOFFSETTO:-0500\n"
+             "TZNAME:EST\n"
+             "END:STANDARD\n"
+             "END:VTIMEZONE\n"
+             "BEGIN:VEVENT\n"
+             "DTSTART;TZID=America/New_York:19970902T090000\n"
+             "RRULE:FREQ=YEARLY;COUNT=3\n"
+             "END:VEVENT\n"
+             "END:VCALENDAR\n")
+        rr = rrulestr(s)
+        self.assertIsNotNone(rr.dtstart.tzinfo)
+
+'''
+
+anchor = "\n\n@pytest.mark.rruleset\nclass RRuleSetTest(unittest.TestCase):"
+assert anchor in src
+src = src.replace(anchor, rrule_tests + "\n" + anchor, 1)
+
+with open(path, 'w') as f:
+    f.write(src)
+print("rrule tests added")
+EOF
+cd /app && python -m pytest tests/test_rrule.py -q 2>&1 | tail -5

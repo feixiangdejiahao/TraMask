@@ -1,0 +1,1 @@
+cd /app && git checkout -b feat/required-if && echo "branch created" && cat src/schema/actions/parse/anyOf.ts && echo "===PRIMITIVE BUILDER HEAD===" && sed -n '1,110p' src/schema/number/schema_.ts

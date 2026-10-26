@@ -1,0 +1,1 @@
+cd /app && git status && git branch -a && ls libs && ls libs/core

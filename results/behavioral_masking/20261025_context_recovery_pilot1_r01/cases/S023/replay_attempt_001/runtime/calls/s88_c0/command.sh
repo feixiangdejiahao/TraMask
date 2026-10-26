@@ -1,0 +1,13 @@
+cd /app && python - <<'EOF'
+from attrs import define
+from cattrs import Converter
+@define
+class Inner:
+    x: int
+@define
+class Outer:
+    inner: Inner
+c = Converter()
+r = c.partial_structure({"inner": 5}, Outer)
+print(r.value, r.structured_fields, r.failed_fields, r.error_map)
+EOF

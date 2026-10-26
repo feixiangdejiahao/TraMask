@@ -1,0 +1,1 @@
+cd /app && timeout 28 npx eslint . 2>&1 | tail -20; echo "EXIT: ${PIPESTATUS[0]}"

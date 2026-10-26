@@ -1,0 +1,1 @@
+python -m pytest /tmp/pilot1_agent_test.py -q -k test_cli_enable_disable_safe_import

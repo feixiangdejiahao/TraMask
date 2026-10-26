@@ -1,0 +1,1 @@
+cd /app && pnpm --filter @clack/core run build >/dev/null 2>&1 && pnpm --filter @clack/prompts run build >/dev/null 2>&1 && cd packages/core && npx vitest run 2>&1 | tail -5 && echo "=====PROMPTS=====" && cd /app/packages/prompts && npx vitest run test/autocomplete.test.ts test/async-autocomplete.test.ts 2>&1 | tail -5 && cd /app && git status --short

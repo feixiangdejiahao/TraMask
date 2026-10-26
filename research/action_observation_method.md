@@ -1,1 +1,0 @@
-../experiments/test_semantic_transfer/research/action_observation_method.md

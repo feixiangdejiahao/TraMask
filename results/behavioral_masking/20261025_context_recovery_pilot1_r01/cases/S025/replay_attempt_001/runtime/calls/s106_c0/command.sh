@@ -1,0 +1,1 @@
+cd /app && git diff --stat && echo "=====" && git diff packages/core/src/prompts/prompt.ts

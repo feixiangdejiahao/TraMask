@@ -1,0 +1,1 @@
+cd /app && cat bandit/core/node_visitor.py && echo '=====METRICS=====' && cat bandit/core/metrics.py

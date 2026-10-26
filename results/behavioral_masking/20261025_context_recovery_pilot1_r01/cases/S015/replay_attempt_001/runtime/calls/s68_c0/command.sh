@@ -1,0 +1,1 @@
+cd /app && sed -n '202,206p' tests/functional/test_incremental.py

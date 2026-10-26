@@ -1,0 +1,1 @@
+cd /app && sed -n '1,200p' objects.go && echo '--- Function section ---' && sed -n '560,700p' objects.go

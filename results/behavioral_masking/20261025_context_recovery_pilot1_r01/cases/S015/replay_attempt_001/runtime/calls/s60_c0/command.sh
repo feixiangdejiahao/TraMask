@@ -1,0 +1,1 @@
+cd /app && sed -i 's/self.assertEqual(3, len(mgr2.results))/self.assertEqual(0, len(mgr2.results))/' tests/unit/core/test_manager_cache.py && timeout 120 python -m pytest tests/unit/core/test_manager_cache.py -q 2>&1 | tail -6

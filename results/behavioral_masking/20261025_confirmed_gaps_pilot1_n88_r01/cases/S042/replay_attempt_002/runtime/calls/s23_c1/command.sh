@@ -1,0 +1,1 @@
+cat packages/core/spec/structural.md && echo '---query-spec---' && cat packages/core/spec/query.md

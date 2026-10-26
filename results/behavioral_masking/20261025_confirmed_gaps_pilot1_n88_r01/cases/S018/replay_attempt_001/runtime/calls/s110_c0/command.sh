@@ -1,0 +1,13 @@
+cd /app && python - <<'EOF'
+from datetime import datetime
+from dateutil.rrule import *
+rs1 = rruleset()
+rs1.rrule(rrule(YEARLY, count=2, dtstart=datetime(1997,9,2)))
+rs1.rdate(datetime(1998,1,2)); rs1.rdate(datetime(1998,1,1))
+rs2 = rruleset()
+rs2.rrule(rrule(YEARLY, count=2, dtstart=datetime(1997,9,2)))
+rs2.rdate(datetime(1998,1,1)); rs2.rdate(datetime(1998,1,2))
+print(rs1 == rs2, hash(rs1) == hash(rs2))
+assert rs1 == rs2 and hash(rs1) == hash(rs2)
+print("OK")
+EOF

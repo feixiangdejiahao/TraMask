@@ -1,0 +1,1 @@
+cd /app && git add bandit/core/nosec.py bandit/core/manager.py bandit/core/tester.py bandit/core/utils.py bandit/cli/main.py doc/source/config.rst doc/source/man/bandit.rst examples/nosec-directives.py tests/unit/core/test_nosec.py tests/functional/test_functional.py && git status

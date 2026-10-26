@@ -1,0 +1,1 @@
+sleep 20; cat /tmp/build_main.log; ls -la /tmp/arcane_test 2>/dev/null; ps aux | grep '[g]o build' | head -3

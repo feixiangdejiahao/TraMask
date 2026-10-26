@@ -1,0 +1,1 @@
+cd /app && ls -R lib/reporters lib/runners lib/server | head -100

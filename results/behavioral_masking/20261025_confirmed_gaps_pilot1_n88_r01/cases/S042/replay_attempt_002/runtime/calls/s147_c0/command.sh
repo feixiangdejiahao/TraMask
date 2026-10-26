@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec vitest run tests/query-modifiers.test.ts -t "updateEach should work with Removed modifier for relations" 2>&1 | tail -40

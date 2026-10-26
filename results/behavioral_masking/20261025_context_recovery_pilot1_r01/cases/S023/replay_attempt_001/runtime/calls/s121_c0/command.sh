@@ -1,0 +1,1 @@
+cd /app && python -c "import cattrs, cattr; from cattrs.partial import PartialResult; from cattr.partial import partial_structure; print('imports ok')" && python -m py_compile src/cattrs/partial.py src/cattr/partial.py tests/test_partial.py && echo "compile ok"

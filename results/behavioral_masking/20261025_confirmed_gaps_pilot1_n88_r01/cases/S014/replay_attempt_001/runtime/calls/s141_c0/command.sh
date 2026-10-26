@@ -1,0 +1,1 @@
+cd /app && git worktree remove /tmp/clack-main --force && git worktree list

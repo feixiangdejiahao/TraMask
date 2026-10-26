@@ -1,0 +1,1 @@
+cd /app && cp /tmp/typecheck.ts packages/core/test/typecheck.tmp.ts && npx tsc --noEmit -p packages/core/tsconfig.json 2>&1 | grep -v "npm warn" | head -30; rm -f packages/core/test/typecheck.tmp.ts

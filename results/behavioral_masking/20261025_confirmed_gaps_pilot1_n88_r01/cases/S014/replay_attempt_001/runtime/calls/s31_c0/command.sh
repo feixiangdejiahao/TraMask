@@ -1,0 +1,1 @@
+cd /app/packages/core && npx vitest run test/prompts/autocomplete.test.ts 2>&1 | tail -40

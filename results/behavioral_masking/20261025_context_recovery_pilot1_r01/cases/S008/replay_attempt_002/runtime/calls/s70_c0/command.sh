@@ -1,0 +1,1 @@
+cd /app && grep -rn "OnJobSchedulesChanged\|jobSchedules\|JobSchedules" backend/internal/services/job_service.go | head -30 && sed -n '1,80p' backend/internal/services/job_service.go

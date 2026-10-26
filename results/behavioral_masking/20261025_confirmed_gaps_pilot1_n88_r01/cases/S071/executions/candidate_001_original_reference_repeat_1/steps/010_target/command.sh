@@ -1,0 +1,1 @@
+./node_modules/.bin/vitest run src/error-stack.test.ts -t "runs the processor once for the top-level error, not for causes"

@@ -1,0 +1,1 @@
+cd /app && cargo test --offline --locked -p boa_engine --lib tests::evaluation::cancelled_session_jobs_are_skipped_but_unrelated_jobs_still_run -- --exact --nocapture

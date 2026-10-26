@@ -1,0 +1,1 @@
+cd /app && sed -n '76,120p' CHANGELOG.md

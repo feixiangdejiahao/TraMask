@@ -1,0 +1,1 @@
+mkdir -p /root/.cargo/registry && tar --no-same-owner -xf /tmp/pilot1_cargo_registry_cache.tar -C /root/.cargo/registry

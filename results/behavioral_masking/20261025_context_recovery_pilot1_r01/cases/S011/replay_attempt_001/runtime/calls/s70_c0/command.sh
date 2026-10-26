@@ -1,0 +1,1 @@
+cd /app && npm run build 2>&1 | tail -15 && npx jest --no-coverage 2>&1 | tail -35

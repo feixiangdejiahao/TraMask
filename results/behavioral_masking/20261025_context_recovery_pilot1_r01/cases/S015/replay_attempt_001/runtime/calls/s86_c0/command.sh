@@ -1,0 +1,1 @@
+cd /app && grep -rn "cache_hits\|cache_misses\|_totals" tests/unit tests/functional | grep -v "test_incremental\|test_manager_cache\|test_cache" | head -30

@@ -1,0 +1,1 @@
+cd /app && git checkout -b drift-detection && ls backend/resources/migrations/sqlite/ | tail -10 && echo "---POSTGRES---" && ls backend/resources/migrations/postgres/ | tail -10 && echo "---SCHEDULER---" && ls backend/pkg/scheduler/

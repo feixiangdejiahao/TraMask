@@ -1,0 +1,1 @@
+cd /app/libs/core && timeout 60 python /tmp/test_coalesce_edge.py 2>&1 | tail -3 && timeout 30 python /tmp/test_more_edge.py 2>&1 | tail -2

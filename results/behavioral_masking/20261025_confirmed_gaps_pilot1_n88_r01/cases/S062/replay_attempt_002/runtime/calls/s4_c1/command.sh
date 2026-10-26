@@ -1,0 +1,1 @@
+git branch -r && git log --oneline -5 && git remote -v

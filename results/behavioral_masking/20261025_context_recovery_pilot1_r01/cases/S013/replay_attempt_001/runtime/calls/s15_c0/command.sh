@@ -1,0 +1,1 @@
+sed -n '1,80p' src/__tests__/container.test.ts; echo "..."; grep -n "dispose\|createScope\|register\|resolve" src/__tests__/container.test.ts | head -60

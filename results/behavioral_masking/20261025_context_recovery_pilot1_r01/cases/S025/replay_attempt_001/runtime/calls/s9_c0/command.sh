@@ -1,0 +1,1 @@
+cat -n packages/core/src/prompts/prompt.ts

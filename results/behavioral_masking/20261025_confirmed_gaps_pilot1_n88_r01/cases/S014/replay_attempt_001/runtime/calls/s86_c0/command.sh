@@ -1,0 +1,1 @@
+cd /app && grep -n "describe('AutocompletePrompt async cleanup" packages/core/test/prompts/async-autocomplete.test.ts && grep -n "retryCount).toBe(1)" packages/core/test/prompts/async-autocomplete.test.ts | head

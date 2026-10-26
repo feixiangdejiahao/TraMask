@@ -1,0 +1,1 @@
+cd /app && python3 -c "import sys; print(sys.path)" && python3 -c "import sqlite_utils; print(sqlite_utils.__file__)" 2>&1 | head; which python3 pytest; python3 -m pip show sqlite-utils 2>/dev/null | head -5

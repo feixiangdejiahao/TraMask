@@ -1,0 +1,1 @@
+cd /app && git checkout -b fix/go-side-compiled-function-calls && git branch --show-current

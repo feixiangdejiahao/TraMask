@@ -1,0 +1,1 @@
+cat tests/functional/test_runtime.py && echo "=== unit cli ===" && ls -la tests/unit/cli && sed -n '1,120p' tests/unit/cli/*.py 2>/dev/null | head -200

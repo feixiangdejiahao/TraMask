@@ -1,0 +1,1 @@
+find aiomonitor tests -type f -name '*.py' | sort && echo '---' && ls -la aiomonitor && echo '---' && ls -la tests

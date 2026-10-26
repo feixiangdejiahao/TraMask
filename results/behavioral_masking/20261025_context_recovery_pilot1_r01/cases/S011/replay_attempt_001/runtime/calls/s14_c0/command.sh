@@ -1,0 +1,1 @@
+head -80 CHANGELOG.md; echo '---REMOTE---'; git remote -v

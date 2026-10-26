@@ -1,0 +1,1 @@
+cd /app && ls -la && cat package.json

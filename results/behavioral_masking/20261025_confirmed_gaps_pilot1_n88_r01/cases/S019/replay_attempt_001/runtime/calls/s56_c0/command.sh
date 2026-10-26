@@ -1,0 +1,1 @@
+cd /app && grep -rn "~/schema" src/types || echo "no schema imports in types"

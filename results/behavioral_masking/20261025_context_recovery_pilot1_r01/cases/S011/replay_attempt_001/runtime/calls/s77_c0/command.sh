@@ -1,0 +1,1 @@
+cd /app && sed -n '/function dispose(): Promise<void> {/,/^  }/p' src/container.ts | head -40

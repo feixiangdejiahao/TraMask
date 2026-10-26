@@ -1,0 +1,1 @@
+cd /app && nl -ba sqlite_utils/cli.py | sed -n '1020,1215p'

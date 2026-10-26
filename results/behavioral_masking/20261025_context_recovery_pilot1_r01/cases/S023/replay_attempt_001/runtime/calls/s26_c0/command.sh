@@ -1,0 +1,1 @@
+cd /app && grep -n "^from\|^import" src/cattrs/gen/__init__.py | head -40 && echo '---' && grep -n "import" src/cattrs/gen/_shared.py | head

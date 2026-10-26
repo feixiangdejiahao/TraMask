@@ -1,0 +1,1 @@
+cd /app/libs/core && grep -n "class RunnableBinding" langchain_core/runnables/base.py && grep -n "class RunnableEach\|class RunnableGenerator\|class RunnableLambda\|class RunnableCallable" langchain_core/runnables/base.py

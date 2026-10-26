@@ -1,0 +1,1 @@
+find . -path ./.git -prune -o -type d -print | head -50; echo ---; grep -rn "__version__" pwnlib/version.py setup.py pyproject.toml 2>/dev/null | head

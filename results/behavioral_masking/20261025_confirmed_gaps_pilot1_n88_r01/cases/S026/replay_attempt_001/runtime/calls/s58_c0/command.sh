@@ -1,0 +1,1 @@
+cd /app && go test ./checkers/ -run 'TestCheckers/brokenDocLink' -count=1 2>&1 | head -80

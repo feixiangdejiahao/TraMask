@@ -1,0 +1,1 @@
+cd /app && grep -n 'AwilixContainer\|container.dispose()\|container.build()' README.md | head -20

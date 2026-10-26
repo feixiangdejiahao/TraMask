@@ -1,0 +1,420 @@
+     1	import { $internal } from '../common';
+     2	import type { Entity } from '../entity/types';
+     3	import { getEntityId } from '../entity/utils/pack-entity';
+     4	import { hasRelationPair } from '../relation/relation';
+     5	import type { Relation } from '../relation/types';
+     6	import { isRelationPair } from '../relation/utils/is-relation';
+     7	import { registerTrait, trait } from '../trait/trait';
+     8	import { getTraitInstance, hasTraitInstance } from '../trait/trait-instance';
+     9	import type { TagTrait, Trait } from '../trait/types';
+    10	import { universe } from '../universe/universe';
+    11	import { SparseSet } from '../utils/sparse-set';
+    12	import type { World } from '../world';
+    13	import { getTrackingType, isModifier, isOrWithModifiers, isTrackingModifier } from './modifier';
+    14	import { createQueryResult } from './query-result';
+    15	import { $queryRef } from './symbols';
+    16	import {
+    17	    type EventType,
+    18	    type Modifier,
+    19	    type Query,
+    20	    type QueryInstance,
+    21	    type QueryParameter,
+    22	    type QueryResult,
+    23	    type QuerySubscriber,
+    24	    type TrackingGroup,
+    25	} from './types';
+    26	import { checkQuery } from './utils/check-query';
+    27	import { checkQueryTracking } from './utils/check-query-tracking';
+    28	import { checkQueryWithRelations } from './utils/check-query-with-relations';
+    29	import { createQueryHash } from './utils/create-query-hash';
+    30	
+    31	export const IsExcluded: TagTrait = trait();
+    32	
+    33	export function runQuery<T extends QueryParameter[]>(
+    34	    world: World,
+    35	    query: QueryInstance<T>,
+    36	    params: QueryParameter[]
+    37	): QueryResult<T> {
+    38	    commitQueryRemovals(world);
+    39	
+    40	    // With hybrid bitmask strategy, query.entities is already incrementally maintained
+    41	    // with both trait and relation filters applied. Just return the pre-filtered entities.
+    42	    const entities = query.entities.dense.slice() as Entity[];
+    43	
+    44	    // Clear so it can accumulate again.
+    45	    if (query.isTracking) {
+    46	        query.entities.clear();
+    47	        // PERF: Use indexed loop instead of for...of
+    48	        const len = entities.length;
+    49	        for (let i = 0; i < len; i++) {
+    50	            query.resetTrackingBitmasks(entities[i]);
+    51	        }
+    52	    }
+    53	
+    54	    return createQueryResult(world, entities, query, params);
+    55	}
+    56	
+    57	export function addEntityToQuery(query: QueryInstance, entity: Entity) {
+    58	    query.toRemove.remove(entity);
+    59	    query.entities.add(entity);
+    60	
+    61	    // Notify subscriptions.
+    62	    for (const sub of query.addSubscriptions) {
+    63	        sub(entity);
+    64	    }
+    65	
+    66	    query.version++;
+    67	}
+    68	
+    69	export function removeEntityFromQuery(world: World, query: QueryInstance, entity: Entity) {
+    70	    if (!query.entities.has(entity) || query.toRemove.has(entity)) return;
+    71	
+    72	    const ctx = world[$internal];
+    73	
+    74	    query.toRemove.add(entity);
+    75	    ctx.dirtyQueries.add(query);
+    76	
+    77	    // Notify subscriptions.
+    78	    for (const sub of query.removeSubscriptions) {
+    79	        sub(entity);
+    80	    }
+    81	
+    82	    query.version++;
+    83	}
+    84	
+    85	export function commitQueryRemovals(world: World) {
+    86	    const ctx = world[$internal];
+    87	    if (!ctx.dirtyQueries.size) return;
+    88	
+    89	    for (const query of ctx.dirtyQueries) {
+    90	        for (let i = query.toRemove.dense.length - 1; i >= 0; i--) {
+    91	            const eid = query.toRemove.dense[i];
+    92	            query.toRemove.remove(eid);
+    93	            query.entities.remove(eid);
+    94	        }
+    95	    }
+    96	
+    97	    ctx.dirtyQueries.clear();
+    98	}
+    99	
+   100	/** Reset tracking state for an entity across all tracking groups */
+   101	export function resetQueryTrackingBitmasks(query: QueryInstance, eid: number) {
+   102	    const groups = query.trackingGroups;
+   103	    const len = groups.length;
+   104	    for (let i = 0; i < len; i++) {
+   105	        const trackers = groups[i].trackers;
+   106	        const trackersLen = trackers.length;
+   107	        for (let j = 0; j < trackersLen; j++) {
+   108	            const tracker = trackers[j];
+   109	            if (tracker) tracker[eid] = 0;
+   110	        }
+   111	    }
+   112	}
+   113	
+   114	/**
+   115	 * Unified function to process tracking modifiers with explicit AND/OR logic.
+   116	 * Groups modifiers by (type, id, logic) key so same-tracker calls are combined.
+   117	 */
+   118	function processTrackingModifier(
+   119	    world: World,
+   120	    query: QueryInstance,
+   121	    modifier: Modifier,
+   122	    logic: 'and' | 'or',
+   123	    ctx: World[typeof $internal],
+   124	    groupsMap: Map<string, TrackingGroup>
+   125	): void {
+   126	    const trackingType = getTrackingType(modifier);
+   127	    if (!trackingType) return;
+   128	
+   129	    const id = modifier.id;
+   130	    // Key includes logic so Changed(A) at top-level stays separate from Or(Changed(A))
+   131	    const key = `${trackingType}-${id}-${logic}`;
+   132	
+   133	    // Find or create tracking group
+   134	    let group = groupsMap.get(key);
+   135	    if (!group) {
+   136	        group = {
+   137	            logic,
+   138	            type: trackingType,
+   139	            id,
+   140	            bitmasks: [],
+   141	            trackers: [],
+   142	        };
+   143	        groupsMap.set(key, group);
+   144	        query.trackingGroups.push(group);
+   145	    }
+   146	
+   147	    // Register traits and build bitmasks
+   148	    for (const trait of modifier.traits) {
+   149	        if (!hasTraitInstance(ctx.traitInstances, trait)) registerTrait(world, trait);
+   150	        const instance = getTraitInstance(ctx.traitInstances, trait)!;
+   151	        query.traits.push(trait);
+   152	
+   153	        // Add to traitInstances.all for query registration
+   154	        query.traitInstances.all.push(instance);
+   155	
+   156	        // Build bitmasks by generation
+   157	        const genId = instance.generationId;
+   158	        group.bitmasks[genId] = (group.bitmasks[genId] || 0) | instance.bitflag;
+   159	
+   160	        // Track changed traits for change detection in query-result
+   161	        if (trackingType === 'change') {
+   162	            query.changedTraits.add(trait);
+   163	            query.hasChangedModifiers = true;
+   164	        }
+   165	    }
+   166	
+   167	    query.isTracking = true;
+   168	}
+   169	
+   170	export function createQueryInstance<T extends QueryParameter[]>(
+   171	    world: World,
+   172	    parameters: T
+   173	): QueryInstance {
+   174	    const query: QueryInstance = {
+   175	        version: 0,
+   176	        world,
+   177	        parameters,
+   178	        hash: '',
+   179	        traits: [],
+   180	        traitInstances: {
+   181	            required: [],
+   182	            forbidden: [],
+   183	            or: [],
+   184	            all: [],
+   185	        },
+   186	        staticBitmasks: [],
+   187	        trackingGroups: [],
+   188	        generations: [],
+   189	        entities: new SparseSet(),
+   190	        isTracking: false,
+   191	        hasChangedModifiers: false,
+   192	        changedTraits: new Set<Trait>(),
+   193	        toRemove: new SparseSet(),
+   194	        addSubscriptions: new Set<QuerySubscriber>(),
+   195	        removeSubscriptions: new Set<QuerySubscriber>(),
+   196	        relationFilters: [],
+   197	
+   198	        run: (world: World, params: QueryParameter[]) => runQuery(world, query, params),
+   199	        add: (entity: Entity) => addEntityToQuery(query, entity),
+   200	        remove: (world: World, entity: Entity) => removeEntityFromQuery(world, query, entity),
+   201	        check: (world: World, entity: Entity) => checkQuery(world, query, entity),
+   202	        checkTracking: (
+   203	            world: World,
+   204	            entity: Entity,
+   205	            eventType: EventType,
+   206	            generationId: number,
+   207	            bitflag: number
+   208	        ) => checkQueryTracking(world, query, entity, eventType, generationId, bitflag),
+   209	        resetTrackingBitmasks: (eid: number) => resetQueryTrackingBitmasks(query, eid),
+   210	    };
+   211	
+   212	    const ctx = world[$internal];
+   213	
+   214	    // Map for grouping tracking modifiers by (type, id, logic)
+   215	    const trackingGroupsMap = new Map<string, TrackingGroup>();
+   216	
+   217	    // Process all parameters
+   218	    for (let i = 0; i < parameters.length; i++) {
+   219	        const parameter = parameters[i];
+   220	
+   221	        // Handle relation pairs
+   222	        if (isRelationPair(parameter)) {
+   223	            const pairCtx = parameter[$internal];
+   224	            const relation = pairCtx.relation;
+   225	
+   226	            query.relationFilters!.push(parameter);
+   227	
+   228	            const baseTrait = (relation as Relation<Trait>)[$internal].trait;
+   229	            if (!hasTraitInstance(ctx.traitInstances, baseTrait)) registerTrait(world, baseTrait);
+   230	            query.traitInstances.required.push(getTraitInstance(ctx.traitInstances, baseTrait)!);
+   231	            query.traits.push(baseTrait);
+   232	
+   233	            continue;
+   234	        }
+   235	
+   236	        if (isModifier(parameter)) {
+   237	            const traits = parameter.traits;
+   238	
+   239	            // Register traits
+   240	            for (let j = 0; j < traits.length; j++) {
+   241	                const t = traits[j];
+   242	                if (!hasTraitInstance(ctx.traitInstances, t)) registerTrait(world, t);
+   243	            }
+   244	
+   245	            if (parameter.type === 'not') {
+   246	                query.traitInstances.forbidden.push(
+   247	                    ...traits.map((t) => getTraitInstance(ctx.traitInstances, t)!)
+   248	                );
+   249	            } else if (parameter.type === 'or') {
+   250	                // Handle regular traits in Or
+   251	                query.traitInstances.or.push(
+   252	                    ...traits.map((t) => getTraitInstance(ctx.traitInstances, t)!)
+   253	                );
+   254	
+   255	                // Handle nested tracking modifiers in Or
+   256	                if (isOrWithModifiers(parameter)) {
+   257	                    for (const nestedModifier of parameter.modifiers) {
+   258	                        if (isTrackingModifier(nestedModifier)) {
+   259	                            processTrackingModifier(world, query, nestedModifier, 'or', ctx, trackingGroupsMap);
+   260	                        }
+   261	                    }
+   262	                }
+   263	            } else if (isTrackingModifier(parameter)) {
+   264	                // Top-level tracking modifiers use AND logic
+   265	                processTrackingModifier(world, query, parameter, 'and', ctx, trackingGroupsMap);
+   266	            }
+   267	        } else {
+   268	            // Regular trait
+   269	            const t = parameter as Trait;
+   270	            if (!hasTraitInstance(ctx.traitInstances, t)) registerTrait(world, t);
+   271	            query.traitInstances.required.push(getTraitInstance(ctx.traitInstances, t)!);
+   272	            query.traits.push(t);
+   273	        }
+   274	    }
+   275	
+   276	    // Add IsExcluded to the forbidden list
+   277	    query.traitInstances.forbidden.push(getTraitInstance(ctx.traitInstances, IsExcluded)!);
+   278	
+   279	    // Build traitInstances.all from static instances (tracking instances already added by processTrackingModifier)
+   280	    query.traitInstances.all = [
+   281	        ...query.traitInstances.all, // Tracking instances added by processTrackingModifier
+   282	        ...query.traitInstances.required,
+   283	        ...query.traitInstances.forbidden,
+   284	        ...query.traitInstances.or,
+   285	    ];
+   286	
+   287	    // Create an array of all trait generations
+   288	    query.generations = query.traitInstances.all
+   289	        .map((c) => c.generationId)
+   290	        .reduce((a: number[], v) => {
+   291	            if (a.includes(v)) return a;
+   292	            a.push(v);
+   293	            return a;
+   294	        }, []);
+   295	
+   296	    // Create static bitmasks (required/forbidden/or only - tracking is in trackingGroups)
+   297	    query.staticBitmasks = query.generations.map((generationId) => {
+   298	        const required = query.traitInstances.required
+   299	            .filter((c) => c.generationId === generationId)
+   300	            .reduce((a, c) => a | c.bitflag, 0);
+   301	
+   302	        const forbidden = query.traitInstances.forbidden
+   303	            .filter((c) => c.generationId === generationId)
+   304	            .reduce((a, c) => a | c.bitflag, 0);
+   305	
+   306	        const or = query.traitInstances.or
+   307	            .filter((c) => c.generationId === generationId)
+   308	            .reduce((a, c) => a | c.bitflag, 0);
+   309	
+   310	        return { required, forbidden, or };
+   311	    });
+   312	
+   313	    // Create hash
+   314	    query.hash = createQueryHash(parameters);
+   315	
+   316	    // Add to world
+   317	    ctx.queriesHashMap.set(query.hash, query);
+   318	
+   319	    // Register query with trait instances
+   320	    if (query.isTracking) {
+   321	        query.traitInstances.all.forEach((instance) => {
+   322	            instance.trackingQueries.add(query);
+   323	        });
+   324	    } else {
+   325	        query.traitInstances.all.forEach((instance) => {
+   326	            instance.queries.add(query);
+   327	        });
+   328	    }
+   329	
+   330	    // Add to notQueries if has forbidden traits
+   331	    if (query.traitInstances.forbidden.length > 0) ctx.notQueries.add(query);
+   332	
+   333	    // Index queries with relation filters
+   334	    const hasRelationFilters = query.relationFilters && query.relationFilters.length > 0;
+   335	
+   336	    if (hasRelationFilters) {
+   337	        for (const pair of query.relationFilters!) {
+   338	            const relationTrait = pair[$internal].relation[$internal].trait;
+   339	            const relationTraitInstance = getTraitInstance(ctx.traitInstances, relationTrait);
+   340	            if (relationTraitInstance) {
+   341	                relationTraitInstance.relationQueries.add(query);
+   342	            }
+   343	        }
+   344	    }
+   345	
+   346	    // Populate query with initial matching entities
+   347	    if (query.trackingGroups.length > 0) {
+   348	        // For tracking queries, check each entity against tracking groups
+   349	        for (const group of query.trackingGroups) {
+   350	            const { type, id, logic, bitmasks } = group;
+   351	            const snapshot = ctx.trackingSnapshots.get(id)!;
+   352	            const dirtyMask = ctx.dirtyMasks.get(id)!;
+   353	            const changedMask = ctx.changedMasks.get(id)!;
+   354	
+   355	            for (const entity of ctx.entityIndex.dense) {
+   356	                // For AND groups, skip if already in query (will be checked by other groups)
+   357	                // For OR groups, skip if already in query
+   358	                if (query.entities.has(entity)) continue;
+   359	
+   360	                const eid = getEntityId(entity);
+   361	                let matches = logic === 'and'; // AND starts true, OR starts false
+   362	
+   363	                // Check each generation that has bitmasks
+   364	                for (let genId = 0; genId < bitmasks.length; genId++) {
+   365	                    const mask = bitmasks[genId];
+   366	                    if (!mask) continue;
+   367	
+   368	                    const oldMask = snapshot[genId]?.[eid] || 0;
+   369	                    const currentMask = ctx.entityMasks[genId]?.[eid] || 0;
+   370	
+   371	                    // Check each bit in the mask
+   372	                    for (let bit = 1; bit <= mask; bit <<= 1) {
+   373	                        if (!(mask & bit)) continue;
+   374	
+   375	                        let traitMatches = false;
+   376	
+   377	                        switch (type) {
+   378	                            case 'add':
+   379	                                traitMatches = (oldMask & bit) === 0 && (currentMask & bit) === bit;
+   380	                                break;
+   381	                            case 'remove':
+   382	                                traitMatches =
+   383	                                    ((oldMask & bit) === bit && (currentMask & bit) === 0) ||
+   384	                                    ((oldMask & bit) === 0 &&
+   385	                                        (currentMask & bit) === 0 &&
+   386	                                        ((dirtyMask[genId]?.[eid] ?? 0) & bit) === bit);
+   387	                                break;
+   388	                            case 'change':
+   389	                                traitMatches = ((changedMask[genId]?.[eid] ?? 0) & bit) === bit;
+   390	                                break;
+   391	                        }
+   392	
+   393	                        if (logic === 'and') {
+   394	                            if (!traitMatches) {
+   395	                                matches = false;
+   396	                                break;
+   397	                            }
+   398	                        } else {
+   399	                            // OR logic
+   400	                            if (traitMatches) {
+   401	                                matches = true;
+   402	                                break;
+   403	                            }
+   404	                        }
+   405	                    }
+   406	
+   407	                    // Early exit for AND that failed or OR that succeeded
+   408	                    if (logic === 'and' && !matches) break;
+   409	                    if (logic === 'or' && matches) break;
+   410	                }
+   411	
+   412	                if (matches) {
+   413	                    if (hasRelationFilters) {
+   414	                        let relationMatch = true;
+   415	                        for (const pair of query.relationFilters!) {
+   416	                            if (!hasRelationPair(world, entity, pair)) {
+   417	                                relationMatch = false;
+   418	                                break;
+   419	                            }
+   420	                        }

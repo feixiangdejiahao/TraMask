@@ -1,0 +1,1 @@
+nl -ba packages/core/src/trait/trait.ts | sed -n '227,320p' && echo '---487-640---' && nl -ba packages/core/src/trait/trait.ts | sed -n '487,660p'

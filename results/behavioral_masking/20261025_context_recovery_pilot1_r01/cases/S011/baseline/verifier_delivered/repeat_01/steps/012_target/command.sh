@@ -1,0 +1,1 @@
+cd /app && ./node_modules/.bin/jest --runTestsByPath src/__tests__/async-initialization.test.ts --no-coverage --no-cache --runInBand --testNamePattern 'allows scope.initialize\(\) without calling parent.initialize\(\) first'

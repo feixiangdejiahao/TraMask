@@ -1,0 +1,250 @@
+diff --git a/sqlite_utils/db.py b/sqlite_utils/db.py
+index aacdc89..c0aa6af 100644
+--- a/sqlite_utils/db.py
++++ b/sqlite_utils/db.py
+@@ -13,6 +13,7 @@ import binascii
+ from collections import namedtuple
+ from collections.abc import Mapping
+ import contextlib
++import csv as csv_module
+ import datetime
+ import decimal
+ import inspect
+@@ -293,6 +294,22 @@ class BadMultiValues(Exception):
+         self.values = values
+ 
+ 
++class SafeImportNotEnabledError(Exception):
++    "Safe import mode is not enabled"
++
++
++class CheckpointNotFoundError(Exception):
++    "Checkpoint does not exist"
++
++
++class CheckpointNotActiveError(Exception):
++    "Checkpoint is no longer active"
++
++
++class ImportInvariantError(Exception):
++    "Import invariant validation failed"
++
++
+ _COUNTS_TABLE_CREATE_SQL = """
+ CREATE TABLE IF NOT EXISTS "{}"(
+    "table" TEXT PRIMARY KEY,
+@@ -301,6 +318,17 @@ CREATE TABLE IF NOT EXISTS "{}"(
+ """.strip()
+ 
+ 
++_IMPORT_INVARIANTS_TABLE = "_import_invariants"
++
++_IMPORT_INVARIANTS_TABLE_CREATE_SQL = """
++CREATE TABLE IF NOT EXISTS "{}"(
++   "table" TEXT NOT NULL,
++   id TEXT PRIMARY KEY,
++   expression TEXT NOT NULL
++);
++""".strip()
++
++
+ class Database:
+     """
+     Wrapper for a SQLite database connection that adds a variety of useful utility methods.
+@@ -384,6 +412,12 @@ class Database:
+         if execute_plugins:
+             pm.hook.prepare_connection(conn=self.conn)
+         self.strict = strict
++        self._safe_import_enabled = False
++        self._active_checkpoints = set()
++        self._active_checkpoint_order: List[str] = []
++        self._finalized_checkpoints = set()
++        self._safe_import_previous_isolation_level = None
++        self._safe_import_in_progress = False
+ 
+     def __enter__(self) -> "Database":
+         return self
+@@ -419,6 +453,20 @@ class Database:
+         finally:
+             self.conn.isolation_level = old_isolation_level
+ 
++    @contextlib.contextmanager
++    def _transaction(self) -> Generator[None, None, None]:
++        """
++        Context manager for internal transactions. During a safe import the
++        context manager does nothing, so that ``with self.conn:`` blocks do not
++        commit the active rollback checkpoint. Otherwise it behaves like
++        ``with self.conn:``.
++        """
++        if getattr(self, "_safe_import_in_progress", False):
++            yield
++        else:
++            with self.conn:
++                yield
++
+     @contextlib.contextmanager
+     def tracer(
+         self, tracer: Optional[Callable[[str, Optional[Sequence]], None]] = None
+@@ -723,7 +771,7 @@ class Database:
+         if not hasattr(self, "_supports_strict"):
+             try:
+                 table_name = "t{}".format(secrets.token_hex(16))
+-                with self.conn:
++                with self._transaction():
+                     self.conn.execute(
+                         "create table {} (name text) strict".format(table_name)
+                     )
+@@ -739,7 +787,7 @@ class Database:
+         if not hasattr(self, "_supports_on_conflict"):
+             table_name = "t{}".format(secrets.token_hex(16))
+             try:
+-                with self.conn:
++                with self._transaction():
+                     self.conn.execute(
+                         "create table {} (id integer primary key, name text)".format(
+                             table_name
+@@ -791,7 +839,7 @@ class Database:
+                 self.execute("PRAGMA journal_mode=delete;")
+ 
+     def _ensure_counts_table(self) -> None:
+-        with self.conn:
++        with self._transaction():
+             self.execute(_COUNTS_TABLE_CREATE_SQL.format(self._counts_table_name))
+ 
+     def enable_counts(self) -> None:
+@@ -827,7 +875,7 @@ class Database:
+     def reset_counts(self) -> None:
+         "Re-calculate cached counts for tables."
+         tables = [table for table in self.tables if table.has_counts_triggers]
+-        with self.conn:
++        with self._transaction():
+             self._ensure_counts_table()
+             counts_table = self.table(self._counts_table_name)
+             counts_table.delete_where()
+@@ -841,6 +889,577 @@ class Database:
+     ) -> List[dict]:
+         return list(self.query(sql, params))
+ 
++    def enable_safe_import(self) -> None:
++        """
++        Enable safe import mode for this database. While enabled the
++        connection runs in autocommit mode and :meth:`create_import_checkpoint`
++        can be used to create rollback checkpoints.
++        """
++        if not self._safe_import_enabled:
++            self._safe_import_previous_isolation_level = self.conn.isolation_level
++            self.conn.isolation_level = None
++            self._safe_import_enabled = True
++            self._safe_import_in_progress = True
++
++    def disable_safe_import(self) -> None:
++        """
++        Disable safe import mode for this database, restoring the previous
++        transaction behaviour.
++        """
++        if self._safe_import_enabled:
++            self.conn.isolation_level = self._safe_import_previous_isolation_level
++            self._safe_import_enabled = False
++            self._safe_import_in_progress = False
++
++    def _create_checkpoint(self) -> str:
++        checkpoint_id = "sp_" + secrets.token_hex(16)
++        self.execute(
++            "SAVEPOINT {}".format(quote_identifier(checkpoint_id))
++        )
++        self._active_checkpoints.add(checkpoint_id)
++        self._active_checkpoint_order.append(checkpoint_id)
++        return checkpoint_id
++
++    def create_import_checkpoint(self) -> str:
++        """
++        Create a rollback checkpoint and return its checkpoint id. The id is
++        an opaque non-empty string.
++
++        Raises :class:`SafeImportNotEnabledError` if safe import mode is not
++        currently enabled.
++        """
++        if not self._safe_import_enabled:
++            raise SafeImportNotEnabledError(
++                "Safe import mode is not enabled - call enable_safe_import() first"
++            )
++        return self._create_checkpoint()
++
++    def _forget_checkpoint(self, checkpoint_id: str) -> None:
++        self._active_checkpoints.discard(checkpoint_id)
++        if checkpoint_id in self._active_checkpoint_order:
++            self._active_checkpoint_order.remove(checkpoint_id)
++
++    def _invalidate_inner_checkpoints(self, checkpoint_id: str) -> None:
++        """
++        When a savepoint is released or rolled back, any savepoints created
++        after it are destroyed by SQLite. Remove them from active tracking.
++        """
++        try:
++            index = self._active_checkpoint_order.index(checkpoint_id)
++        except ValueError:
++            return
++        for inner_id in self._active_checkpoint_order[index + 1:]:
++            self._active_checkpoints.discard(inner_id)
++        self._active_checkpoint_order = self._active_checkpoint_order[: index + 1]
++
++    def _require_active_checkpoint(self, checkpoint_id: str) -> None:
++        if checkpoint_id in self._active_checkpoints:
++            return
++        if checkpoint_id in self._finalized_checkpoints:
++            raise CheckpointNotActiveError(
++                "Checkpoint {} is no longer active".format(checkpoint_id)
++            )
++        raise CheckpointNotFoundError(
++            "Checkpoint {} does not exist".format(checkpoint_id)
++        )
++
++    def commit_checkpoint(self, checkpoint_id: str) -> None:
++        """
++        Commit a checkpoint created using :meth:`create_import_checkpoint`.
++        Any changes made since the checkpoint was created are kept.
++
++        Committing finalizes the checkpoint: further commit or rollback calls
++        with the same id will raise :class:`CheckpointNotActiveError`.
++        """
++        self._require_active_checkpoint(checkpoint_id)
++        self.execute("RELEASE SAVEPOINT {}".format(quote_identifier(checkpoint_id)))
++        self._invalidate_inner_checkpoints(checkpoint_id)
++        self._forget_checkpoint(checkpoint_id)
++        self._finalized_checkpoints.add(checkpoint_id)
++
++    def rollback_to_checkpoint(self, checkpoint_id: str) -> None:
++        """
++        Roll back to a checkpoint created using :meth:`create_import_checkpoint`,
++        restoring the exact database state (including schema changes) from when
++        the checkpoint was created.
++
++        Rolling back finalizes the checkpoint: further commit or rollback calls
++        with the same id will raise :class:`CheckpointNotActiveError`.
++        """
++        self._require_active_checkpoint(checkpoint_id)
++        quoted = quote_identifier(checkpoint_id)
++        self.execute("ROLLBACK TO SAVEPOINT {}".format(quoted))
++        self.execute("RELEASE SAVEPOINT {}".format(quoted))
++        # Any checkpoints created after this one were destroyed by the rollback
++        self._invalidate_inner_checkpoints(checkpoint_id)
++        self._forget_checkpoint(checkpoint_id)
++        self._finalized_checkpoints.add(checkpoint_id)
++
++    def cleanup_checkpoint(self, checkpoint_id: str) -> None:
++        """
++        Remove a checkpoint id from tracking. Active checkpoints are released
++        (their changes are kept) and finalized checkpoints are simply forgotten.
++
++        After cleanup, commit/rollback calls with the same id raise
++        :class:`CheckpointNotFoundError`.
++        """
++        if checkpoint_id in self._active_checkpoints:
++            try:
++                self.execute(
++                    "RELEASE SAVEPOINT {}".format(quote_identifier(checkpoint_id))
++                )
++            except Exception:
++                pass
++            self._invalidate_inner_checkpoints(checkpoint_id)
++            self._forget_checkpoint(checkpoint_id)

@@ -1,0 +1,1 @@
+wc -l src/container.ts src/resolvers.ts src/errors.ts src/lifetime.ts && echo "=====CONTAINER=====" && cat src/container.ts

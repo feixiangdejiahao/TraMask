@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/zodSchemer/zodSchemer.ts && echo "===FORMAT ITEM===" && cat src/schema/actions/zodSchemer/formatter/item.ts && echo "===FORMAT MAP===" && cat src/schema/actions/zodSchemer/formatter/map.ts && echo "===FORMAT TYPES===" && cat src/schema/actions/zodSchemer/formatter/types.ts

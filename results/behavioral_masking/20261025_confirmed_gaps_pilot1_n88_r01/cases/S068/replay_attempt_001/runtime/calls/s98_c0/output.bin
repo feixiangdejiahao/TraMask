@@ -1,0 +1,196 @@
+  1020	    _maybe_register_functions(db, functions)
+  1021	    if (delimiter or quotechar or sniff or no_headers) and not tsv:
+  1022	        csv = True
+  1023	    if (nl + csv + tsv) >= 2:
+  1024	        raise click.ClickException("Use just one of --nl, --csv or --tsv")
+  1025	    if (csv or tsv) and flatten:
+  1026	        raise click.ClickException("--flatten cannot be used with --csv or --tsv")
+  1027	    if empty_null and not (csv or tsv):
+  1028	        raise click.ClickException("--empty-null can only be used with --csv or --tsv")
+  1029	    if encoding and not (csv or tsv):
+  1030	        raise click.ClickException("--encoding must be used with --csv or --tsv")
+  1031	    if pk and len(pk) == 1:
+  1032	        pk = pk[0]
+  1033	    encoding = encoding or "utf-8-sig"
+  1034	
+  1035	    # The --sniff option needs us to buffer the file to peek ahead
+  1036	    sniff_buffer = None
+  1037	    decoded_buffer = None
+  1038	    if sniff:
+  1039	        sniff_buffer = io.BufferedReader(file, buffer_size=4096)
+  1040	        decoded_buffer = io.TextIOWrapper(sniff_buffer, encoding=encoding)
+  1041	    else:
+  1042	        decoded_buffer = io.TextIOWrapper(file, encoding=encoding)
+  1043	
+  1044	    tracker = None
+  1045	    with file_progress(decoded_buffer, silent=silent) as decoded:
+  1046	        if csv or tsv:
+  1047	            if sniff:
+  1048	                # Read first 2048 bytes and use that to detect
+  1049	                assert sniff_buffer is not None
+  1050	                first_bytes = sniff_buffer.peek(2048)
+  1051	                dialect = csv_std.Sniffer().sniff(
+  1052	                    first_bytes.decode(encoding, "ignore")
+  1053	                )
+  1054	            else:
+  1055	                dialect = "excel-tab" if tsv else "excel"
+  1056	            csv_reader_args: dict[str, Any] = {"dialect": dialect}
+  1057	            if delimiter:
+  1058	                csv_reader_args["delimiter"] = delimiter
+  1059	            if quotechar:
+  1060	                csv_reader_args["quotechar"] = quotechar
+  1061	            reader = csv_std.reader(decoded, **csv_reader_args)  # type: ignore
+  1062	            first_row = next(reader)
+  1063	            if no_headers:
+  1064	                headers = ["untitled_{}".format(i + 1) for i in range(len(first_row))]
+  1065	                reader = itertools.chain([first_row], reader)
+  1066	            else:
+  1067	                headers = first_row
+  1068	            if empty_null:
+  1069	                docs = (
+  1070	                    dict(zip(headers, [None if cell == "" else cell for cell in row]))
+  1071	                    for row in reader
+  1072	                )
+  1073	            else:
+  1074	                docs = (dict(zip(headers, row)) for row in reader)
+  1075	            # detect_types is now the default, unless --no-detect-types is passed
+  1076	            if not no_detect_types:
+  1077	                tracker = TypeTracker()
+  1078	                docs = tracker.wrap(docs)
+  1079	        elif lines:
+  1080	            docs = ({"line": line.strip()} for line in decoded)
+  1081	        elif text:
+  1082	            docs = ({"text": decoded.read()},)
+  1083	        else:
+  1084	            try:
+  1085	                if nl:
+  1086	                    docs = (json.loads(line) for line in decoded if line.strip())
+  1087	                else:
+  1088	                    docs = json.load(decoded)
+  1089	                    if isinstance(docs, dict):
+  1090	                        docs = [docs]
+  1091	            except json.decoder.JSONDecodeError as ex:
+  1092	                raise click.ClickException(
+  1093	                    "Invalid JSON - use --csv for CSV or --tsv for TSV files\n\nJSON error: {}".format(
+  1094	                        ex
+  1095	                    )
+  1096	                )
+  1097	            if flatten:
+  1098	                docs = (_flatten(doc) for doc in docs)
+  1099	
+  1100	        if stop_after:
+  1101	            docs = itertools.islice(docs, stop_after)
+  1102	
+  1103	        if convert:
+  1104	            variable = "row"
+  1105	            if lines:
+  1106	                variable = "line"
+  1107	            elif text:
+  1108	                variable = "text"
+  1109	            fn = _compile_code(convert, imports, variable=variable)
+  1110	            if lines:
+  1111	                docs = (fn(doc["line"]) for doc in docs)
+  1112	            elif text:
+  1113	                # Special case: this is allowed to be an iterable
+  1114	                text_value = list(docs)[0]["text"]
+  1115	                fn_return = fn(text_value)
+  1116	                if isinstance(fn_return, dict):
+  1117	                    docs = [fn_return]
+  1118	                else:
+  1119	                    try:
+  1120	                        docs = iter(fn_return)
+  1121	                    except TypeError:
+  1122	                        raise click.ClickException(
+  1123	                            "--convert must return dict or iterator"
+  1124	                        )
+  1125	            else:
+  1126	                docs = (fn(doc) or doc for doc in docs)
+  1127	
+  1128	        extra_kwargs = {
+  1129	            "ignore": ignore,
+  1130	            "replace": replace,
+  1131	            "truncate": truncate,
+  1132	            "analyze": analyze,
+  1133	            "strict": strict,
+  1134	        }
+  1135	        if not_null:
+  1136	            extra_kwargs["not_null"] = set(not_null)
+  1137	        if default:
+  1138	            extra_kwargs["defaults"] = dict(default)
+  1139	        if upsert:
+  1140	            extra_kwargs["upsert"] = upsert
+  1141	
+  1142	        # docs should all be dictionaries
+  1143	        docs = (verify_is_dict(doc) for doc in docs)
+  1144	
+  1145	        # Apply {"$base64": true, ...} decoding, if needed
+  1146	        docs = (decode_base64_values(doc) for doc in docs)
+  1147	
+  1148	        # For bulk_sql= we use cursor.executemany() instead
+  1149	        if bulk_sql:
+  1150	            if safe_mode:
+  1151	                result = db.safe_bulk_execute(
+  1152	                    bulk_sql, docs, batch_size=batch_size or 0
+  1153	                )
+  1154	                if not result["success"]:
+  1155	                    raise click.ClickException(result["error_report"])
+  1156	                return
+  1157	            if batch_size:
+  1158	                doc_chunks = chunks(docs, batch_size)
+  1159	            else:
+  1160	                doc_chunks = [docs]
+  1161	            for doc_chunk in doc_chunks:
+  1162	                with db.conn:
+  1163	                    db.conn.cursor().executemany(bulk_sql, doc_chunk)
+  1164	            return
+  1165	
+  1166	        try:
+  1167	            if safe_mode:
+  1168	                def _run_safe_import():
+  1169	                    db.table(table).insert_all(
+  1170	                        docs,
+  1171	                        pk=pk,
+  1172	                        batch_size=batch_size,
+  1173	                        alter=alter,
+  1174	                        **extra_kwargs,
+  1175	                    )
+  1176	                    if tracker is not None:
+  1177	                        db.table(table).transform(types=tracker.types)
+  1178	
+  1179	                safe_result = db.safe_import(table, _run_safe_import)
+  1180	                if not safe_result["success"]:
+  1181	                    raise click.ClickException(safe_result["error_report"])
+  1182	            else:
+  1183	                db.table(table).insert_all(
+  1184	                    docs, pk=pk, batch_size=batch_size, alter=alter, **extra_kwargs
+  1185	                )
+  1186	        except Exception as e:
+  1187	            if (
+  1188	                isinstance(e, OperationalError)
+  1189	                and e.args
+  1190	                and (
+  1191	                    "has no column named" in e.args[0] or "no such column" in e.args[0]
+  1192	                )
+  1193	            ):
+  1194	                raise click.ClickException(
+  1195	                    "{}\n\nTry using --alter to add additional columns".format(
+  1196	                        e.args[0]
+  1197	                    )
+  1198	                )
+  1199	            # If we can find sql= and parameters= arguments, show those
+  1200	            variables = _find_variables(e.__traceback__, ["sql", "parameters"])
+  1201	            if "sql" in variables and "parameters" in variables:
+  1202	                raise click.ClickException(
+  1203	                    "{}\n\nsql = {}\nparameters = {}".format(
+  1204	                        str(e), variables["sql"], variables["parameters"]
+  1205	                    )
+  1206	                )
+  1207	            else:
+  1208	                raise
+  1209	        if tracker is not None and not safe_mode:
+  1210	            db.table(table).transform(types=tracker.types)
+  1211	
+  1212	        # Clean up open file-like objects
+  1213	        if sniff_buffer:
+  1214	            sniff_buffer.close()
+  1215	        if decoded_buffer:

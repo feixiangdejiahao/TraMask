@@ -1,0 +1,182 @@
+	Require struct {
+		PkgObjects bool
+		PkgRenames bool
+	}
+
+	// PkgObjects stores all imported packages and their local names.
+	PkgObjects map[*types.PkgName]string
+
+	// PkgRenames maps package path to its local renaming.
+	// Contains no entries for packages that were imported without
+	// explicit local names.
+	PkgRenames map[string]string
+}
+
+// NewContext returns new shared context to be used by every checker.
+//
+// All data carried by the context is readonly for checkers,
+// but can be modified by the integrating application.
+func NewContext(fset *token.FileSet, sizes types.Sizes) *Context {
+	return &Context{
+		FileSet:   fset,
+		SizesInfo: sizes,
+		TypesInfo: &types.Info{},
+	}
+}
+
+// SetGoVersion adjust the target Go language version.
+//
+// The format is like "1.5", "1.8", etc.
+// It's permitted to have "go" prefix (e.g. "go1.5").
+//
+// Empty string (the default) means that we make no
+// Go version assumptions and (like go-critic does) behave
+// like all features are available. To make go-critic
+// more conservative, the upper Go version level should be adjusted.
+func (c *Context) SetGoVersion(version string) {
+	v, err := ParseGoVersion(version)
+	if err != nil {
+		panic(err)
+	}
+	c.GoVersion = v
+}
+
+// SetPackageInfo sets package-related metadata.
+//
+// Must be called for every package being checked.
+func (c *Context) SetPackageInfo(info *types.Info, pkg *types.Package) {
+	if info != nil {
+		// We do this kind of assignment to avoid
+		// changing c.typesInfo field address after
+		// every re-assignment.
+		*c.TypesInfo = *info
+	}
+	c.Pkg = pkg
+}
+
+// SetFileInfo sets file-related metadata.
+//
+// Must be called for every source code file being checked.
+func (c *Context) SetFileInfo(name string, f *ast.File) {
+	c.Filename = name
+	if c.Require.PkgObjects {
+		resolvePkgObjects(c, f)
+	}
+	if c.Require.PkgRenames {
+		resolvePkgRenames(c, f)
+	}
+}
+
+// CheckerContext is checker-local context copy.
+// Fields that are not from Context itself are writeable.
+type CheckerContext struct {
+	*Context
+
+	// printer used to format warning text.
+	printer *astfmt.Printer
+
+	warnings []Warning
+}
+
+// Warn adds a Warning to checker output.
+func (ctx *CheckerContext) Warn(node ast.Node, format string, args ...interface{}) {
+	ctx.WarnWithPos(node.Pos(), format, args...)
+}
+
+// WarnFixable emits a warning with a fix suggestion provided by the caller.
+func (ctx *CheckerContext) WarnFixable(node ast.Node, fix QuickFix, format string, args ...interface{}) {
+	ctx.WarnFixableWithPos(node.Pos(), fix, format, args...)
+}
+
+// WarnWithPos adds a Warning to checker output. Useful for ruleguard's Report func.
+func (ctx *CheckerContext) WarnWithPos(pos token.Pos, format string, args ...interface{}) {
+	ctx.warnings = append(ctx.warnings, Warning{
+		Text: ctx.printer.Sprintf(format, args...),
+		Pos:  pos,
+	})
+}
+
+// WarnFixableWithPos adds a Warning to checker output. Useful for ruleguard's Report func.
+func (ctx *CheckerContext) WarnFixableWithPos(pos token.Pos, fix QuickFix, format string, args ...interface{}) {
+	ctx.warnings = append(ctx.warnings, Warning{
+		Text:       ctx.printer.Sprintf(format, args...),
+		Pos:        pos,
+		Suggestion: fix,
+	})
+}
+
+// TypeOf returns the type of expression x.
+//
+// Unlike TypesInfo.TypeOf, it never returns nil.
+// Instead, it returns the Invalid type as a sentinel UnknownType value.
+func (ctx *CheckerContext) TypeOf(x ast.Expr) types.Type {
+	typ := ctx.TypesInfo.TypeOf(x)
+	if typ != nil {
+		return typ
+	}
+	// Usually it means that some incorrect type info was loaded
+	// or the analyzed package was only partially (?) correct.
+	// To avoid nil pointer panics we can return a sentinel value
+	// that will fail most type assertions as well as kind checks
+	// (if the call side expects a *types.Basic).
+	return UnknownType
+}
+
+// SizeOf returns the size of the typ in bytes.
+//
+// Unlike SizesInfo.SizeOf, it will not panic on generic types.
+func (ctx *CheckerContext) SizeOf(typ types.Type) (int64, bool) {
+	if _, ok := typ.(*types.TypeParam); ok {
+		return 0, false
+	}
+	if named, ok := typ.(*types.Named); ok && named.TypeParams() != nil {
+		return 0, false
+	}
+	return ctx.safeSizesInfoSizeof(typ)
+}
+
+// safeSizesInfoSizeof unlike SizesInfo.Sizeof will not panic on struct with generic fields.
+// it will catch a panic and recover from it, see https://github.com/go-critic/go-critic/issues/1354
+func (ctx *CheckerContext) safeSizesInfoSizeof(typ types.Type) (size int64, ok bool) {
+	ok = true
+	defer func() {
+		if r := recover(); r != nil {
+			if strings.Contains(r.(string), "assertion failed") {
+				size, ok = 0, false
+			} else {
+				panic(r)
+			}
+		}
+	}()
+
+	size = ctx.SizesInfo.Sizeof(typ)
+	return size, ok
+}
+
+func resolvePkgObjects(ctx *Context, f *ast.File) {
+	ctx.PkgObjects = make(map[*types.PkgName]string, len(f.Imports))
+
+	for _, spec := range f.Imports {
+		if spec.Name != nil {
+			obj := ctx.TypesInfo.ObjectOf(spec.Name)
+			ctx.PkgObjects[obj.(*types.PkgName)] = spec.Name.Name
+		} else {
+			obj := ctx.TypesInfo.Implicits[spec]
+			ctx.PkgObjects[obj.(*types.PkgName)] = obj.Name()
+		}
+	}
+}
+
+func resolvePkgRenames(ctx *Context, f *ast.File) {
+	ctx.PkgRenames = make(map[string]string)
+
+	for _, spec := range f.Imports {
+		if spec.Name != nil {
+			path, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				panic(err)
+			}
+			ctx.PkgRenames[path] = spec.Name.Name
+		}
+	}
+}

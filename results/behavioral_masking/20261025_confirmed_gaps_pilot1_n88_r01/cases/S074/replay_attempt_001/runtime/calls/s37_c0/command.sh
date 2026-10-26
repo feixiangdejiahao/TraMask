@@ -1,0 +1,1 @@
+cd /app && sed -n '200,340p' tengo.go

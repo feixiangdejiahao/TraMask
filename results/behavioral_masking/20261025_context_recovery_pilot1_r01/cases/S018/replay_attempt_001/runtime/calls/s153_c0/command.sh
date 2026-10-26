@@ -1,0 +1,1 @@
+cd /app && git status && git branch && python -m testtools.run discover 2>&1 | tail -4

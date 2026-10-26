@@ -1,0 +1,1 @@
+cd /app && grep -n "type Update struct" types/settings/*.go && sed -n '1,120p' types/settings/settings.go 2>/dev/null | head -120

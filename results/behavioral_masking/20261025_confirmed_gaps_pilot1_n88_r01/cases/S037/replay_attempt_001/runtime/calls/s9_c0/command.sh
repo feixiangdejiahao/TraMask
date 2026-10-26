@@ -1,0 +1,1 @@
+cd /app && for f in src/core/index.ts src/core/selectors.ts src/core/reducers.ts src/core/defaults.ts src/core/events.ts; do echo "===== $f ====="; cat "$f"; done

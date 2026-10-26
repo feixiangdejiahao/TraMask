@@ -1,0 +1,141 @@
+   330	                self._underlying.send(data)
+   331	            except EOFError:
+   332	                self.close()
+   333	                raise
+   334	
+   335	    def _read_frame(self):
+   336	        """
+   337	        Reads and returns one complete ``(ftype, channel_id, payload)`` frame
+   338	        from the underlying tube.
+   339	
+   340	        Uses short reads so that local closure can be observed promptly even
+   341	        when the underlying tube does not wake a blocked reader.
+   342	        """
+   343	        while not self._closed:
+   344	            frame = self._extract_frame()
+   345	            if frame is not None:
+   346	                return frame
+   347	
+   348	            try:
+   349	                data = self._underlying.recv(4096, timeout=0.05)
+   350	            except EOFError:
+   351	                raise
+   352	
+   353	            if data:
+   354	                self._read_buffer += data
+   355	            elif self._closed:
+   356	                break
+   357	
+   358	        raise EOFError('multiplexer is closed')
+   359	
+   360	    def _extract_frame(self):
+   361	        buf = self._read_buffer
+   362	        if len(buf) < _HEADER.size:
+   363	            return None
+   364	        length, ftype, channel_id = _HEADER.unpack(buf[:_HEADER.size])
+   365	        if length < 2:
+   366	            raise EOFError('invalid frame')
+   367	        total = _HEADER.size + (length - 2)
+   368	        if len(buf) < total:
+   369	            return None
+   370	        payload = buf[_HEADER.size:total]
+   371	        self._read_buffer = buf[total:]
+   372	        return ftype, channel_id, payload
+   373	
+   374	    def _read_loop(self):
+   375	        try:
+   376	            while True:
+   377	                ftype, channel_id, payload = self._read_frame()
+   378	                self._handle_frame(ftype, channel_id, payload)
+   379	        except EOFError:
+   380	            pass
+   381	        except Exception as e:
+   382	            log.debug('multiplexer reader error: %r', e)
+   383	        finally:
+   384	            # The underlying tube has died; propagate EOF to all channels.
+   385	            self.close()
+   386	
+   387	    def _handle_frame(self, ftype, channel_id, payload):
+   388	        if ftype == _OPEN:
+   389	            self._handle_open(channel_id)
+   390	        elif ftype == _ACK:
+   391	            self._handle_ack(channel_id)
+   392	        elif ftype == _NAK:
+   393	            self._handle_nak(channel_id)
+   394	        elif ftype == _DATA:
+   395	            self._handle_data(channel_id, payload)
+   396	        elif ftype == _CLOSE:
+   397	            self._handle_close(channel_id)
+   398	        elif ftype == _EOF:
+   399	            self._handle_eof(channel_id)
+   400	        elif ftype == _PAUSE:
+   401	            self._handle_pause(channel_id)
+   402	        elif ftype == _RESUME:
+   403	            self._handle_resume(channel_id)
+   404	
+   405	    def _handle_open(self, channel_id):
+   406	        reject = False
+   407	        with self._lock:
+   408	            if self._closed:
+   409	                return
+   410	            if channel_id in self.channels or channel_id in self._closing_ids:
+   411	                reject = True
+   412	            elif len(self.channels) >= self._max_channels:
+   413	                reject = True
+   414	            else:
+   415	                ch = MuxChannel(self, channel_id)
+   416	                self.channels[channel_id] = ch
+   417	                self._pending_accept.append(ch)
+   418	                with self._accept_cond:
+   419	                    self._accept_cond.notify_all()
+   420	
+   421	        if reject:
+   422	            try:
+   423	                self._write_frame(_NAK, channel_id)
+   424	            except EOFError:
+   425	                pass
+   426	            return
+   427	
+   428	        try:
+   429	            self._write_frame(_ACK, channel_id)
+   430	        except EOFError:
+   431	            pass
+   432	
+   433	    def _handle_ack(self, channel_id):
+   434	        with self._lock:
+   435	            ack_queue = self._open_results.pop(channel_id, None)
+   436	            if ack_queue is not None:
+   437	                try:
+   438	                    ack_queue.put_nowait(True)
+   439	                except queue.Full:
+   440	                    pass
+   441	
+   442	    def _handle_nak(self, channel_id):
+   443	        with self._lock:
+   444	            ack_queue = self._open_results.pop(channel_id, None)
+   445	            if ack_queue is not None:
+   446	                try:
+   447	                    ack_queue.put_nowait(False)
+   448	                except queue.Full:
+   449	                    pass
+   450	
+   451	    def _handle_data(self, channel_id, payload):
+   452	        ch = self._get_channel(channel_id)
+   453	        if ch is None:
+   454	            return
+   455	        send_pause = False
+   456	        with ch._cond:
+   457	            ch._recv_buffer.add(payload)
+   458	            ch._stats['bytes_received'] += len(payload)
+   459	            ch._stats['frames_received'] += 1
+   460	            if ch._recv_buffer.over_high_water and not ch._flow_paused_notified:
+   461	                ch._flow_paused_notified = True
+   462	                send_pause = True
+   463	            ch._cond.notify_all()
+   464	        if send_pause:
+   465	            try:
+   466	                self._write_frame(_PAUSE, channel_id)
+   467	            except EOFError:
+   468	                pass
+   469	
+   470	    def _handle_close(self, channel_id):

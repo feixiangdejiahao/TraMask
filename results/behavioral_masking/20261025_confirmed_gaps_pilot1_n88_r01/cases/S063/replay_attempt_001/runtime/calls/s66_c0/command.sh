@@ -1,0 +1,1 @@
+cd /app && sed -n '740,900p' pwnlib/tubes/process.py

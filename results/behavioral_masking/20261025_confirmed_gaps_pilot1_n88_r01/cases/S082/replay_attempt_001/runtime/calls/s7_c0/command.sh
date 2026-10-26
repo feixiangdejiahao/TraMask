@@ -1,0 +1,1 @@
+cd /app && grep -rn "abort" lib public testem.js --include='*.js' | head -80

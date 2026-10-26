@@ -1,0 +1,1 @@
+cd /app/types && timeout 25 go build ./... 2>&1 | head -20; echo "exit: $?"

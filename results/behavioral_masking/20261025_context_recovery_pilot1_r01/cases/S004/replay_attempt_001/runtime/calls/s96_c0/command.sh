@@ -1,0 +1,1 @@
+cd /app && ruff check aiomonitor tests && mypy aiomonitor && python -m pytest tests/ -q 2>&1 | tail -6

@@ -1,0 +1,377 @@
+class Database:
+    """
+    Wrapper for a SQLite database connection that adds a variety of useful utility methods.
+
+    To create an instance::
+
+        # create data.db file, or open existing:
+        db = Database("data.db")
+        # Create an in-memory database:
+        dB = Database(memory=True)
+
+    :param filename_or_conn: String path to a file, or a ``pathlib.Path`` object, or a
+      ``sqlite3`` connection
+    :param memory: set to ``True`` to create an in-memory database
+    :param memory_name: creates a named in-memory database that can be shared across multiple connections
+    :param recreate: set to ``True`` to delete and recreate a file database (**dangerous**)
+    :param recursive_triggers: defaults to ``True``, which sets ``PRAGMA recursive_triggers=on;`` -
+      set to ``False`` to avoid setting this pragma
+    :param tracer: set a tracer function (``print`` works for this) which will be called with
+      ``sql, parameters`` every time a SQL query is executed
+    :param use_counts_table: set to ``True`` to use a cached counts table, if available. See
+      :ref:`python_api_cached_table_counts`
+    :param use_old_upsert: set to ``True`` to force the older upsert implementation. See
+      :ref:`python_api_old_upsert`
+    :param strict: Apply STRICT mode to all created tables (unless overridden)
+    """
+
+    _counts_table_name = "_counts"
+    use_counts_table = False
+    conn: sqlite3.Connection
+
+    def __init__(
+        self,
+        filename_or_conn: Optional[Union[str, pathlib.Path, sqlite3.Connection]] = None,
+        memory: bool = False,
+        memory_name: Optional[str] = None,
+        recreate: bool = False,
+        recursive_triggers: bool = True,
+        tracer: Optional[Callable] = None,
+        use_counts_table: bool = False,
+        execute_plugins: bool = True,
+        use_old_upsert: bool = False,
+        strict: bool = False,
+    ):
+        self.memory_name = None
+        self.memory = False
+        self.use_old_upsert = use_old_upsert
+        assert (filename_or_conn is not None and (not memory and not memory_name)) or (
+            filename_or_conn is None and (memory or memory_name)
+        ), "Either specify a filename_or_conn or pass memory=True"
+        if memory_name:
+            uri = "file:{}?mode=memory&cache=shared".format(memory_name)
+            self.conn = sqlite3.connect(
+                uri,
+                uri=True,
+                check_same_thread=False,
+            )
+            self.memory = True
+            self.memory_name = memory_name
+        elif memory or filename_or_conn == ":memory:":
+            self.conn = sqlite3.connect(":memory:")
+            self.memory = True
+        elif isinstance(filename_or_conn, (str, pathlib.Path)):
+            if recreate and os.path.exists(filename_or_conn):
+                try:
+                    os.remove(filename_or_conn)
+                except OSError:
+                    # Avoid mypy and __repr__ errors, see:
+                    # https://github.com/simonw/sqlite-utils/issues/503
+                    self.conn = sqlite3.connect(":memory:")
+                    raise
+            self.conn = sqlite3.connect(str(filename_or_conn))
+        else:
+            assert not recreate, "recreate cannot be used with connections, only paths"
+            self.conn = filename_or_conn
+        self._tracer = tracer
+        if recursive_triggers:
+            self.execute("PRAGMA recursive_triggers=on;")
+        self._registered_functions: set = set()
+        self.use_counts_table = use_counts_table
+        if execute_plugins:
+            pm.hook.prepare_connection(conn=self.conn)
+        self.strict = strict
+
+    def __enter__(self) -> "Database":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[object],
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        "Close the SQLite connection, and the underlying database file"
+        self.conn.close()
+
+    @contextlib.contextmanager
+    def ensure_autocommit_off(self) -> Generator[None, None, None]:
+        """
+        Ensure autocommit is off for this database connection.
+
+        Example usage::
+
+            with db.ensure_autocommit_off():
+                # do stuff here
+
+        This will reset to the previous autocommit state at the end of the block.
+        """
+        old_isolation_level = self.conn.isolation_level
+        try:
+            self.conn.isolation_level = None
+            yield
+        finally:
+            self.conn.isolation_level = old_isolation_level
+
+    @contextlib.contextmanager
+    def tracer(
+        self, tracer: Optional[Callable[[str, Optional[Sequence]], None]] = None
+    ) -> Generator["Database", None, None]:
+        """
+        Context manager to temporarily set a tracer function - all executed SQL queries will
+        be passed to this.
+
+        The tracer function should accept two arguments: ``sql`` and ``parameters``
+
+        Example usage::
+
+            with db.tracer(print):
+                db["creatures"].insert({"name": "Cleo"})
+
+        See :ref:`python_api_tracing`.
+
+        :param tracer: Callable accepting ``sql`` and ``parameters`` arguments
+        """
+        prev_tracer = self._tracer
+        self._tracer = tracer or print
+        try:
+            yield self
+        finally:
+            self._tracer = prev_tracer
+
+    def __getitem__(self, table_name: str) -> Union["Table", "View"]:
+        """
+        ``db[table_name]`` returns a :class:`.Table` object for the table with the specified name.
+        If the table does not exist yet it will be created the first time data is inserted into it.
+
+        :param table_name: The name of the table
+        """
+        if table_name in self.view_names():
+            return self.view(table_name)
+        return self.table(table_name)
+
+    def __repr__(self) -> str:
+        return "<Database {}>".format(self.conn)
+
+    def register_function(
+        self,
+        fn: Optional[Callable] = None,
+        deterministic: bool = False,
+        replace: bool = False,
+        name: Optional[str] = None,
+    ) -> Optional[Callable[[Callable], Callable]]:
+        """
+        ``fn`` will be made available as a function within SQL, with the same name and number
+        of arguments. Can be used as a decorator::
+
+            @db.register_function
+            def upper(value):
+                return str(value).upper()
+
+        The decorator can take arguments::
+
+            @db.register_function(deterministic=True, replace=True)
+            def upper(value):
+                return str(value).upper()
+
+        See :ref:`python_api_register_function`.
+
+        :param fn: Function to register
+        :param deterministic: set ``True`` for functions that always returns the same output for a given input
+        :param replace: set ``True`` to replace an existing function with the same name - otherwise throw an error
+        :param name: name of the SQLite function - if not specified, the Python function name will be used
+        """
+
+        def register(fn: Callable) -> Callable:
+            fn_name = name or fn.__name__  # type: ignore
+            arity = len(inspect.signature(fn).parameters)
+            if not replace and (fn_name, arity) in self._registered_functions:
+                return fn
+            kwargs: Dict[str, bool] = {}
+            registered = False
+            if deterministic:
+                # Try this, but fall back if sqlite3.NotSupportedError
+                try:
+                    self.conn.create_function(
+                        fn_name, arity, fn, **dict(kwargs, deterministic=True)
+                    )
+                    registered = True
+                except sqlite3.NotSupportedError:
+                    pass
+            if not registered:
+                self.conn.create_function(fn_name, arity, fn, **kwargs)
+            self._registered_functions.add((fn_name, arity))
+            return fn
+
+        if fn is None:
+            return register
+        else:
+            register(fn)
+            return None
+
+    def register_fts4_bm25(self) -> None:
+        "Register the ``rank_bm25(match_info)`` function used for calculating relevance with SQLite FTS4."
+        self.register_function(rank_bm25, deterministic=True, replace=True)
+
+    def attach(self, alias: str, filepath: Union[str, pathlib.Path]) -> None:
+        """
+        Attach another SQLite database file to this connection with the specified alias, equivalent to::
+
+            ATTACH DATABASE 'filepath.db' AS alias
+
+        :param alias: Alias name to use
+        :param filepath: Path to SQLite database file on disk
+        """
+        attach_sql = """
+            ATTACH DATABASE '{}' AS {};
+        """.format(
+            str(pathlib.Path(filepath).resolve()), quote_identifier(alias)
+        ).strip()
+        self.execute(attach_sql)
+
+    def query(
+        self, sql: str, params: Optional[Union[Sequence, Dict[str, Any]]] = None
+    ) -> Generator[dict, None, None]:
+        """
+        Execute ``sql`` and return an iterable of dictionaries representing each row.
+
+        :param sql: SQL query to execute
+        :param params: Parameters to use in that query - an iterable for ``where id = ?``
+          parameters, or a dictionary for ``where id = :id``
+        """
+        cursor = self.execute(sql, params or tuple())
+        keys = [d[0] for d in cursor.description]
+        for row in cursor:
+            yield dict(zip(keys, row))
+
+    def execute(
+        self, sql: str, parameters: Optional[Union[Sequence, Dict[str, Any]]] = None
+    ) -> sqlite3.Cursor:
+        """
+        Execute SQL query and return a ``sqlite3.Cursor``.
+
+        :param sql: SQL query to execute
+        :param parameters: Parameters to use in that query - an iterable for ``where id = ?``
+          parameters, or a dictionary for ``where id = :id``
+        """
+        if self._tracer:
+            self._tracer(sql, parameters)
+        if parameters is not None:
+            return self.conn.execute(sql, parameters)
+        else:
+            return self.conn.execute(sql)
+
+    def executescript(self, sql: str) -> sqlite3.Cursor:
+        """
+        Execute multiple SQL statements separated by ; and return the ``sqlite3.Cursor``.
+
+        :param sql: SQL to execute
+        """
+        if self._tracer:
+            self._tracer(sql, None)
+        return self.conn.executescript(sql)
+
+    def table(self, table_name: str, **kwargs: Any) -> "Table":
+        """
+        Return a table object, optionally configured with default options.
+
+        See :ref:`reference_db_table` for option details.
+
+        :param table_name: Name of the table
+        """
+        if table_name in self.view_names():
+            raise NoTable("Table {} is actually a view".format(table_name))
+        kwargs.setdefault("strict", self.strict)
+        return Table(self, table_name, **kwargs)
+
+    def view(self, view_name: str) -> "View":
+        """
+        Return a view object.
+
+        :param view_name: Name of the view
+        """
+        if view_name not in self.view_names():
+            raise NoView("View {} does not exist".format(view_name))
+        return View(self, view_name)
+
+    def quote(self, value: str) -> str:
+        """
+        Apply SQLite string quoting to a value, including wrapping it in single quotes.
+
+        :param value: String to quote
+        """
+        # Normally we would use .execute(sql, [params]) for escaping, but
+        # occasionally that isn't available - most notable when we need
+        # to include a "... DEFAULT 'value'" in a column definition.
+        return self.execute(
+            # Use SQLite itself to correctly escape this string:
+            "SELECT quote(:value)",
+            {"value": value},
+        ).fetchone()[0]
+
+    def quote_fts(self, query: str) -> str:
+        """
+        Escape special characters in a SQLite full-text search query.
+
+        This works by surrounding each token within the query with double
+        quotes, in order to avoid words like ``NOT`` and ``OR`` having
+        special meaning as defined by the FTS query syntax here:
+
+        https://www.sqlite.org/fts5.html#full_text_query_syntax
+
+        If the query has unbalanced ``"`` characters, adds one at end.
+
+        :param query: String to escape
+        """
+        if query.count('"') % 2:
+            query += '"'
+        bits = _quote_fts_re.split(query)
+        bits = [b for b in bits if b and b != '""']
+        return " ".join(
+            '"{}"'.format(bit) if not bit.startswith('"') else bit for bit in bits
+        )
+
+    def quote_default_value(self, value: str) -> str:
+        if any(
+            [
+                str(value).startswith("'") and str(value).endswith("'"),
+                str(value).startswith('"') and str(value).endswith('"'),
+            ]
+        ):
+            return value
+
+        if str(value).upper() in ("CURRENT_TIME", "CURRENT_DATE", "CURRENT_TIMESTAMP"):
+            return value
+
+        if str(value).endswith(")"):
+            # Expr
+            return "({})".format(value)
+
+        return self.quote(value)
+
+    def table_names(self, fts4: bool = False, fts5: bool = False) -> List[str]:
+        """
+        List of string table names in this database.
+
+        :param fts4: Only return tables that are part of FTS4 indexes
+        :param fts5: Only return tables that are part of FTS5 indexes
+        """
+        where = ["type = 'table'"]
+        if fts4:
+            where.append("sql like '%USING FTS4%'")
+        if fts5:
+            where.append("sql like '%USING FTS5%'")
+        sql = "select name from sqlite_master where {}".format(" AND ".join(where))
+        return [r[0] for r in self.execute(sql).fetchall()]
+
+    def view_names(self) -> List[str]:
+        "List of string view names in this database."
+        return [
+            r[0]
+            for r in self.execute(
+                "select name from sqlite_master where type = 'view'"
+            ).fetchall()
+        ]

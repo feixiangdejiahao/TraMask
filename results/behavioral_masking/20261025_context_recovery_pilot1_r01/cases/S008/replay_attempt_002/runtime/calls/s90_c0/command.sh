@@ -1,0 +1,1 @@
+cd /app && sed -n '1,90p' backend/internal/services/api_key_service_test.go && echo "=====DATABASE TEST=====" && sed -n '1,60p' backend/internal/database/database_test.go

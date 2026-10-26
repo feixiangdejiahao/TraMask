@@ -1,0 +1,1 @@
+cd /app && nl -ba backend/internal/bootstrap/jobs_bootstrap.go | sed -n '100,260p' && echo "=====RESOURCES=====" && cat backend/resources/resources.go 2>/dev/null || find backend/resources -maxdepth 2 -type f | head -20

@@ -1,0 +1,1 @@
+cat /tmp/test_db.log | tail -50; ps aux | grep '[g]o test' | head -3

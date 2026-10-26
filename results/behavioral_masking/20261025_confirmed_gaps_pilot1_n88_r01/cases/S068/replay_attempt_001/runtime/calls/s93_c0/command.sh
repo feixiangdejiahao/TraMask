@@ -1,0 +1,1 @@
+cd /app && awk 'NR>=890 && NR<=1345 && length > 100 {print NR": "length": "$0}' sqlite_utils/db.py | head -20 && echo "=== cli ===" && awk 'NR>=900 && NR<=1650 && length > 100 {print NR": "length": "$0}' sqlite_utils/cli.py | head -30

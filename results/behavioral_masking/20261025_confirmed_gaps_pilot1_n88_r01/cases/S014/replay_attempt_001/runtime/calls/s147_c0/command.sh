@@ -1,0 +1,1 @@
+cd /app && git add -A && git commit -m "feat(core,prompts): add async options support to autocomplete" && git log --oneline -3 && git status

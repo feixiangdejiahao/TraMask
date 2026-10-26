@@ -1,0 +1,1 @@
+python -c "import fixtures, testtools, stestr; print('ok')" && cat .stestr.conf && ls tests/unit/core tests/unit/formatters

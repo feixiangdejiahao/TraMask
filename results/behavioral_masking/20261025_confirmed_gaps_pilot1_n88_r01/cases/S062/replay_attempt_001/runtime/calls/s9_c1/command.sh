@@ -1,0 +1,1 @@
+ls -la tests/ 2>/dev/null; find . -path ./.git -prune -o -name 'test_*.py' -print | head -40

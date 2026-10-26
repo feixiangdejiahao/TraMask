@@ -1,0 +1,1 @@
+cd /app && sed -n '423,492p' backend/internal/services/container_service.go

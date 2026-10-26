@@ -1,0 +1,1 @@
+cd /app && ls tests/*_tests.js tests/**/*_tests.js | wc -l && ls tests/*_tests.js tests/**/*_tests.js

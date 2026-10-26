@@ -1,0 +1,1 @@
+cd /app && sed -n '1,460p' public/testem/jasmine2_adapter.js && echo '--- jasmine adapter ---' && sed -n '1,320p' public/testem/jasmine_adapter.js

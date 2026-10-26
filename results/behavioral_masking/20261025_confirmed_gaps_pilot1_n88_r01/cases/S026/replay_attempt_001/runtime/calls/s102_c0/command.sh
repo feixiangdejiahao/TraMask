@@ -1,0 +1,1 @@
+cd /app && ls checkers/analyzer/ && find . -name '*_test.go' | grep -v testdata | grep -v linttest | xargs grep -ln "brokenDocLink" 2>/dev/null; echo "--- analyzer tests? ---"; find . -path ./checkers/testdata -prune -o -name '*_test.go' -print | xargs grep -l "Analyzer" 2>/dev/null | head

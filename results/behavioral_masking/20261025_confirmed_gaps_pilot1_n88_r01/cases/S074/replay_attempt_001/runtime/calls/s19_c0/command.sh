@@ -1,0 +1,1 @@
+cd /app && grep -rn "export\|Export" vm.go objects.go compiler.go | head -40

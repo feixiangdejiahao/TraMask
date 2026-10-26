@@ -1,0 +1,267 @@
+diff --git a/bandit/cli/main.py b/bandit/cli/main.py
+index d7dba2e..72ca10e 100644
+--- a/bandit/cli/main.py
++++ b/bandit/cli/main.py
+@@ -333,7 +333,7 @@ def main():
+         "--ignore-nosec",
+         dest="ignore_nosec",
+         action="store_true",
+-        help="do not skip lines with # nosec comments",
++        help="do not skip lines with # nosec comments or directives",
+     )
+     parser.add_argument(
+         "-x",
+diff --git a/bandit/core/manager.py b/bandit/core/manager.py
+index cc0e345..e2f55ed 100644
+--- a/bandit/core/manager.py
++++ b/bandit/core/manager.py
+@@ -8,9 +8,7 @@ import io
+ import json
+ import logging
+ import os
+-import re
+ import sys
+-import tokenize
+ import traceback
+ 
+ from rich import progress
+@@ -20,12 +18,11 @@ from bandit.core import extension_loader
+ from bandit.core import issue
+ from bandit.core import meta_ast as b_meta_ast
+ from bandit.core import metrics
++from bandit.core import nosec
+ from bandit.core import node_visitor as b_node_visitor
+ from bandit.core import test_set as b_test_set
+ 
+ LOG = logging.getLogger(__name__)
+-NOSEC_COMMENT = re.compile(r"#\s*nosec:?\s*(?P<tests>[^#]+)?#?")
+-NOSEC_COMMENT_TESTS = re.compile(r"(?:(B\d+|[a-z\d_]+),?)+", re.IGNORECASE)
+ PROGRESS_THRESHOLD = 50
+ 
+ 
+@@ -305,20 +302,11 @@ class BanditManager:
+             lines = data.splitlines()
+             self.metrics.begin(fname)
+             self.metrics.count_locs(lines)
+-            # nosec_lines is a dict of line number -> set of tests to ignore
+-            #                                         for the line
++            # nosec_lines is a dict of line number -> suppression for the line
+             nosec_lines = dict()
+-            try:
+-                fdata.seek(0)
+-                tokens = tokenize.tokenize(fdata.readline)
+-
+-                if not self.ignore_nosec:
+-                    for toktype, tokval, (lineno, _), _, _ in tokens:
+-                        if toktype == tokenize.COMMENT:
+-                            nosec_lines[lineno] = _parse_nosec_comment(tokval)
+-
+-            except tokenize.TokenError:
+-                pass
++            if not self.ignore_nosec:
++                enabled_tests = self._get_enabled_tests()
++                nosec_lines = nosec.build_nosec_lines(data, enabled_tests)
+             score = self._execute_ast_visitor(fname, fdata, data, nosec_lines)
+             self.scores.append(score)
+             self.metrics.count_issues([score])
+@@ -343,6 +331,20 @@ class BanditManager:
+             LOG.debug("  Exception string: %s", e)
+             LOG.debug("  Exception traceback: %s", traceback.format_exc())
+ 
++    def _get_enabled_tests(self):
++        """Return the set of test IDs currently enabled for this manager."""
++        enabled = set()
++        for plugin in self.b_ts.plugins:
++            if (
++                hasattr(plugin.plugin, "_config")
++                and plugin.plugin._test_id == "B001"
++            ):
++                for tests in plugin.plugin._config.values():
++                    enabled.update(t["id"] for t in tests)
++            else:
++                enabled.add(plugin.plugin._test_id)
++        return enabled
++
+     def _execute_ast_visitor(self, fname, fdata, data, nosec_lines):
+         """Execute AST parse on each file
+ 
+@@ -459,41 +461,3 @@ def _find_candidate_matches(unmatched_issues, results_list):
+         ]
+ 
+     return issue_candidates
+-
+-
+-def _find_test_id_from_nosec_string(extman, match):
+-    test_id = extman.check_id(match)
+-    if test_id:
+-        return match
+-    # Finding by short_id didn't work, let's check the test name
+-    test_id = extman.get_test_id(match)
+-    if not test_id:
+-        # Name and short id didn't work:
+-        LOG.warning(
+-            "Test in comment: %s is not a test name or id, ignoring", match
+-        )
+-    return test_id  # We want to return None or the string here regardless
+-
+-
+-def _parse_nosec_comment(comment):
+-    found_no_sec_comment = NOSEC_COMMENT.search(comment)
+-    if not found_no_sec_comment:
+-        # there was no nosec comment
+-        return None
+-
+-    matches = found_no_sec_comment.groupdict()
+-    nosec_tests = matches.get("tests", set())
+-
+-    # empty set indicates that there was a nosec comment without specific
+-    # test ids or names
+-    test_ids = set()
+-    if nosec_tests:
+-        extman = extension_loader.MANAGER
+-        # lookup tests by short code or name
+-        for test in NOSEC_COMMENT_TESTS.finditer(nosec_tests):
+-            test_match = test.group(1)
+-            test_id = _find_test_id_from_nosec_string(extman, test_match)
+-            if test_id:
+-                test_ids.add(test_id)
+-
+-    return test_ids
+diff --git a/bandit/core/tester.py b/bandit/core/tester.py
+index 32642a5..163d8d7 100644
+--- a/bandit/core/tester.py
++++ b/bandit/core/tester.py
+@@ -7,6 +7,7 @@ import logging
+ import warnings
+ 
+ from bandit.core import constants
++from bandit.core import nosec as b_nosec
+ from bandit.core import context as b_context
+ from bandit.core import utils
+ 
+@@ -53,7 +54,7 @@ class BanditTester:
+                     result = test(context)
+ 
+                 if result is not None:
+-                    nosec_tests_to_skip = self._get_nosecs_from_contexts(
++                    nosec_suppression = self._get_nosecs_from_contexts(
+                         temp_context, test_result=result
+                     )
+ 
+@@ -77,16 +78,16 @@ class BanditTester:
+                         result.test_id = test._test_id
+ 
+                     # don't skip the test if there was no nosec comment
+-                    if nosec_tests_to_skip is not None:
+-                        # If the set is empty then it means that nosec was
+-                        # used without test number -> update nosecs counter.
+-                        # If the test id is in the set of tests to skip,
+-                        # log and increment the skip by test count.
+-                        if not nosec_tests_to_skip:
++                    if nosec_suppression is not None:
++                        # A blanket suppression means nosec was used without
++                        # test number -> update nosecs counter.  Otherwise,
++                        # if the test id is in the set of tests to skip, log
++                        # and increment the skip by test count.
++                        if nosec_suppression.is_blanket:
+                             LOG.debug("skipped, nosec without test number")
+                             self.metrics.note_nosec()
+                             continue
+-                        if result.test_id in nosec_tests_to_skip:
++                        if result.test_id in nosec_suppression.tests:
+                             LOG.debug(
+                                 f"skipped, nosec for test {result.test_id}"
+                             )
+@@ -103,12 +104,13 @@ class BanditTester:
+                     val = constants.RANKING_VALUES[result.confidence]
+                     scores["CONFIDENCE"][con] += val
+                 else:
+-                    nosec_tests_to_skip = self._get_nosecs_from_contexts(
++                    nosec_suppression = self._get_nosecs_from_contexts(
+                         temp_context
+                     )
+                     if (
+-                        nosec_tests_to_skip
+-                        and test._test_id in nosec_tests_to_skip
++                        nosec_suppression is not None
++                        and nosec_suppression.is_specific
++                        and test._test_id in nosec_suppression.tests
+                     ):
+                         LOG.warning(
+                             f"nosec encountered ({test._test_id}), but no "
+@@ -125,33 +127,22 @@ class BanditTester:
+         return scores
+ 
+     def _get_nosecs_from_contexts(self, context, test_result=None):
+-        """Use context and optional test result to get set of tests to skip.
++        """Use context and optional test result to get the suppression.
++
+         :param context: temp context
+         :param test_result: optional test result
+-        :return: set of tests to skip for the line based on contexts
++        :return: Suppression for the finding, or None if no suppression
++                 applies
+         """
+-        nosec_tests_to_skip = set()
+-        base_tests = (
+-            self.nosec_lines.get(test_result.lineno, None)
+-            if test_result
+-            else None
+-        )
+-        context_tests = utils.get_nosec(self.nosec_lines, context)
+-
+-        # if both are none there were no comments
+-        # this is explicitly different from being empty.
+-        # empty set indicates blanket nosec comment without
+-        # individual test names or ids
+-        if base_tests is None and context_tests is None:
+-            nosec_tests_to_skip = None
+-
+-        # combine tests from current line and context line
+-        if base_tests is not None:
+-            nosec_tests_to_skip.update(base_tests)
+-        if context_tests is not None:
+-            nosec_tests_to_skip.update(context_tests)
+-
+-        return nosec_tests_to_skip
++        suppressions = []
++        if test_result:
++            base = self.nosec_lines.get(test_result.lineno, None)
++            if base is not None:
++                suppressions.append(base)
++        context_suppression = utils.get_nosec(self.nosec_lines, context)
++        if context_suppression is not None:
++            suppressions.append(context_suppression)
++        return b_nosec.combine_suppressions(suppressions)
+ 
+     @staticmethod
+     def report_error(test, context, error):
+diff --git a/bandit/core/utils.py b/bandit/core/utils.py
+index 7feb214..ca8638d 100644
+--- a/bandit/core/utils.py
++++ b/bandit/core/utils.py
+@@ -391,8 +391,20 @@ def check_ast_node(name):
+ 
+ 
+ def get_nosec(nosec_lines, context):
++    """Get the suppression applicable to a context, if any.
++
++    All suppressions applying to any line in the context's line range are
++    combined.  A blanket suppression dominates any specific ones.
++
++    :param nosec_lines: mapping of line number to Suppression
++    :param context: context dict with a ``linerange``
++    :return: a Suppression, or None if no suppression applies
++    """
++    from bandit.core import nosec
++
++    suppressions = []
+     for lineno in context["linerange"]:
+-        nosec = nosec_lines.get(lineno, None)
+-        if nosec is not None:
+-            return nosec
+-    return None
++        suppression = nosec_lines.get(lineno, None)
++        if suppression is not None:
++            suppressions.append(suppression)
++    return nosec.combine_suppressions(suppressions)

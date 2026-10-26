@@ -1,0 +1,1 @@
+cd /app && sed -n '1,160p' checkers/internal/linttest/linttest.go && echo "===== testdata deprecated =====" && ls -la checkers/testdata/deprecatedComment/ && cat checkers/testdata/deprecatedComment/*.go | head -80

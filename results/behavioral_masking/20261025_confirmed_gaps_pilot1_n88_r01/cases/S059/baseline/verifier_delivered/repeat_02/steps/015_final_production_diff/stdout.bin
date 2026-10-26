@@ -1,0 +1,575 @@
+diff --git a/batch.go b/batch.go
+index f439133a..6070a842 100644
+--- a/batch.go
++++ b/batch.go
+@@ -371,6 +371,21 @@ type batchInternal struct {
+ 
+ 	commitErr error
+ 
++	// Durability tracking state, populated for Sync commits (when WAL syncing is
++	// requested). These fields are zeroed when the batch is reset.
++	syncCommit    bool
++	syncPrepared  bool
++	durableSeqNum base.SeqNum
++	durableJobID  int64
++	correlationID uint64
++	batchSize     int
++	keyCount      uint32
++	applyStart    crtime.Mono
++	applyDuration time.Duration
++	syncStart     crtime.Mono
++	syncDuration  time.Duration
++	durableFired  atomic.Bool
++
+ 	// Position bools together to reduce the sizeof the struct.
+ 
+ 	// ingestedSSTBatch indicates that the batch contains one or more key kinds
+@@ -1704,13 +1719,17 @@ func (b *Batch) Reader() batchrepr.Reader {
+ func (b *Batch) SyncWait() error {
+ 	now := crtime.NowMono()
+ 	b.fsyncWait.Wait()
+-	if b.commitErr != nil {
+-		b.db = nil // prevent batch reuse on error
+-	}
++	err := b.commitErr
+ 	waitDuration := now.Elapsed()
+ 	b.commitStats.CommitWaitDuration += waitDuration
+ 	b.commitStats.TotalDuration += waitDuration
+-	return b.commitErr
++	if b.db != nil {
++		b.db.finishBatchDurable(b)
++	}
++	if err != nil {
++		b.db = nil // prevent batch reuse on error
++	}
++	return err
+ }
+ 
+ // CommitStats returns stats related to committing the batch. Should be called
+diff --git a/commit.go b/commit.go
+index c86e378b..5c71ed5c 100644
+--- a/commit.go
++++ b/commit.go
+@@ -140,6 +140,9 @@ type commitEnv struct {
+ 	// the memtable the batch should be applied to. Serial execution enforced by
+ 	// commitPipeline.mu.
+ 	write func(b *Batch, wg *sync.WaitGroup, err *error) (*memTable, error)
++	// batchDurable is invoked when a Sync commit has completed both applying to
++	// the memtable and syncing the WAL. It is invoked even on WAL sync failure.
++	batchDurable func(b *Batch)
+ }
+ 
+ // A commitPipeline manages the stages of committing a set of mutations
+@@ -248,11 +251,16 @@ type commitPipeline struct {
+ 	// The mutex to use for synchronizing access to logSeqNum and serializing
+ 	// calls to commitEnv.write().
+ 	mu sync.Mutex
++
++	// batchDurable is invoked when a Sync commit has completed both applying to
++	// the memtable and syncing the WAL. It is invoked even on WAL sync failure.
++	batchDurable func(b *Batch)
+ }
+ 
+ func newCommitPipeline(env commitEnv) *commitPipeline {
+ 	p := &commitPipeline{
+-		env: env,
++		env:          env,
++		batchDurable: env.batchDurable,
+ 		// The capacity of both commitQueue.slots and syncQueue.slots is set to
+ 		// record.SyncConcurrency, which also determines the value of these
+ 		// semaphores. We used to have a single semaphore, which required that the
+@@ -288,6 +296,9 @@ func (p *commitPipeline) directWrite(b *Batch) error {
+ 	_, err := p.env.write(b, &syncWG, &syncErr)
+ 	syncWG.Wait()
+ 	err = firstError(err, syncErr)
++	if p.batchDurable != nil {
++		p.batchDurable(b)
++	}
+ 	return err
+ }
+ 
+@@ -348,6 +359,10 @@ func (p *commitPipeline) Commit(b *Batch, syncWAL bool, noSyncWait bool) error {
+ 	// b.commitErr. We will read b.commitErr in Batch.SyncWait after the
+ 	// LogWriter is done writing.
+ 
++	if syncWAL && !noSyncWait && p.batchDurable != nil {
++		p.batchDurable(b)
++	}
++
+ 	b.commitStats.TotalDuration = commitStartTime.Elapsed()
+ 
+ 	return err
+diff --git a/db.go b/db.go
+index d8b443ec..db8ad489 100644
+--- a/db.go
++++ b/db.go
+@@ -301,6 +301,10 @@ type DB struct {
+ 
+ 	commit *commitPipeline
+ 
++	// durabilityTracker tracks the durability state of Sync commits and is used
++	// to implement the DB durability wait APIs. It is non-nil for every DB.
++	durabilityTracker *durabilityTracker
++
+ 	// readState provides access to the state needed for reading without needing
+ 	// to acquire DB.mu.
+ 	readState struct {
+@@ -805,6 +809,7 @@ func (d *DB) applyInternal(batch *Batch, opts *WriteOptions, noSyncWait bool) er
+ 	if sync && d.opts.DisableWAL {
+ 		return errors.New("pebble: WAL disabled")
+ 	}
++	batch.correlationID = opts.GetCommitCorrelationID()
+ 
+ 	if fmv := d.FormatMajorVersion(); fmv < batch.minimumFormatMajorVersion {
+ 		panic(errors.AssertionFailedf(
+@@ -855,7 +860,9 @@ func (d *DB) commitApply(b *Batch, mem *memTable) error {
+ 		// This is a large batch which was already added to the immutable queue.
+ 		return nil
+ 	}
++	b.applyStart = crtime.NowMono()
+ 	err := mem.apply(b, b.SeqNum())
++	b.applyDuration = b.applyStart.Elapsed()
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -890,6 +897,32 @@ func (d *DB) commitWrite(b *Batch, syncWG *sync.WaitGroup, syncErr *error) (*mem
+ 	var size int64
+ 	repr := b.Repr()
+ 
++	var syncOpts wal.SyncOptions
++	if syncWG != nil {
++		// This is a Sync commit: prepare the durability tracking state and
++		// arrange for the durability tracker to be notified when the WAL sync
++		// completes.
++		if !b.syncPrepared {
++			b.syncPrepared = true
++			b.syncCommit = true
++			b.durableSeqNum = b.SeqNum()
++			b.durableJobID = d.durabilityTracker.nextJobID(b.durableSeqNum)
++			b.batchSize = len(repr)
++			b.keyCount = b.Count()
++			b.syncStart = crtime.NowMono()
++		}
++		syncOpts = wal.SyncOptions{
++			Done:           syncWG,
++			Err:            syncErr,
++			OnSyncComplete: d.batchSyncCompleteCallback(b),
++		}
++	}
++	// Large flushable batches are not applied to a memtable; their "apply" work
++	// is the insertion into the flushable queue in makeRoomForWrite.
++	if b.flushable != nil {
++		b.applyStart = crtime.NowMono()
++	}
++
+ 	if b.flushable != nil {
+ 		// We have a large batch. Such batches are special in that they don't get
+ 		// added to the memtable, and are instead inserted into the queue of
+@@ -903,7 +936,7 @@ func (d *DB) commitWrite(b *Batch, syncWG *sync.WaitGroup, syncErr *error) (*mem
+ 		b.flushable.setSeqNum(b.SeqNum())
+ 		if !d.opts.DisableWAL {
+ 			var err error
+-			size, err = d.mu.log.writer.WriteRecord(repr, wal.SyncOptions{Done: syncWG, Err: syncErr}, b)
++			size, err = d.mu.log.writer.WriteRecord(repr, syncOpts, b)
+ 			if err != nil {
+ 				panic(err)
+ 			}
+@@ -934,6 +967,9 @@ func (d *DB) commitWrite(b *Batch, syncWG *sync.WaitGroup, syncErr *error) (*mem
+ 				err = d.makeRoomForWrite(b)
+ 				mem = d.mu.mem.mutable
+ 			}()
++			if b.flushable != nil {
++				b.applyDuration = b.applyStart.Elapsed()
++			}
+ 		}
+ 	}
+ 	if err != nil {
+@@ -945,7 +981,7 @@ func (d *DB) commitWrite(b *Batch, syncWG *sync.WaitGroup, syncErr *error) (*mem
+ 	d.logBytesIn.Add(uint64(len(repr)))
+ 
+ 	if b.flushable == nil {
+-		size, err = d.mu.log.writer.WriteRecord(repr, wal.SyncOptions{Done: syncWG, Err: syncErr}, b)
++		size, err = d.mu.log.writer.WriteRecord(repr, syncOpts, b)
+ 		if err != nil {
+ 			panic(err)
+ 		}
+@@ -955,6 +991,16 @@ func (d *DB) commitWrite(b *Batch, syncWG *sync.WaitGroup, syncErr *error) (*mem
+ 	return mem, err
+ }
+ 
++// batchSyncCompleteCallback returns a callback that is invoked by the WAL
++// writer when the WAL sync for a Sync commit completes, whether successfully or
++// with an error. The callback is invoked before the commit's WaitGroup is
++// signaled, so the batch has not yet been released by the committing goroutine.
++func (d *DB) batchSyncCompleteCallback(b *Batch) func() {
++	return func() {
++		d.durabilityTracker.onBatchSyncComplete(b)
++	}
++}
++
+ type iterAlloc struct {
+ 	keyBuf              []byte    `invariants:"reused"`
+ 	boundsBuf           [2][]byte `invariants:"reused"`
+@@ -1570,6 +1616,10 @@ func (d *DB) Close() error {
+ 	d.closed.Store(errors.WithStack(ErrClosed))
+ 	close(d.closedCh)
+ 	d.bgCtxCancel()
++	// Unblock any goroutines waiting for durability with ErrClosed.
++	if d.durabilityTracker != nil {
++		d.durabilityTracker.close()
++	}
+ 
+ 	defer d.cacheHandle.Close()
+ 
+@@ -2035,6 +2085,10 @@ func (d *DB) Metrics() *Metrics {
+ 
+ 	d.mu.Unlock()
+ 
++	if d.durabilityTracker != nil && d.durabilityTracker.batchDurableConfigured {
++		metrics.DurableCommitCount, metrics.DurableCommitDuration = d.durabilityTracker.durableMetrics()
++	}
++
+ 	// The table disk usage is due to physical tables plus backings for virtual tables.
+ 	tableDiskUsage := d.tableDiskUsageAnnotator.MultiLevelAnnotation(vers.Levels[:])
+ 	metrics.Table.Physical.Live.Local = tableDiskUsage.Local.Physical
+diff --git a/event.go b/event.go
+index 8400b94c..0bbd0a86 100644
+--- a/event.go
++++ b/event.go
+@@ -920,11 +920,54 @@ func (k APIMisuseKind) String() string {
+ // excessive amount of time as they are invoked synchronously by the DB and may
+ // block continued DB work. For a similar reason it is advisable to not perform
+ // any synchronous calls back into the DB.
++// BatchDurableInfo contains the information for a BatchDurable event, which is
++// fired after the WAL sync for a Sync commit completes.
++type BatchDurableInfo struct {
++	// JobID is an identifier for the commit job. It can be used with
++	// DB.WaitForJobDurability to wait for the commit to become durable.
++	JobID int
++	// SeqNum is the sequence number of the first record in the batch.
++	SeqNum base.SeqNum
++	// Err is non-nil if the WAL sync failed.
++	Err error
++	// ApplyDuration is the wall-clock duration spent applying the batch to the
++	// memtable.
++	ApplyDuration time.Duration
++	// SyncDuration is the wall-clock duration spent syncing the WAL.
++	SyncDuration time.Duration
++	// CorrelationID is the value of WriteOptions.CommitCorrelationID for the
++	// commit.
++	CorrelationID uint64
++	// BatchSize is the encoded size of the batch in bytes.
++	BatchSize int
++	// KeyCount is the number of records in the batch.
++	KeyCount uint32
++}
++
++func (i BatchDurableInfo) String() string {
++	return redact.StringWithoutMarkers(i)
++}
++
++// SafeFormat implements redact.SafeFormatter.
++func (i BatchDurableInfo) SafeFormat(w redact.SafePrinter, _ rune) {
++	if i.Err != nil {
++		w.Printf("[JOB %d] batch durable error: %s", redact.Safe(i.JobID), i.Err)
++		return
++	}
++	w.Printf("[JOB %d] batch durable seqnum=%d sync=%s apply=%s",
++		redact.Safe(i.JobID), redact.Safe(i.SeqNum), redact.Safe(i.SyncDuration),
++		redact.Safe(i.ApplyDuration))
++}
++
+ type EventListener struct {
+ 	// BackgroundError is invoked whenever an error occurs during a background
+ 	// operation such as flush or compaction.
+ 	BackgroundError func(error)
+ 
++	// BatchDurable is invoked after the WAL sync for a Sync commit completes.
++	// It is invoked even if the WAL sync fails.
++	BatchDurable func(BatchDurableInfo)
++
+ 	// BlobFileCreated is invoked after a blob file has been created.
+ 	BlobFileCreated func(BlobFileCreateInfo)
+ 
+@@ -1036,6 +1079,9 @@ func (l *EventListener) EnsureDefaults(logger Logger) {
+ 			l.BackgroundError = func(error) {}
+ 		}
+ 	}
++	if l.BatchDurable == nil {
++		l.BatchDurable = func(info BatchDurableInfo) {}
++	}
+ 	if l.BlobFileCreated == nil {
+ 		l.BlobFileCreated = func(info BlobFileCreateInfo) {}
+ 	}
+@@ -1133,6 +1179,7 @@ func MakeLoggingEventListener(logger Logger) EventListener {
+ 		BackgroundError: func(err error) {
+ 			logger.Errorf("background error: %s", err)
+ 		},
++		BatchDurable: func(info BatchDurableInfo) {},
+ 		BlobFileCreated: func(info BlobFileCreateInfo) {
+ 			logger.Infof("%s", info)
+ 		},
+@@ -1223,6 +1270,14 @@ func TeeEventListener(a, b EventListener) EventListener {
+ 			a.BackgroundError(err)
+ 			b.BackgroundError(err)
+ 		},
++		BatchDurable: func(info BatchDurableInfo) {
++			if a.BatchDurable != nil {
++				a.BatchDurable(info)
++			}
++			if b.BatchDurable != nil {
++				b.BatchDurable(info)
++			}
++		},
+ 		BlobFileCreated: func(info BlobFileCreateInfo) {
+ 			a.BlobFileCreated(info)
+ 			b.BlobFileCreated(info)
+diff --git a/metrics.go b/metrics.go
+index a1ddcd65..eb3a2e6c 100644
+--- a/metrics.go
++++ b/metrics.go
+@@ -375,6 +375,15 @@ type Metrics struct {
+ 
+ 	WALMetrics WALMetrics
+ 
++	// DurableCommitCount is the number of Sync commits whose WAL sync completed
++	// successfully. It is only accumulated when EventListener.BatchDurable is
++	// configured.
++	DurableCommitCount uint64
++	// DurableCommitDuration is the cumulative time spent waiting for WAL syncs
++	// to complete. It is only accumulated when EventListener.BatchDurable is
++	// configured.
++	DurableCommitDuration time.Duration
++
+ 	CategoryStats []block.CategoryStatsAggregate
+ 
+ 	SecondaryCacheMetrics SecondaryCacheMetrics
+diff --git a/open.go b/open.go
+index 3edf11ed..018f3c34 100644
+--- a/open.go
++++ b/open.go
+@@ -221,11 +221,13 @@ func Open(dirname string, opts *Options) (db *DB, err error) {
+ 		}
+ 	}()
+ 
++	d.durabilityTracker = newDurabilityTracker(opts.batchDurableConfigured)
+ 	d.commit = newCommitPipeline(commitEnv{
+ 		logSeqNum:     &d.mu.versions.logSeqNum,
+ 		visibleSeqNum: &d.mu.versions.visibleSeqNum,
+ 		apply:         d.commitApply,
+ 		write:         d.commitWrite,
++		batchDurable:  d.finishBatchDurable,
+ 	})
+ 	d.mu.nextJobID = 1
+ 	d.mu.mem.nextSize = min(opts.MemTableSize, initialMemTableSize)
+diff --git a/options.go b/options.go
+index 5733690f..3f66c597 100644
+--- a/options.go
++++ b/options.go
+@@ -405,6 +405,12 @@ type WriteOptions struct {
+ 	//
+ 	// The default value is true.
+ 	Sync bool
++
++	// CommitCorrelationID is an optional user-provided identifier that is
++	// propagated to EventListener.BatchDurable notifications for the commit of
++	// this write. It can be used to correlate durable commit callbacks with the
++	// write that triggered them.
++	CommitCorrelationID uint64
+ }
+ 
+ // Sync specifies the default write options for writes which synchronize to
+@@ -420,6 +426,15 @@ func (o *WriteOptions) GetSync() bool {
+ 	return o == nil || o.Sync
+ }
+ 
++// GetCommitCorrelationID returns the CommitCorrelationID value or 0 if the
++// receiver is nil.
++func (o *WriteOptions) GetCommitCorrelationID() uint64 {
++	if o == nil {
++		return 0
++	}
++	return o.CommitCorrelationID
++}
++
+ // LevelOptions holds the optional per-level parameters.
+ type LevelOptions struct {
+ 	// BlockRestartInterval is the number of keys between restart points
+@@ -1176,6 +1191,14 @@ type Options struct {
+ 
+ 	// private options are only used by internal tests or are used internally
+ 	// for facilitating upgrade paths of unconfigurable functionality.
++	// batchDurableConfigured records whether EventListener.BatchDurable was
++	// configured by the user before EnsureDefaults installed a no-op handler. It
++	// is used to decide whether to accumulate durable commit metrics.
++	batchDurableConfigured bool
++	// batchDurableConfiguredSet records whether batchDurableConfigured has been
++	// computed.
++	batchDurableConfiguredSet bool
++
+ 	private struct {
+ 		// disableDeleteOnlyCompactions prevents the scheduling of delete-only
+ 		// compactions that drop sstables wholy covered by range tombstones or
+@@ -1678,6 +1701,10 @@ func (o *Options) EnsureDefaults() {
+ 	if o.EventListener == nil {
+ 		o.EventListener = &EventListener{}
+ 	}
++	if !o.batchDurableConfiguredSet {
++		o.batchDurableConfigured = o.EventListener.BatchDurable != nil
++		o.batchDurableConfiguredSet = true
++	}
+ 	o.EventListener.EnsureDefaults(o.Logger)
+ 	if o.MaxManifestFileSize == 0 {
+ 		o.MaxManifestFileSize = 128 << 20 // 128 MB
+@@ -1794,10 +1821,13 @@ func (o *Options) WithFSDefaults() {
+ // AddEventListener adds the provided event listener to the Options, in addition
+ // to any existing event listener.
+ func (o *Options) AddEventListener(l EventListener) {
++	configured := l.BatchDurable != nil
+ 	if o.EventListener != nil {
+ 		l = TeeEventListener(l, *o.EventListener)
+ 	}
+ 	o.EventListener = &l
++	o.batchDurableConfigured = o.batchDurableConfigured || configured
++	o.batchDurableConfiguredSet = true
+ }
+ 
+ // Clone creates a shallow-copy of the supplied options.
+diff --git a/record/log_writer.go b/record/log_writer.go
+index 0b465736..bb766b7f 100644
+--- a/record/log_writer.go
++++ b/record/log_writer.go
+@@ -50,8 +50,9 @@ const (
+ )
+ 
+ type syncSlot struct {
+-	wg  *sync.WaitGroup
+-	err *error
++	wg       *sync.WaitGroup
++	err      *error
++	callback func()
+ }
+ 
+ // syncQueue is a lock-free fixed-size single-producer, single-consumer
+@@ -93,7 +94,7 @@ func (q *syncQueue) unpack(ptrs uint64) (head, tail uint32) {
+ 	return head, tail
+ }
+ 
+-func (q *syncQueue) push(wg *sync.WaitGroup, err *error) {
++func (q *syncQueue) push(wg *sync.WaitGroup, err *error, callback func()) {
+ 	ptrs := q.headTail.Load()
+ 	head, tail := q.unpack(ptrs)
+ 	if (tail+uint32(len(q.slots)))&(1<<dequeueBits-1) == head {
+@@ -103,6 +104,7 @@ func (q *syncQueue) push(wg *sync.WaitGroup, err *error) {
+ 	slot := &q.slots[head&uint32(len(q.slots)-1)]
+ 	slot.wg = wg
+ 	slot.err = err
++	slot.callback = callback
+ 
+ 	// Increment head. This passes ownership of slot to dequeue and acts as a
+ 	// store barrier for writing the slot.
+@@ -150,13 +152,18 @@ func (q *syncQueue) pop(head, tail uint32, err error, queueSemChan chan struct{}
+ 			return errors.Errorf("nil waiter at %d", errors.Safe(tail&uint32(len(q.slots)-1)))
+ 		}
+ 		*slot.err = err
++		callback := slot.callback
+ 		slot.wg = nil
+ 		slot.err = nil
++		slot.callback = nil
+ 		// We need to bump the tail count before releasing the queueSemChan
+ 		// semaphore as releasing the semaphore can cause a blocked goroutine to
+ 		// acquire the semaphore and enqueue before we've "freed" space in the
+ 		// queue.
+ 		q.headTail.Add(1)
++		if callback != nil {
++			callback()
++		}
+ 		wg.Done()
+ 		// Is always non-nil in production, unless using wal package for WAL
+ 		// failover.
+@@ -215,7 +222,7 @@ var _ pendingSyncs = &pendingSyncsWithSyncQueue{}
+ 
+ func (q *pendingSyncsWithSyncQueue) push(ps PendingSync) {
+ 	ps2 := ps.(*pendingSyncForSyncQueue)
+-	q.syncQueue.push(ps2.wg, ps2.err)
++	q.syncQueue.push(ps2.wg, ps2.err, ps2.callback)
+ }
+ 
+ func (q *pendingSyncsWithSyncQueue) snapshotForPop() pendingSyncsSnapshot {
+@@ -244,8 +251,9 @@ func (s *syncQueueSnapshot) empty() bool {
+ 
+ // The implementation of pendingSync in standalone mode.
+ type pendingSyncForSyncQueue struct {
+-	wg  *sync.WaitGroup
+-	err *error
++	wg       *sync.WaitGroup
++	err      *error
++	callback func()
+ }
+ 
+ func (ps *pendingSyncForSyncQueue) syncRequested() bool {
+@@ -961,10 +969,20 @@ func (w *LogWriter) WriteRecord(p []byte) (int64, error) {
+ // External synchronisation provided by commitPipeline.mu.
+ func (w *LogWriter) SyncRecord(
+ 	p []byte, wg *sync.WaitGroup, err *error,
++) (logSize int64, err2 error) {
++	return w.SyncRecordWithCallback(p, wg, err, nil)
++}
++
++// SyncRecordWithCallback is like SyncRecord, but the provided callback is
++// invoked when the requested sync completes, after err has been set and before
++// the WaitGroup is signaled. The callback must be nil if wg is nil.
++func (w *LogWriter) SyncRecordWithCallback(
++	p []byte, wg *sync.WaitGroup, err *error, callback func(),
+ ) (logSize int64, err2 error) {
+ 	w.pendingSyncForSyncQueueBacking = pendingSyncForSyncQueue{
+-		wg:  wg,
+-		err: err,
++		wg:       wg,
++		err:      err,
++		callback: callback,
+ 	}
+ 	return w.SyncRecordGeneralized(p, &w.pendingSyncForSyncQueueBacking)
+ }
+diff --git a/wal/failover_writer.go b/wal/failover_writer.go
+index 7b6c856f..bbb9fad4 100644
+--- a/wal/failover_writer.go
++++ b/wal/failover_writer.go
+@@ -277,6 +277,9 @@ func (q *recordQueue) pop(index uint32, err error) (numSyncsPopped int) {
+ 			if err != nil {
+ 				*b[i].opts.Err = err
+ 			}
++			if b[i].opts.OnSyncComplete != nil {
++				b[i].opts.OnSyncComplete()
++			}
+ 			b[i].opts.Done.Done()
+ 			latency := now.Sub(b[i].writeStart)
+ 			if !addLatencySample {
+diff --git a/wal/standalone_manager.go b/wal/standalone_manager.go
+index 9a9c38db..ee852451 100644
+--- a/wal/standalone_manager.go
++++ b/wal/standalone_manager.go
+@@ -306,7 +306,7 @@ var _ Writer = &standaloneWriter{}
+ func (w *standaloneWriter) WriteRecord(
+ 	p []byte, opts SyncOptions, _ RefCount,
+ ) (logicalOffset int64, err error) {
+-	return w.w.SyncRecord(p, opts.Done, opts.Err)
++	return w.w.SyncRecordWithCallback(p, opts.Done, opts.Err, opts.OnSyncComplete)
+ }
+ 
+ // Close implements Writer.
+diff --git a/wal/wal.go b/wal/wal.go
+index aa9b06d9..d2a8a32b 100644
+--- a/wal/wal.go
++++ b/wal/wal.go
+@@ -399,6 +399,10 @@ type DeletableLog struct {
+ type SyncOptions struct {
+ 	Done *sync.WaitGroup
+ 	Err  *error
++	// OnSyncComplete is invoked when the requested fsync completes, after Err
++	// has been set and before Done is signaled. It is invoked at most once per
++	// WriteRecord call that requested a sync. It may be nil.
++	OnSyncComplete func()
+ }
+ 
+ // Writer writes to a virtual WAL. A Writer in standalone mode maps to a

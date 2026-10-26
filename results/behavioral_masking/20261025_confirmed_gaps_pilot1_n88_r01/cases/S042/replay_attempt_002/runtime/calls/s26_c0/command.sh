@@ -1,0 +1,1 @@
+git remote -v; git show --stat HEAD | head -50; cat packages/core/package.json

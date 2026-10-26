@@ -1,1 +1,0 @@
-../experiments/initial_test_combinations/research/anchor_retrieval_experiment.md

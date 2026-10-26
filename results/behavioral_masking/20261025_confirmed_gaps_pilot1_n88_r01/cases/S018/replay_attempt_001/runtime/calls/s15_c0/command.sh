@@ -1,0 +1,1 @@
+for f in changelog.d/*; do echo "=== $f ==="; cat "$f"; done

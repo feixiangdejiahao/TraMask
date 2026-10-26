@@ -1,0 +1,370 @@
+        ]
+
+    @property
+    def tables(self) -> List["Table"]:
+        "List of Table objects in this database."
+        return [self.table(name) for name in self.table_names()]
+
+    @property
+    def views(self) -> List["View"]:
+        "List of View objects in this database."
+        return [self.view(name) for name in self.view_names()]
+
+    @property
+    def triggers(self) -> List[Trigger]:
+        "List of ``(name, table_name, sql)`` tuples representing triggers in this database."
+        return [
+            Trigger(*r)
+            for r in self.execute(
+                "select name, tbl_name, sql from sqlite_master where type = 'trigger'"
+            ).fetchall()
+        ]
+
+    @property
+    def triggers_dict(self) -> Dict[str, str]:
+        "A ``{trigger_name: sql}`` dictionary of triggers in this database."
+        return {trigger.name: trigger.sql for trigger in self.triggers}
+
+    @property
+    def schema(self) -> str:
+        "SQL schema for this database."
+        sqls = []
+        for row in self.execute(
+            "select sql from sqlite_master where sql is not null"
+        ).fetchall():
+            sql = row[0]
+            if not sql.strip().endswith(";"):
+                sql += ";"
+            sqls.append(sql)
+        return "\n".join(sqls)
+
+    @property
+    def supports_strict(self) -> bool:
+        "Does this database support STRICT mode?"
+        if not hasattr(self, "_supports_strict"):
+            try:
+                table_name = "t{}".format(secrets.token_hex(16))
+                with self.conn:
+                    self.conn.execute(
+                        "create table {} (name text) strict".format(table_name)
+                    )
+                    self.conn.execute("drop table {}".format(table_name))
+                self._supports_strict = True
+            except Exception:
+                self._supports_strict = False
+        return self._supports_strict
+
+    @property
+    def supports_on_conflict(self) -> bool:
+        # SQLite's upsert is implemented as INSERT INTO ... ON CONFLICT DO ...
+        if not hasattr(self, "_supports_on_conflict"):
+            table_name = "t{}".format(secrets.token_hex(16))
+            try:
+                with self.conn:
+                    self.conn.execute(
+                        "create table {} (id integer primary key, name text)".format(
+                            table_name
+                        )
+                    )
+                    self.conn.execute(
+                        "insert into {} (id, name) values (1, 'one')".format(table_name)
+                    )
+                    self.conn.execute(
+                        (
+                            "insert into {} (id, name) values (1, 'two') "
+                            "on conflict do update set name = 'two'"
+                        ).format(table_name)
+                    )
+                    self._supports_on_conflict = True
+            except Exception:
+                self._supports_on_conflict = False
+            finally:
+                self.conn.execute("drop table if exists {}".format(table_name))
+        return self._supports_on_conflict
+
+    @property
+    def sqlite_version(self) -> Tuple[int, ...]:
+        "Version of SQLite, as a tuple of integers for example ``(3, 36, 0)``."
+        row = self.execute("select sqlite_version()").fetchall()[0]
+        return tuple(map(int, row[0].split(".")))
+
+    @property
+    def journal_mode(self) -> str:
+        """
+        Current ``journal_mode`` of this database.
+
+        https://www.sqlite.org/pragma.html#pragma_journal_mode
+        """
+        return self.execute("PRAGMA journal_mode;").fetchone()[0]
+
+    def enable_wal(self) -> None:
+        """
+        Sets ``journal_mode`` to ``'wal'`` to enable Write-Ahead Log mode.
+        """
+        if self.journal_mode != "wal":
+            with self.ensure_autocommit_off():
+                self.execute("PRAGMA journal_mode=wal;")
+
+    def disable_wal(self) -> None:
+        "Sets ``journal_mode`` back to ``'delete'`` to disable Write-Ahead Log mode."
+        if self.journal_mode != "delete":
+            with self.ensure_autocommit_off():
+                self.execute("PRAGMA journal_mode=delete;")
+
+    def _ensure_counts_table(self) -> None:
+        with self.conn:
+            self.execute(_COUNTS_TABLE_CREATE_SQL.format(self._counts_table_name))
+
+    def enable_counts(self) -> None:
+        """
+        Enable trigger-based count caching for every table in the database, see
+        :ref:`python_api_cached_table_counts`.
+        """
+        self._ensure_counts_table()
+        for table in self.tables:
+            if (
+                table.virtual_table_using is None
+                and table.name != self._counts_table_name
+            ):
+                table.enable_counts()
+        self.use_counts_table = True
+
+    def cached_counts(self, tables: Optional[Iterable[str]] = None) -> Dict[str, int]:
+        """
+        Return ``{table_name: count}`` dictionary of cached counts for specified tables, or
+        all tables if ``tables`` not provided.
+
+        :param tables: Subset list of tables to return counts for.
+        """
+        sql = 'select "table", count from {}'.format(self._counts_table_name)
+        tables_list = list(tables) if tables else None
+        if tables_list:
+            sql += ' where "table" in ({})'.format(", ".join("?" for _ in tables_list))
+        try:
+            return {r[0]: r[1] for r in self.execute(sql, tables_list).fetchall()}
+        except OperationalError:
+            return {}
+
+    def reset_counts(self) -> None:
+        "Re-calculate cached counts for tables."
+        tables = [table for table in self.tables if table.has_counts_triggers]
+        with self.conn:
+            self._ensure_counts_table()
+            counts_table = self.table(self._counts_table_name)
+            counts_table.delete_where()
+            counts_table.insert_all(
+                {"table": table.name, "count": table.execute_count()}
+                for table in tables
+            )
+
+    def execute_returning_dicts(
+        self, sql: str, params: Optional[Union[Sequence, Dict[str, Any]]] = None
+    ) -> List[dict]:
+        return list(self.query(sql, params))
+
+    def resolve_foreign_keys(
+        self, name: str, foreign_keys: ForeignKeysType
+    ) -> List[ForeignKey]:
+        """
+        Given a list of differing foreign_keys definitions, return a list of
+        fully resolved ForeignKey() named tuples.
+
+        :param name: Name of table that foreign keys are being defined for
+        :param foreign_keys: List of foreign keys, each of which can be a
+            string, a ForeignKey() named tuple, a tuple of (column, other_table),
+            or a tuple of (column, other_table, other_column), or a tuple of
+            (table, column, other_table, other_column)
+        """
+        table = self.table(name)
+        if all(isinstance(fk, ForeignKey) for fk in foreign_keys):
+            return cast(List[ForeignKey], foreign_keys)
+        if all(isinstance(fk, str) for fk in foreign_keys):
+            # It's a list of columns
+            fks = []
+            for column in foreign_keys:
+                column = cast(str, column)
+                other_table = table.guess_foreign_table(column)
+                other_column = table.guess_foreign_column(other_table)
+                fks.append(ForeignKey(name, column, other_table, other_column))
+            return fks
+        assert all(
+            isinstance(fk, (tuple, list)) for fk in foreign_keys
+        ), "foreign_keys= should be a list of tuples"
+        fks = []
+        for tuple_or_list in foreign_keys:
+            if len(tuple_or_list) == 4:
+                assert (
+                    tuple_or_list[0] == name
+                ), "First item in {} should have been {}".format(tuple_or_list, name)
+            assert len(tuple_or_list) in (
+                2,
+                3,
+                4,
+            ), "foreign_keys= should be a list of tuple pairs or triples"
+            if len(tuple_or_list) in (3, 4):
+                if len(tuple_or_list) == 4:
+                    tuple_or_list = cast(Tuple[str, str, str], tuple_or_list[1:])
+                else:
+                    tuple_or_list = cast(Tuple[str, str, str], tuple_or_list)
+                fks.append(
+                    ForeignKey(
+                        name, tuple_or_list[0], tuple_or_list[1], tuple_or_list[2]
+                    )
+                )
+            else:
+                # Guess the primary key
+                fks.append(
+                    ForeignKey(
+                        name,
+                        tuple_or_list[0],
+                        tuple_or_list[1],
+                        table.guess_foreign_column(tuple_or_list[1]),
+                    )
+                )
+        return fks
+
+    def create_table_sql(
+        self,
+        name: str,
+        columns: Dict[str, Any],
+        pk: Optional[Any] = None,
+        foreign_keys: Optional[ForeignKeysType] = None,
+        column_order: Optional[List[str]] = None,
+        not_null: Optional[Iterable[str]] = None,
+        defaults: Optional[Dict[str, Any]] = None,
+        hash_id: Optional[str] = None,
+        hash_id_columns: Optional[Iterable[str]] = None,
+        extracts: Optional[Union[Dict[str, str], List[str]]] = None,
+        if_not_exists: bool = False,
+        strict: bool = False,
+    ) -> str:
+        """
+        Returns the SQL ``CREATE TABLE`` statement for creating the specified table.
+
+        :param name: Name of table
+        :param columns: Dictionary mapping column names to their types, for example ``{"name": str, "age": int}``
+        :param pk: String name of column to use as a primary key, or a tuple of strings for a compound primary key covering multiple columns
+        :param foreign_keys: List of foreign key definitions for this table
+        :param column_order: List specifying which columns should come first
+        :param not_null: List of columns that should be created as ``NOT NULL``
+        :param defaults: Dictionary specifying default values for columns
+        :param hash_id: Name of column to be used as a primary key containing a hash of the other columns
+        :param hash_id_columns: List of columns to be used when calculating the hash ID for a row
+        :param extracts: List or dictionary of columns to be extracted during inserts, see :ref:`python_api_extracts`
+        :param if_not_exists: Use ``CREATE TABLE IF NOT EXISTS``
+        :param strict: Apply STRICT mode to table
+        """
+        if hash_id_columns and (hash_id is None):
+            hash_id = "id"
+        foreign_keys = self.resolve_foreign_keys(name, foreign_keys or [])
+        foreign_keys_by_column = {fk.column: fk for fk in foreign_keys}
+        # any extracts will be treated as integer columns with a foreign key
+        extracts = resolve_extracts(extracts)
+        for extract_column, extract_table in extracts.items():
+            if isinstance(extract_column, tuple):
+                assert False
+            # Ensure other table exists
+            if not self[extract_table].exists():
+                self.create_table(extract_table, {"id": int, "value": str}, pk="id")
+            columns[extract_column] = int
+            foreign_keys_by_column[extract_column] = ForeignKey(
+                name, extract_column, extract_table, "id"
+            )
+        # Soundness check not_null, and defaults if provided
+        not_null = not_null or set()
+        defaults = defaults or {}
+        assert columns, "Tables must have at least one column"
+        assert all(
+            n in columns for n in not_null
+        ), "not_null set {} includes items not in columns {}".format(
+            repr(not_null), repr(set(columns.keys()))
+        )
+        assert all(
+            n in columns for n in defaults
+        ), "defaults set {} includes items not in columns {}".format(
+            repr(set(defaults)), repr(set(columns.keys()))
+        )
+        column_items = list(columns.items())
+        if column_order is not None:
+
+            def sort_key(p):
+                return column_order.index(p[0]) if p[0] in column_order else 999
+
+            column_items.sort(key=sort_key)
+        if hash_id:
+            column_items.insert(0, (hash_id, str))
+            pk = hash_id
+        # Soundness check foreign_keys point to existing tables
+        for fk in foreign_keys:
+            if fk.other_table == name and columns.get(fk.other_column):
+                continue
+            if fk.other_column != "rowid" and not any(
+                c for c in self[fk.other_table].columns if c.name == fk.other_column
+            ):
+                raise AlterError(
+                    "No such column: {}.{}".format(fk.other_table, fk.other_column)
+                )
+
+        column_defs = []
+        # ensure pk is a tuple
+        single_pk = None
+        if isinstance(pk, list) and len(pk) == 1 and isinstance(pk[0], str):
+            pk = pk[0]
+        if isinstance(pk, str):
+            single_pk = pk
+            if pk not in [c[0] for c in column_items]:
+                column_items.insert(0, (pk, int))
+        for column_name, column_type in column_items:
+            column_extras = []
+            if column_name == single_pk:
+                column_extras.append("PRIMARY KEY")
+            if column_name in not_null:
+                column_extras.append("NOT NULL")
+            if column_name in defaults and defaults[column_name] is not None:
+                column_extras.append(
+                    "DEFAULT {}".format(self.quote_default_value(defaults[column_name]))
+                )
+            if column_name in foreign_keys_by_column:
+                column_extras.append(
+                    "REFERENCES {}({})".format(
+                        quote_identifier(
+                            foreign_keys_by_column[column_name].other_table
+                        ),
+                        quote_identifier(
+                            foreign_keys_by_column[column_name].other_column
+                        ),
+                    )
+                )
+            column_type_str = COLUMN_TYPE_MAPPING[column_type]
+            # Special case for strict tables to map FLOAT to REAL
+            # Refs https://github.com/simonw/sqlite-utils/issues/644
+            if strict and column_type_str == "FLOAT":
+                column_type_str = "REAL"
+            column_defs.append(
+                "   {} {column_type}{column_extras}".format(
+                    quote_identifier(column_name),
+                    column_type=column_type_str,
+                    column_extras=(
+                        (" " + " ".join(column_extras)) if column_extras else ""
+                    ),
+                )
+            )
+        extra_pk = ""
+        if single_pk is None and pk and len(pk) > 1:
+            extra_pk = ",\n   PRIMARY KEY ({pks})".format(
+                pks=", ".join([quote_identifier(p) for p in pk])
+            )
+        columns_sql = ",\n".join(column_defs)
+        sql = """CREATE TABLE {if_not_exists}{table} (
+{columns_sql}{extra_pk}
+){strict};
+        """.format(
+            if_not_exists="IF NOT EXISTS " if if_not_exists else "",
+            table=quote_identifier(name),
+            columns_sql=columns_sql,
+            extra_pk=extra_pk,
+            strict=" STRICT" if strict and self.supports_strict else "",
+        )
+        return sql
+
+    def create_table(

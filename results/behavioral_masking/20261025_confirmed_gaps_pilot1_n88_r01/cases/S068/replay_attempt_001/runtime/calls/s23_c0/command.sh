@@ -1,0 +1,1 @@
+grep -n "import_csv\|import_json\|safe_bulk\|import " sqlite_utils/*.py | head -50 && echo "---utils---" && grep -n "def rows_from_file\|def file_progress\|def chunks\|class Format\|def sniff" sqlite_utils/utils.py

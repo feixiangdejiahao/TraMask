@@ -1,0 +1,1 @@
+cd /app && python3 -c "import cogapp; print('cogapp available')" 2>&1; grep -n "enable-safe-import\|safe-import" docs/cli-reference.rst | head; echo "---"; grep -n "cog" docs/cli-reference.rst | head -5

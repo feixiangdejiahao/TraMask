@@ -1,0 +1,1 @@
+cd /app && grep -n "LOCAL_DOCKER_ENVIRONMENT_ID" types/types.go backend/internal/services/*.go | head -10 && echo "=====GETCLIENT=====" && grep -n "func (s \*DockerClientService) GetClient\|func (s \*DockerClientService)" backend/internal/services/docker_client_service.go | head -20

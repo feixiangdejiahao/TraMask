@@ -1,0 +1,1 @@
+cd /app && cat src/schema/types/inputValue.ts && echo "=====VALID=====" && cat src/schema/types/validValue.ts

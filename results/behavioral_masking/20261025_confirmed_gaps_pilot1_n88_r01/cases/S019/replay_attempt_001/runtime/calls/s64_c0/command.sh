@@ -1,0 +1,1 @@
+cd /app && sed -n '55,120p' src/schema/string/schema_.ts && echo "===RECORD===" && sed -n '80,150p' src/schema/record/schema_.ts

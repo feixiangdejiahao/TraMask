@@ -1,0 +1,1 @@
+cd /app && timeout 120 python -m pytest tests/unit/core/test_manager_cache.py::ManagerCacheTests::test_unchanged_files_are_cached -q 2>&1 | grep -A5 "assert"| head -20

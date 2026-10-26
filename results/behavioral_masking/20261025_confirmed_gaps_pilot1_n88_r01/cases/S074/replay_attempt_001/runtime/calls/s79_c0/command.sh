@@ -1,0 +1,1 @@
+cd /app && nl -ba zz_repro3_test.go | sed -n '48,58p'

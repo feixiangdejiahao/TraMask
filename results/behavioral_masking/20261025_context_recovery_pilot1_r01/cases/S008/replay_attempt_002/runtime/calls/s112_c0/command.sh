@@ -1,0 +1,200 @@
+cd /app && cat > backend/internal/huma/handlers/compliance_test.go <<'EOF'
+package handlers
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	glsqlite "github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+
+	"github.com/getarcaneapp/arcane/backend/internal/database"
+	"github.com/getarcaneapp/arcane/backend/internal/models"
+	"github.com/getarcaneapp/arcane/backend/internal/services"
+	"github.com/gin-gonic/gin"
+)
+
+func setupComplianceTestRouter(t *testing.T) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()))
+	db, err := gorm.Open(glsqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(
+		&models.EnvironmentBaseline{},
+		&models.DriftRecord{},
+		&models.ComplianceSnapshot{},
+	))
+
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+
+	svc := services.NewDriftDetectionService(&database.DB{DB: db}, nil, nil, nil, nil, nil)
+	router := gin.New()
+	NewComplianceHandler(svc).RegisterRoutes(router.Group("/api"))
+	return router
+}
+
+func doComplianceRequest(t *testing.T, router *gin.Engine, method, path, body string, userID string) *httptest.ResponseRecorder {
+	t.Helper()
+	var req *http.Request
+	if body != "" {
+		req = httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	} else {
+		req = httptest.NewRequest(method, path, nil)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if userID != "" {
+		req.Header.Set("X-User-ID", userID)
+	}
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+func TestComplianceRoutes(t *testing.T) {
+	ctx := context.Background()
+	router := setupComplianceTestRouter(t)
+
+	// Create baseline
+	body := `{
+		"name":"prod",
+		"description":"prod baseline",
+		"containers":{"web":{"image":"nginx:latest","restartPolicy":"always","networkMode":"bridge","env":["A=1"],"ports":["80/tcp"],"volumes":["/data:/data"],"labels":{"app":"web"},"memoryLimit":536870912,"cpuLimit":0.5}}
+	}`
+	w := doComplianceRequest(t, router, http.MethodPost, "/api/environments/env1/compliance/baselines", body, "user-42")
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	var createResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			CreatedBy     string `json:"createdBy"`
+			IsActive      bool   `json:"isActive"`
+			ContainerCount int   `json:"containerCount"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
+	assert.True(t, createResp.Success)
+	assert.Equal(t, "prod", createResp.Data.Name)
+	assert.Equal(t, "user-42", createResp.Data.CreatedBy)
+	assert.True(t, createResp.Data.IsActive)
+	assert.Equal(t, 1, createResp.Data.ContainerCount)
+	baselineID := createResp.Data.ID
+
+	// List baselines
+	w = doComplianceRequest(t, router, http.MethodGet, "/api/environments/env1/compliance/baselines", "", "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var listResp struct {
+		Success bool `json:"success"`
+		Data    []json.RawMessage `json:"data"`
+		Total   int64 `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &listResp))
+	assert.Equal(t, int64(1), listResp.Total)
+	assert.Len(t, listResp.Data, 1)
+
+	// Get baseline
+	w = doComplianceRequest(t, router, http.MethodGet, "/api/environments/env1/compliance/baselines/"+baselineID, "", "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var getResp struct {
+		Success bool `json:"success"`
+		Data    json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &getResp))
+	assert.True(t, getResp.Success)
+	assert.Contains(t, string(getResp.Data), "containerConfigs")
+	assert.Contains(t, string(getResp.Data), "createdBy")
+
+	// Get missing baseline -> 404
+	w = doComplianceRequest(t, router, http.MethodGet, "/api/environments/env1/compliance/baselines/missing", "", "")
+	require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+
+	// Detect no baseline on other env -> 400
+	w = doComplianceRequest(t, router, http.MethodPost, "/api/environments/env2/compliance/detect", `{"containers":{"web":{"image":"nginx:latest"}}}`, "")
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	var errResp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &errResp))
+	assert.False(t, errResp.Success)
+	assert.Contains(t, strings.ToLower(errResp.Error), "no active baseline")
+
+	// Detect drift on env1
+	w = doComplianceRequest(t, router, http.MethodPost, "/api/environments/env1/compliance/detect", `{"containers":{"web":{"image":"nginx:1.27","restartPolicy":"always","networkMode":"bridge","env":["A=1"],"ports":["80/tcp"],"volumes":["/data:/data"],"labels":{"app":"web"},"memoryLimit":536870912,"cpuLimit":0.5}}}`, "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var detectResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			TotalContainers    int     `json:"totalContainers"`
+			CompliantContainers int    `json:"compliantContainers"`
+			CriticalDrifts      int     `json:"criticalDrifts"`
+			ComplianceScore     float64 `json:"complianceScore"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &detectResp))
+	assert.True(t, detectResp.Success)
+	assert.Equal(t, 1, detectResp.Data.TotalContainers)
+	assert.Equal(t, 0, detectResp.Data.CompliantContainers)
+	assert.Equal(t, 1, detectResp.Data.CriticalDrifts)
+	assert.Equal(t, 0.0, detectResp.Data.ComplianceScore)
+
+	// List drifts (all statuses)
+	w = doComplianceRequest(t, router, http.MethodGet, "/api/environments/env1/compliance/drifts", "", "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var driftsResp struct {
+		Success bool `json:"success"`
+		Data    []struct {
+			ID        string `json:"id"`
+			DriftType string `json:"driftType"`
+			Severity  string `json:"severity"`
+			Status    string `json:"status"`
+			Field     string `json:"field"`
+		} `json:"data"`
+		Total int64 `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &driftsResp))
+	require.Len(t, driftsResp.Data, 1)
+	assert.Equal(t, int64(1), driftsResp.Total)
+	assert.Equal(t, "image_changed", driftsResp.Data[0].DriftType)
+	assert.Equal(t, "critical", driftsResp.Data[0].Severity)
+	assert.Equal(t, "detected", driftsResp.Data[0].Status)
+	driftID := driftsResp.Data[0].ID
+
+	// Acknowledge
+	w = doComplianceRequest(t, router, http.MethodPost, "/api/environments/env1/compliance/drifts/"+driftID+"/acknowledge", "", "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	// History
+	w = doComplianceRequest(t, router, http.MethodGet, "/api/environments/env1/compliance/history", "", "")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var historyResp struct {
+		Success bool `json:"success"`
+		Data    []struct {
+			ComplianceScore float64 `json:"complianceScore"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &historyResp))
+	require.Len(t, historyResp.Data, 1)
+
+	// Ignore missing
+	w = doComplianceRequest(t, router, http.MethodPost, "/api/environments/env1/compliance/drifts/missing/ignore", "", "")
+	require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+
+	_ = ctx
+}
+EOF
+cd /app/backend && gofmt -w internal/huma/handlers/compliance_test.go && echo OK

@@ -1,0 +1,1 @@
+cd /app && sed -n '1,420p' public/testem/qunit_adapter.js

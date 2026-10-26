@@ -1,0 +1,1 @@
+sed -n '1,220p' tests/unit/formatters/test_json.py && echo "=== text ===" && sed -n '1,120p' tests/unit/formatters/test_text.py

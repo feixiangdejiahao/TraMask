@@ -1,0 +1,1 @@
+nl -ba sqlite_utils/cli.py | sed -n '780,1200p'

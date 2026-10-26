@@ -1,0 +1,1 @@
+cd /app && NODE_ENV=development BABEL_ENV=test npx jest 2>&1 | tail -8

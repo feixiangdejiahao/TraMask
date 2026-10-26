@@ -1,0 +1,1 @@
+cat bandit/core/constants.py && echo "=== setup.cfg ===" && cat setup.cfg && echo "=== tox ===" && cat tox.ini

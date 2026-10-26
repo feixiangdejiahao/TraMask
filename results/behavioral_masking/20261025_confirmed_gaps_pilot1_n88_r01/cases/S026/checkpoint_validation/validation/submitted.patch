@@ -1,0 +1,746 @@
+diff --git a/checkers/brokenDocLink_checker.go b/checkers/brokenDocLink_checker.go
+new file mode 100644
+index 0000000..7d71319
+--- /dev/null
++++ b/checkers/brokenDocLink_checker.go
+@@ -0,0 +1,387 @@
++package checkers
++
++import (
++	"go/ast"
++	"go/doc/comment"
++	"go/token"
++	"go/types"
++	"strconv"
++	"strings"
++	"unicode"
++
++	"github.com/go-critic/go-critic/checkers/internal/astwalk"
++	"github.com/go-critic/go-critic/linter"
++)
++
++func init() {
++	var info linter.CheckerInfo
++	info.Name = "brokenDocLink"
++	info.Tags = []string{linter.DiagnosticTag, linter.ExperimentalTag}
++	info.Summary = "Detects broken doc comment links"
++	info.Before = `
++// Foo is a sample function.
++// It is documented by [Bar] which does not exist.
++func Foo() int`
++	info.After = `
++// Foo is a sample function.
++// It is documented by [Foo] which is defined in this package.
++func Foo() int`
++
++	collection.AddChecker(&info, func(ctx *linter.CheckerContext) (linter.FileWalker, error) {
++		return astwalk.WalkerForDocLink(&brokenDocLinkChecker{ctx: ctx}), nil
++	})
++}
++
++type brokenDocLinkChecker struct {
++	astwalk.WalkHandler
++	ctx *linter.CheckerContext
++
++	file       *ast.File
++	imports    map[string]*types.Package
++	dotImports []*types.Package
++}
++
++func (c *brokenDocLinkChecker) EnterFile(f *ast.File) bool {
++	c.file = f
++	c.imports = make(map[string]*types.Package)
++	c.dotImports = c.dotImports[:0]
++	for _, spec := range f.Imports {
++		pkg := importedPackage(c.ctx, spec)
++		if pkg == nil {
++			continue
++		}
++		if spec.Name != nil && spec.Name.Name == "." {
++			c.dotImports = append(c.dotImports, pkg)
++			continue
++		}
++		c.imports[localPackageName(c.ctx, spec)] = pkg
++	}
++	return true
++}
++
++func (c *brokenDocLinkChecker) VisitDocLink(decl ast.Node, doc *ast.CommentGroup) {
++	parser := &comment.Parser{
++		LookupPackage: func(name string) (string, bool) { return name, true },
++		LookupSym:     func(_, _ string) bool { return true },
++	}
++	parsed := parser.Parse(doc.Text())
++	for _, block := range parsed.Content {
++		c.visitBlock(decl, block)
++	}
++}
++
++func (c *brokenDocLinkChecker) visitBlock(decl ast.Node, block comment.Block) {
++	switch block := block.(type) {
++	case *comment.Paragraph:
++		c.visitTexts(decl, block.Text)
++	case *comment.Heading:
++		c.visitTexts(decl, block.Text)
++	case *comment.List:
++		for _, item := range block.Items {
++			for _, content := range item.Content {
++				c.visitBlock(decl, content)
++			}
++		}
++	case *comment.Code:
++		// Code blocks do not contain documentation links.
++	}
++}
++
++func (c *brokenDocLinkChecker) visitTexts(decl ast.Node, texts []comment.Text) {
++	for _, text := range texts {
++		link, ok := text.(*comment.DocLink)
++		if !ok {
++			continue
++		}
++		c.checkDocLink(decl, link)
++	}
++}
++
++func (c *brokenDocLinkChecker) checkDocLink(decl ast.Node, link *comment.DocLink) {
++	ref := docLinkText(link)
++	if !validDocLinkText(ref) {
++		return
++	}
++
++	switch {
++	case link.ImportPath == "" && link.Recv == "":
++		// [Name] local symbol.
++		c.checkLocalSymbol(decl, ref, link.Name)
++	case link.ImportPath == "" && link.Recv != "":
++		// [Recv.Name] local method or field.
++		if !validIdentifier(link.Recv) || !validIdentifier(link.Name) {
++			return
++		}
++		c.checkLocalMember(decl, ref, link.Recv, link.Name)
++	case link.ImportPath != "" && link.Recv == "" && link.Name == "":
++		// [pkg] package reference.
++		if !validPackageRef(link.ImportPath) {
++			return
++		}
++		c.checkPackageRef(decl, ref, link.ImportPath)
++	case link.ImportPath != "" && link.Recv == "":
++		// [pkg.Name] qualified symbol.
++		if !validPackageRef(link.ImportPath) || !validIdentifier(link.Name) {
++			return
++		}
++		c.checkQualifiedSymbol(decl, ref, link.ImportPath, link.Name)
++	case link.ImportPath != "" && link.Recv != "":
++		// [pkg.Recv.Name] qualified method or field.
++		if !validPackageRef(link.ImportPath) || !validIdentifier(link.Recv) || !validIdentifier(link.Name) {
++			return
++		}
++		c.checkQualifiedMember(decl, ref, link.ImportPath, link.Recv, link.Name)
++	}
++}
++
++func (c *brokenDocLinkChecker) checkLocalSymbol(decl ast.Node, ref, name string) {
++	if c.lookupLocal(name) != nil || types.Universe.Lookup(name) != nil {
++		return
++	}
++	c.warn(decl, ref, `unknown symbol %q in current package`, name)
++}
++
++func (c *brokenDocLinkChecker) checkLocalMember(decl ast.Node, ref, recv, name string) {
++	obj := c.lookupLocal(recv)
++	if obj == nil {
++		if types.Universe.Lookup(recv) != nil {
++			return
++		}
++		c.warn(decl, ref, `type %q not found in current package`, recv)
++		return
++	}
++	typeName, ok := obj.(*types.TypeName)
++	if !ok {
++		c.warn(decl, ref, `%q is not a type`, recv)
++		return
++	}
++	if !hasMember(typeName.Type(), name) {
++		c.warn(decl, ref, `type %q has no method or field %q`, recv, name)
++	}
++}
++
++func (c *brokenDocLinkChecker) checkPackageRef(decl ast.Node, ref, pkgRef string) {
++	if types.Universe.Lookup(pkgRef) != nil || isStdlibPackage(pkgRef) {
++		return
++	}
++	if c.resolvePackage(pkgRef) == nil {
++		c.warn(decl, ref, `package %q is not imported`, pkgRef)
++	}
++}
++
++func (c *brokenDocLinkChecker) checkQualifiedSymbol(decl ast.Node, ref, pkgRef, name string) {
++	pkg := c.resolvePackage(pkgRef)
++	if pkg == nil {
++		if isStdlibPackage(pkgRef) {
++			return
++		}
++		c.warn(decl, ref, `package %q is not imported`, pkgRef)
++		return
++	}
++	if !packageHasSymbol(pkg, c.ctx.Pkg, name) {
++		c.warn(decl, ref, `%q not found in package %q`, name, pkgRef)
++	}
++}
++
++func (c *brokenDocLinkChecker) checkQualifiedMember(decl ast.Node, ref, pkgRef, recv, name string) {
++	pkg := c.resolvePackage(pkgRef)
++	if pkg == nil {
++		if isStdlibPackage(pkgRef) {
++			return
++		}
++		c.warn(decl, ref, `package %q is not imported`, pkgRef)
++		return
++	}
++	obj := pkg.Scope().Lookup(recv)
++	if obj == nil {
++		if pkg == c.ctx.Pkg {
++			c.warn(decl, ref, `type %q not found in current package`, recv)
++		} else {
++			c.warn(decl, ref, `type %q not found in package %q`, recv, pkgRef)
++		}
++		return
++	}
++	typeName, ok := obj.(*types.TypeName)
++	if !ok {
++		c.warn(decl, ref, `%q is not a type`, recv)
++		return
++	}
++	if !hasMember(typeName.Type(), name) {
++		c.warn(decl, ref, `type %q has no method or field %q`, recv, name)
++	}
++}
++
++func (c *brokenDocLinkChecker) warn(decl ast.Node, ref, format string, args ...interface{}) {
++	c.ctx.Warn(decl, "[%s]: "+format, append([]interface{}{ref}, args...)...)
++}
++
++func (c *brokenDocLinkChecker) lookupLocal(name string) types.Object {
++	if obj := c.ctx.Pkg.Scope().Lookup(name); obj != nil {
++		return obj
++	}
++	for _, pkg := range c.dotImports {
++		if obj := pkg.Scope().Lookup(name); obj != nil && obj.Exported() {
++			return obj
++		}
++	}
++	return nil
++}
++
++func (c *brokenDocLinkChecker) resolvePackage(ref string) *types.Package {
++	if ref == c.ctx.Pkg.Name() {
++		return c.ctx.Pkg
++	}
++	if pkg := c.imports[ref]; pkg != nil {
++		return pkg
++	}
++	for _, spec := range c.file.Imports {
++		path, err := strconv.Unquote(spec.Path.Value)
++		if err != nil {
++			continue
++		}
++		if path == ref {
++			return importedPackage(c.ctx, spec)
++		}
++	}
++	return nil
++}
++
++func packageHasSymbol(pkg, currentPkg *types.Package, name string) bool {
++	obj := pkg.Scope().Lookup(name)
++	if obj == nil {
++		return false
++	}
++	if pkg != currentPkg && !obj.Exported() {
++		return false
++	}
++	return true
++}
++
++func hasMember(typ types.Type, name string) bool {
++	return hasMethod(typ, name) || hasField(typ, name)
++}
++
++func hasMethod(typ types.Type, name string) bool {
++	// Unwrap type aliases before inspecting the underlying type.
++	typ = types.Unalias(typ)
++	// Directly declared methods, including methods with a pointer receiver.
++	if named, ok := typ.(*types.Named); ok {
++		for i := 0; i < named.NumMethods(); i++ {
++			if named.Method(i).Name() == name {
++				return true
++			}
++		}
++	}
++	// Promoted methods, both through the value and the pointer method sets.
++	if methodInSet(types.NewMethodSet(typ), name) {
++		return true
++	}
++	if _, isPtr := typ.(*types.Pointer); !isPtr {
++		return methodInSet(types.NewMethodSet(types.NewPointer(typ)), name)
++	}
++	return false
++}
++
++func methodInSet(methodSet *types.MethodSet, name string) bool {
++	for i := 0; i < methodSet.Len(); i++ {
++		if methodSet.At(i).Obj().Name() == name {
++			return true
++		}
++	}
++	return false
++}
++
++func hasField(typ types.Type, name string) bool {
++	switch typ := types.Unalias(typ).(type) {
++	case *types.Named:
++		return hasField(typ.Underlying(), name)
++	case *types.Pointer:
++		return hasField(typ.Elem(), name)
++	case *types.Struct:
++		for i := 0; i < typ.NumFields(); i++ {
++			field := typ.Field(i)
++			if field.Name() == name {
++				return true
++			}
++			if field.Embedded() && hasField(field.Type(), name) {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++func docLinkText(link *comment.DocLink) string {
++	var sb strings.Builder
++	for _, text := range link.Text {
++		switch text := text.(type) {
++		case comment.Plain:
++			sb.WriteString(string(text))
++		case comment.Italic:
++			sb.WriteString(string(text))
++		}
++	}
++	return sb.String()
++}
++
++func validDocLinkText(ref string) bool {
++	if ref == "" || strings.ContainsAny(ref, " \t\n\r") {
++		return false
++	}
++	ref = strings.TrimPrefix(ref, "*")
++	return ref != ""
++}
++
++func validIdentifier(name string) bool {
++	return token.IsIdentifier(name)
++}
++
++func isStdlibPackage(ref string) bool {
++	_, ok := comment.DefaultLookupPackage(ref)
++	return ok
++}
++
++func validPackageRef(ref string) bool {
++	if token.IsIdentifier(ref) {
++		return true
++	}
++	if !strings.Contains(ref, "/") {
++		return false
++	}
++	for _, r := range ref {
++		if unicode.IsLetter(r) || unicode.IsDigit(r) {
++			continue
++		}
++		switch r {
++		case '-', '_', '.', '/', '~':
++			continue
++		}
++		return false
++	}
++	return true
++}
++
++func importedPackage(ctx *linter.CheckerContext, spec *ast.ImportSpec) *types.Package {
++	var obj types.Object
++	if spec.Name != nil {
++		obj = ctx.TypesInfo.ObjectOf(spec.Name)
++	} else {
++		obj = ctx.TypesInfo.Implicits[spec]
++	}
++	pkgName, ok := obj.(*types.PkgName)
++	if !ok {
++		return nil
++	}
++	return pkgName.Imported()
++}
++
++func localPackageName(ctx *linter.CheckerContext, spec *ast.ImportSpec) string {
++	if spec.Name != nil {
++		return spec.Name.Name
++	}
++	obj := ctx.TypesInfo.Implicits[spec]
++	if pkgName, ok := obj.(*types.PkgName); ok {
++		return pkgName.Name()
++	}
++	return ""
++}
+diff --git a/checkers/internal/astwalk/doc_link_walker.go b/checkers/internal/astwalk/doc_link_walker.go
+new file mode 100644
+index 0000000..d785bb9
+--- /dev/null
++++ b/checkers/internal/astwalk/doc_link_walker.go
+@@ -0,0 +1,52 @@
++package astwalk
++
++import (
++	"go/ast"
++)
++
++type docLinkWalker struct {
++	visitor DocLinkVisitor
++}
++
++func (w *docLinkWalker) WalkFile(f *ast.File) {
++	if !w.visitor.EnterFile(f) {
++		return
++	}
++
++	for _, decl := range f.Decls {
++		switch decl := decl.(type) {
++		case *ast.FuncDecl:
++			if decl.Doc != nil {
++				w.visitor.VisitDocLink(decl, decl.Doc)
++			}
++		case *ast.GenDecl:
++			if decl.Doc != nil {
++				w.visitor.VisitDocLink(decl, decl.Doc)
++			}
++			for _, spec := range decl.Specs {
++				switch spec := spec.(type) {
++				case *ast.ImportSpec:
++					if spec.Doc != nil {
++						w.visitor.VisitDocLink(spec, spec.Doc)
++					}
++				case *ast.ValueSpec:
++					if spec.Doc != nil {
++						w.visitor.VisitDocLink(spec, spec.Doc)
++					}
++				case *ast.TypeSpec:
++					if spec.Doc != nil {
++						w.visitor.VisitDocLink(spec, spec.Doc)
++					}
++					ast.Inspect(spec.Type, func(n ast.Node) bool {
++						if n, ok := n.(*ast.Field); ok {
++							if n.Doc != nil {
++								w.visitor.VisitDocLink(n, n.Doc)
++							}
++						}
++						return true
++					})
++				}
++			}
++		}
++	}
++}
+diff --git a/checkers/internal/astwalk/visitor.go b/checkers/internal/astwalk/visitor.go
+index 3486a8e..4f5cfa4 100644
+--- a/checkers/internal/astwalk/visitor.go
++++ b/checkers/internal/astwalk/visitor.go
+@@ -11,6 +11,13 @@ type DocCommentVisitor interface {
+ 	VisitDocComment(*ast.CommentGroup)
+ }
+ 
++// DocLinkVisitor visits every doc-comment along with the declaration
++// that the comment documents.
++type DocLinkVisitor interface {
++	walkerEvents
++	VisitDocLink(ast.Node, *ast.CommentGroup)
++}
++
+ // FuncDeclVisitor visits every top-level function declaration.
+ type FuncDeclVisitor interface {
+ 	walkerEvents
+diff --git a/checkers/internal/astwalk/walker.go b/checkers/internal/astwalk/walker.go
+index f838a64..60ea865 100644
+--- a/checkers/internal/astwalk/walker.go
++++ b/checkers/internal/astwalk/walker.go
+@@ -51,6 +51,11 @@ func WalkerForDocComment(v DocCommentVisitor) linter.FileWalker {
+ 	return &docCommentWalker{visitor: v}
+ }
+ 
++// WalkerForDocLink returns file walker implementation for DocLinkVisitor.
++func WalkerForDocLink(v DocLinkVisitor) linter.FileWalker {
++	return &docLinkWalker{visitor: v}
++}
++
+ // WalkerForLocalDef returns file walker implementation for LocalDefVisitor.
+ func WalkerForLocalDef(v LocalDefVisitor, info *types.Info) linter.FileWalker {
+ 	return &localDefWalker{visitor: v, info: info}
+diff --git a/checkers/testdata/brokenDocLink/negative_tests.go b/checkers/testdata/brokenDocLink/negative_tests.go
+new file mode 100644
+index 0000000..16bb8be
+--- /dev/null
++++ b/checkers/testdata/brokenDocLink/negative_tests.go
+@@ -0,0 +1,80 @@
++package checker_test
++
++import (
++	"fmt"
++	. "sort"
++	"strings"
++	. "strings"
++	str "strings"
++
++	"github.com/go-critic/go-critic/checkers/testdata/_importable/examplepkg"
++)
++
++var (
++	_ = fmt.Println
++	_ = strings.ToUpper
++	_ = str.ToUpper
++	_ = ToUpper
++	_ = IntSlice(nil)
++	_ = examplepkg.StructType{}
++)
++
++// [MyType] is a valid local symbol reference.
++func ValidLocal() {}
++
++// [MyType] is a type, [MyType.Y] is a field and [MyType.N] is a method.
++func ValidMembers() {}
++
++// [Embedded.X], [Embedded.M] and [PtrEmbed.X] are promoted members.
++func ValidEmbedded() {}
++
++// [fmt.Println], [strings.Builder], [strings.Builder.Reset],
++// [strings.Reader.Read], [strings.Reader.Len] and [str.ToUpper] are valid.
++func ValidQualified() {}
++
++// [ToUpper] is available via the dot import.
++func ValidDotImport() {}
++
++// Go builtins are not flagged: [int], [string], [len], [error], [any].
++func ValidBuiltins() {}
++
++// Standard library package links are valid even without an import:
++// [math] and [math.Sin].
++func ValidStdlibRefs() {}
++
++// Content with spaces or non-identifier characters is not a link:
++// [foo bar], [foo-bar], [fmt.println], [Foo.Bar Baz].
++func ValidNonLinks() {}
++
++// [github.com/go-critic/go-critic/checkers/testdata/_importable/examplepkg.StructType]
++// and [github.com/go-critic/go-critic/checkers/testdata/_importable/examplepkg.StructType.A]
++// are valid package path references.
++func ValidPathRefs() {}
++
++// [checker_test.MyType] and [checker_test] are valid self package references.
++func ValidSelfRefs() {}
++
++// [*MyType] and [*MyType.Y] are valid pointer style links.
++func ValidPointerRefs() {}
++
++// [IntSlice.Sort] is a valid method reference on a dot-imported type.
++func ValidDotTypeMethod() {}
++
++// [Box.Put] is a valid pointer-receiver method on a generic type.
++func ValidGenericMethod() {}
++
++// [AliasType.Y] and [AliasType.N] are valid members of a type alias.
++func ValidAlias() {}
++
++// [MyType] is a valid reference in a type declaration comment.
++type DocumentedType struct{}
++
++type (
++	// [MyType] is a valid reference in a type group comment.
++	DocumentedGroupType struct{}
++)
++
++type WithFieldDocs struct {
++	// [MyType] is a valid reference in a field comment.
++	Field int
++}
+diff --git a/checkers/testdata/brokenDocLink/positive_tests.go b/checkers/testdata/brokenDocLink/positive_tests.go
+new file mode 100644
+index 0000000..69bae27
+--- /dev/null
++++ b/checkers/testdata/brokenDocLink/positive_tests.go
+@@ -0,0 +1,86 @@
++package checker_test
++
++import (
++	. "sort"
++	"strings"
++	str "strings"
++
++	"github.com/go-critic/go-critic/checkers/testdata/_importable/examplepkg"
++)
++
++var (
++	_ = strings.ToUpper
++	_ = str.ToUpper
++	_ = IntSlice(nil)
++	_ = examplepkg.StructType{}
++)
++
++type Stringer struct{}
++
++func (Stringer) String() string { return "" }
++
++var MyVar int
++
++// LocalSymbol is an example.
++/*! [MissingSymbol]: unknown symbol "MissingSymbol" in current package */
++func LocalSymbol() {}
++
++// QualifiedSymbol is an example.
++/*! [strings.Missing]: "Missing" not found in package "strings" */
++func QualifiedSymbol() {}
++
++// RenamedImport is an example.
++/*! [str.Missing]: "Missing" not found in package "str" */
++func RenamedImport() {}
++
++// LocalTypeMissing is an example.
++/*! [MissingType.Field]: type "MissingType" not found in current package */
++func LocalTypeMissing() {}
++
++// QualifiedTypeMissing is an example.
++/*! [strings.MissingType.Field]: type "MissingType" not found in package "strings" */
++func QualifiedTypeMissing() {}
++
++// LocalMemberMissing is an example.
++/*! [Stringer.Missing]: type "Stringer" has no method or field "Missing" */
++func LocalMemberMissing() {}
++
++// QualifiedMemberMissing is an example.
++/*! [strings.Builder.Missing]: type "Builder" has no method or field "Missing" */
++func QualifiedMemberMissing() {}
++
++// NonTypeLocal is an example.
++/*! [MyVar.Field]: "MyVar" is not a type */
++func NonTypeLocal() {}
++
++// NonTypeQualified is an example.
++/*! [strings.ToUpper.Field]: "ToUpper" is not a type */
++func NonTypeQualified() {}
++
++// PackageNotImported is an example.
++/*! [missingpkg.Foo]: package "missingpkg" is not imported */
++func PackageNotImported() {}
++
++// PackageOnlyNotImported is an example.
++/*! [missingpkg]: package "missingpkg" is not imported */
++func PackageOnlyNotImported() {}
++
++// PathQualifiedMissing is an example.
++/*! [github.com/go-critic/go-critic/checkers/testdata/_importable/examplepkg.Missing]: "Missing" not found in package "github.com/go-critic/go-critic/checkers/testdata/_importable/examplepkg" */
++func PathQualifiedMissing() {}
++
++// PathTypeNotFound is an example.
++/*! [github.com/go-critic/go-critic/checkers/testdata/_importable/examplepkg.MissingType.Field]: type "MissingType" not found in package "github.com/go-critic/go-critic/checkers/testdata/_importable/examplepkg" */
++func PathTypeNotFound() {}
++
++// DotTypeMemberMissing is an example.
++/*! [IntSlice.Missing]: type "IntSlice" has no method or field "Missing" */
++func DotTypeMemberMissing() {}
++
++// GenericMemberMissing is an example.
++/*! [Box.Missing]: type "Box" has no method or field "Missing" */
++func GenericMemberMissing() {}
++
++// AliasMemberMissing is an example.
++/*! [AliasType.Missing]: type "AliasType" has no method or field "Missing" */
++func AliasMemberMissing() {}
+diff --git a/checkers/testdata/brokenDocLink/types.go b/checkers/testdata/brokenDocLink/types.go
+new file mode 100644
+index 0000000..8bbde41
+--- /dev/null
++++ b/checkers/testdata/brokenDocLink/types.go
+@@ -0,0 +1,22 @@
++package checker_test
++
++type Base struct{ X int }
++
++func (Base) M() {}
++
++type Embedded struct{ Base }
++
++type PtrEmbed struct{ *Base }
++
++type MyType struct {
++	Embedded
++	Y int
++}
++
++func (MyType) N() {}
++
++type Box[T any] struct{}
++
++func (b *Box[T]) Put(x T) {}
++
++type AliasType = MyType
+diff --git a/docs/overview.md b/docs/overview.md
+index 803320f..e7abfe8 100644
+--- a/docs/overview.md
++++ b/docs/overview.md
+@@ -6,7 +6,7 @@ This page describes checks supported by [go-critic](https://github.com/go-critic
+ 
+ ## Checkers
+ 
+-Total number of checks is 108 :rocket:
++Total number of checks is 109 :rocket:
+ 
+ * :heavy_check_mark: checker is enabled by default.
+ * :white_check_mark: checker is disabled by default.
+@@ -28,6 +28,7 @@ They also detect code that may be correct, but looks suspicious.
+ |:white_check_mark:[badRegexp](#badregexp)|Detects suspicious regexp patterns|
+ |:white_check_mark:[badSorting](#badsorting)|Detects bad usage of sort package|
+ |:white_check_mark:[badSyncOnceFunc](#badsynconcefunc)|Detects bad usage of sync.OnceFunc|
++|:white_check_mark:[brokenDocLink](#brokendoclink)|Detects broken doc comment links|
+ |:white_check_mark:[builtinShadowDecl](#builtinshadowdecl)|Detects top-level declarations that shadow the predeclared identifiers|
+ |:heavy_check_mark:[caseOrder](#caseorder)|Detects erroneous case order inside switch statements|
+ |:heavy_check_mark:[codegenComment](#codegencomment)|Detects malformed 'code generated' file comments|
+@@ -405,6 +406,33 @@ b := (x) == (y)
+ ```
+ 
+ 
++## brokenDocLink
++
++[
++  **diagnostic**
++  **experimental** ]
++
++Detects broken doc comment links.
++
++
++
++
++
++**Before:**
++```go
++// Foo is a sample function.
++// It is documented by [Bar] which does not exist.
++func Foo() int
++```
++
++**After:**
++```go
++// Foo is a sample function.
++// It is documented by [Foo] which is defined in this package.
++func Foo() int
++```
++
++
+ ## builtinShadow
+ 
+ [

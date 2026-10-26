@@ -1,0 +1,1 @@
+wc -l sqlite_utils/db.py sqlite_utils/cli.py sqlite_utils/utils.py && grep -n "class Database\|class Table\|def insert\|def upsert\|def bulk_insert\|def bulk_upsert\|def import_csv\|def import_json\|def enable_counts\|def table\|def create_table\|def ensure_trigger\|def transform\|def commit\|def rollback" sqlite_utils/db.py | head -100

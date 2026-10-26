@@ -1,0 +1,1 @@
+cd /app && nl -ba src/container.ts | sed -n '175,260p'; echo "==== total lines:"; wc -l src/container.ts

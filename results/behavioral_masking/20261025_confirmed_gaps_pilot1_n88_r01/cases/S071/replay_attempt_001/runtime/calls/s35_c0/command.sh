@@ -1,0 +1,1 @@
+cd /app && sed -n '88,102p' src/error-stack.test.ts

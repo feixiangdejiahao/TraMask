@@ -1,0 +1,1 @@
+grep -rn "partial_structure\|PartialResult\|partial structure\|partial_structure" src tests docs HISTORY.md | head -100

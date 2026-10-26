@@ -1,0 +1,1 @@
+cd /app && python -m black --version 2>/dev/null || pip show black 2>/dev/null | head -3 || echo "no black"

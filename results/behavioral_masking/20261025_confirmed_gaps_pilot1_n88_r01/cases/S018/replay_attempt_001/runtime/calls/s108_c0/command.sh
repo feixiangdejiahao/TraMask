@@ -1,0 +1,8 @@
+cd /app && python - <<'EOF'
+from datetime import datetime
+from dateutil.rrule import *
+r = rrule(YEARLY, count=1, dtstart=datetime(1997,9,2,9,0,30))
+print('bysecond:', r._bysecond)
+print('timeset:', r._timeset)
+print(list(r))
+EOF

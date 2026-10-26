@@ -1,0 +1,1 @@
+cat tsconfig.json tsconfig.build.json; echo '---'; node --version; echo '---'; sed -n '430,520p' src/container.ts

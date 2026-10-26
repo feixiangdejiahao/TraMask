@@ -1,0 +1,1 @@
+cd /app && ls src/schema/anyOf && echo "===ANYOF schema_.ts===" && cat src/schema/anyOf/schema_.ts && echo "===ANYOF schema.ts===" && cat src/schema/anyOf/schema.ts && echo "===ANYOF types.ts===" && cat src/schema/anyOf/types.ts && echo "===ANYOF index.ts===" && cat src/schema/anyOf/index.ts

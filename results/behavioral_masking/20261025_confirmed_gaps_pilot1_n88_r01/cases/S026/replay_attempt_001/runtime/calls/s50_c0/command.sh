@@ -1,0 +1,1 @@
+cd /app && grep -n "func valid\|func docLinkText" checkers/brokenDocLink_checker.go && sed -n '95,150p' checkers/brokenDocLink_checker.go

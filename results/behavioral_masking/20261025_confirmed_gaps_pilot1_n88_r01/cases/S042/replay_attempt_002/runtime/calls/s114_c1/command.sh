@@ -1,0 +1,1 @@
+cd /app/packages/react && pnpm exec vitest run --environment=jsdom 2>&1 | tail -40

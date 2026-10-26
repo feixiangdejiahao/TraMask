@@ -1,0 +1,1 @@
+find packages/core/src -type f -maxdepth 3 | sort && echo '---' && find packages/core/spec -type f -maxdepth 2 | sort

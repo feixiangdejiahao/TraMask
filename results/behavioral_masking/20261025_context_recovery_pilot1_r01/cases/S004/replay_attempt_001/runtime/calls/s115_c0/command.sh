@@ -1,0 +1,1 @@
+cd /app && git log --oneline --graph --all | head -10

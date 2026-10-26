@@ -1,0 +1,1 @@
+cd /app && npx eslint src/core/atomic-selectors.ts src/core/selectors.ts src/core/reducers.ts src/kea/build.ts src/kea/context.ts src/kea/kea.ts src/kea/store.ts src/types.ts 2>&1 | head -80

@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec vitest run test/prompts/async-autocomplete.test.ts -t 'previous AbortController is aborted when new fetch starts' --maxWorkers 1 --minWorkers 1 --reporter=verbose

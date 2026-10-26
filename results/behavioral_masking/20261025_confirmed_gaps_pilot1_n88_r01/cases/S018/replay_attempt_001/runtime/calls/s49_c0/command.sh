@@ -1,0 +1,1 @@
+cd /app && grep -n "self._byhour\|self._byminute\|self._bysecond" src/dateutil/rrule.py | head -30

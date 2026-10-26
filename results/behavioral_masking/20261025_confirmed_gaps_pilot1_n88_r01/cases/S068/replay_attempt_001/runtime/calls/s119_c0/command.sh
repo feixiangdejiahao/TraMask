@@ -1,0 +1,1 @@
+cd /app && tail -60 docs/cli-reference.rst

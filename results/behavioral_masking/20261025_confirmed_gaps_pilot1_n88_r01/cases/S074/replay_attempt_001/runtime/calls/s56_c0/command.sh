@@ -1,0 +1,1 @@
+cd /app && grep -rn "\.\.\." --include="*.tengo" --include="*.go" . | grep "func" | head -20 && grep -rn "VarArgs" compiler.go | head

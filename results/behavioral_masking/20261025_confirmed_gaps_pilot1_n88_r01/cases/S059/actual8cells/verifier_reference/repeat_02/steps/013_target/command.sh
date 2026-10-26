@@ -1,0 +1,1 @@
+go test -tags batch_durable -run '^TestBatchDurableDurabilityNotifyBlocksUntilDurable$' -count=1 -timeout 60s -v .

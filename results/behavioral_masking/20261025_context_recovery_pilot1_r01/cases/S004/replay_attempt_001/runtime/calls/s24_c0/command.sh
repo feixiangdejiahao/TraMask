@@ -1,0 +1,1 @@
+pip show aiomonitor 2>/dev/null | head -20; python -c "import aiomonitor, inspect; print(aiomonitor.__file__)"; pip list 2>/dev/null | grep -i aiomonitor

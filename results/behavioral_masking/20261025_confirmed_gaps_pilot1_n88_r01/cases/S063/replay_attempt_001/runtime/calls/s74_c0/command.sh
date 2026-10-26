@@ -1,0 +1,1 @@
+cd /app && timeout 30 python -c "import pwn; print('pwn import ok')" 2>&1 | tail -5

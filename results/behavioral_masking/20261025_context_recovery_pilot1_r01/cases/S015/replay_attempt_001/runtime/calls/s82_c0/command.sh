@@ -1,0 +1,1 @@
+cd /app && git diff bandit/cli/main.py | sed -n '1,280p'

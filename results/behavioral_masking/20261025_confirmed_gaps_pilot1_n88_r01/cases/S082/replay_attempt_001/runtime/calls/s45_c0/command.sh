@@ -1,0 +1,1 @@
+cd /app && sed -n '1,80p' testem.js && sed -n '1,120p' lib/api.js

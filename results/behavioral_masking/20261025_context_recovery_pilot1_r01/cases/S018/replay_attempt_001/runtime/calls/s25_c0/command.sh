@@ -1,0 +1,1 @@
+cd /app && git log --all --oneline | head -20 && git stash list && git fsck --no-reflogs --unreachable 2>/dev/null | head -20

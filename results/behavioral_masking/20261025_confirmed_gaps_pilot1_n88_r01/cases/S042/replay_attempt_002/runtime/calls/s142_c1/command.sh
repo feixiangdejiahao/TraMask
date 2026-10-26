@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec tsc --noEmit -p tsconfig.json && pnpm exec oxlint src tests 2>&1 | tail -20

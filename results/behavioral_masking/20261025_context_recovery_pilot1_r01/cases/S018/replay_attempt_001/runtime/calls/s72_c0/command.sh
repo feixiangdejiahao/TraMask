@@ -1,0 +1,1 @@
+cd /app && python -m testtools.run tests.unit.core.test_nosec 2>&1 | grep -A20 'FAIL: tests.unit.core.test_nosec.SelectorTests.test_difference'

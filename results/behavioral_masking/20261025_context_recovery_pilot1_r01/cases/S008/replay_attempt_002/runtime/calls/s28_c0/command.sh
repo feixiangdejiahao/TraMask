@@ -1,0 +1,1 @@
+cd /app && sed -n '1,120p' backend/internal/database/database.go && echo "=====TYPES CONTAINER SUMMARY=====" && grep -rn "type Summary struct" types/container/*.go && sed -n '1,180p' types/container/summary.go 2>/dev/null

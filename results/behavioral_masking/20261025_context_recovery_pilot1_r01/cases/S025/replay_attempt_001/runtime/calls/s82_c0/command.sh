@@ -1,0 +1,1 @@
+cd /app && pnpm test 2>&1 | tail -25

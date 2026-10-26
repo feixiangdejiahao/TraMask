@@ -1,0 +1,1 @@
+cd /app && echo "===MAP schema_.ts===" && cat src/schema/map/schema_.ts && echo "===MAP schema.ts===" && cat src/schema/map/schema.ts && echo "===MAP types.ts===" && cat src/schema/map/types.ts && echo "===MAP index.ts===" && cat src/schema/map/index.ts

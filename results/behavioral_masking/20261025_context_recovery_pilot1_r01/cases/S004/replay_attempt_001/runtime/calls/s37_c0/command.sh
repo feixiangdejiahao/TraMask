@@ -1,0 +1,1 @@
+cd /app && python -m py_compile aiomonitor/monitor.py aiomonitor/types.py aiomonitor/task.py && echo OK

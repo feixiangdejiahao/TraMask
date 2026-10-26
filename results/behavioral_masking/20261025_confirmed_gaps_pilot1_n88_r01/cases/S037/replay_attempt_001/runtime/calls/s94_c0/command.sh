@@ -1,0 +1,1 @@
+cd /app && wc -l test/jest/atomic-selectors.js && grep -n "debug\|console.log\|DBG" test/jest/atomic-selectors.js || echo "no debug leftovers" && NODE_ENV=development BABEL_ENV=test npx jest 2>&1 | tail -8

@@ -1,0 +1,1 @@
+cd /app && cat package.json | head -100 && echo "---SRC---" && find src -type f | head -100

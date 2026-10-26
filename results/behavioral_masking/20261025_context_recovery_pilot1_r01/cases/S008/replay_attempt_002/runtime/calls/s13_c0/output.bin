@@ -1,0 +1,210 @@
+93:	VulnerabilityScanEnabled        SettingVariable `key:"vulnerabilityScanEnabled" meta:"label=Scheduled Vulnerability Scan;type=boolean;keywords=vulnerability,scan,security,trivy,schedule,automatic,cve;category=security;description=Enable scheduled vulnerability scanning of all Docker images" catmeta:"id=security;title=Security;icon=shield;url=/settings/security;description=Configure vulnerability scanning and runtime security settings"`
+94:	VulnerabilityScanInterval       SettingVariable `key:"vulnerabilityScanInterval" meta:"label=Vulnerability Scan Interval;type=cron;keywords=vulnerability,scan,interval,schedule,frequency,trivy,cve;category=security;description=How often to run scheduled vulnerability scans (cron expression)"`
+95:	TrivyImage                      SettingVariable `key:"trivyImage,envOverride" meta:"label=Trivy Image;type=text;keywords=trivy,scanner,vulnerability,security,image;category=security;description=Override the Trivy image used for vulnerability scans"`
+96:	TrivyNetwork                    SettingVariable `key:"trivyNetwork,envOverride" meta:"label=Trivy Network;type=text;keywords=trivy,network,mode,bridge,host,none,scanner,vulnerability,security;category=security;description=Docker network mode/network name used for Trivy scan containers. Leave empty to inherit Arcane's network automatically."`
+105:	TrivyIgnore                     SettingVariable `key:"trivyIgnore" meta:"label=.trivyignore;type=textarea;keywords=trivy,ignore,ignorefile,vulnerabilities,exceptions,exclusions;category=security;description=Trivy ignore file content - one vulnerability ID per line"`
+146:	TrivyScanTimeout       SettingVariable `key:"trivyScanTimeout,envOverride" meta:"label=Trivy Scan Timeout;type=number;keywords=trivy,vulnerability,scan,timeout,seconds,cve;category=timeouts;description=Timeout for Trivy image scans in seconds (default: 900 = 15 minutes)"`
+=====
+package scheduler
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strconv"
+
+	"github.com/getarcaneapp/arcane/backend/internal/models"
+	"github.com/getarcaneapp/arcane/backend/internal/services"
+	"github.com/getarcaneapp/arcane/types"
+	"github.com/robfig/cron/v3"
+)
+
+const VulnerabilityScanJobName = "vulnerability-scan"
+
+// systemUser is used as the actor for scheduled vulnerability scans.
+var vulnerabilityScanSystemUser = models.User{
+	Username: "System",
+}
+
+// VulnerabilityScanJob periodically scans all Docker images for vulnerabilities
+// using Trivy. It is opt-in via the "vulnerabilityScanEnabled" setting.
+type VulnerabilityScanJob struct {
+	vulnerabilityService *services.VulnerabilityService
+	settingsService      *services.SettingsService
+}
+
+// NewVulnerabilityScanJob creates a new VulnerabilityScanJob.
+func NewVulnerabilityScanJob(vulnerabilityService *services.VulnerabilityService, settingsService *services.SettingsService) *VulnerabilityScanJob {
+	return &VulnerabilityScanJob{
+		vulnerabilityService: vulnerabilityService,
+		settingsService:      settingsService,
+	}
+}
+
+func (j *VulnerabilityScanJob) Name() string {
+	return VulnerabilityScanJobName
+}
+
+// Schedule returns the cron expression for the job. Defaults to daily at midnight.
+func (j *VulnerabilityScanJob) Schedule(ctx context.Context) string {
+	schedule := j.settingsService.GetStringSetting(ctx, "vulnerabilityScanInterval", "0 0 0 * * *")
+	if schedule == "" {
+		schedule = "0 0 0 * * *"
+	}
+
+	// Handle legacy straight int if it somehow didn't get migrated
+	if i, err := strconv.Atoi(schedule); err == nil {
+		if i <= 0 {
+			i = 1440
+		}
+		switch {
+		case i%1440 == 0:
+			schedule = fmt.Sprintf("0 0 0 */%d * *", i/1440)
+		case i%60 == 0:
+			schedule = fmt.Sprintf("0 0 */%d * * *", i/60)
+		default:
+			schedule = fmt.Sprintf("0 */%d * * * *", i)
+		}
+	}
+
+	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	if _, err := parser.Parse(schedule); err != nil {
+		slog.WarnContext(ctx, "Invalid cron expression for vulnerability-scan, using default", "invalid_schedule", schedule, "error", err)
+		return "0 0 0 * * *"
+	}
+
+	return schedule
+}
+
+func (j *VulnerabilityScanJob) Run(ctx context.Context) {
+	enabled := j.settingsService.GetBoolSetting(ctx, "vulnerabilityScanEnabled", false)
+	if !enabled {
+		slog.DebugContext(ctx, "scheduled vulnerability scan disabled; skipping run")
+		return
+	}
+
+	slog.InfoContext(ctx, "scheduled vulnerability scan started")
+
+	// Remove scan records for images that no longer exist (fixes e.g. "5/3 images scanned").
+	deleted, err := j.vulnerabilityService.CleanupOrphanedScanRecords(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "orphaned vulnerability scan cleanup failed", "error", err)
+	}
+	if deleted > 0 {
+		slog.InfoContext(ctx, "cleaned up orphaned vulnerability scan records", "deleted", deleted)
+	}
+
+	scanned, failed, err := j.vulnerabilityService.ScanAllImages(ctx, types.LOCAL_DOCKER_ENVIRONMENT_ID, vulnerabilityScanSystemUser)
+	if err != nil {
+		slog.ErrorContext(ctx, "scheduled vulnerability scan failed", "error", err)
+		return
+	}
+
+	slog.InfoContext(ctx, "scheduled vulnerability scan completed",
+		"scanned", scanned,
+		"failed", failed,
+	)
+}
+=====
+package scheduler
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	schedulertypes "github.com/getarcaneapp/arcane/types/scheduler"
+	"github.com/robfig/cron/v3"
+)
+
+type JobScheduler struct {
+	cron     *cron.Cron
+	jobs     []schedulertypes.Job
+	jobsByID map[string]schedulertypes.Job
+	entryIDs map[string]cron.EntryID
+	context  context.Context
+	location *time.Location
+}
+
+// NewJobScheduler creates a new job scheduler with the specified timezone location.
+// The location is used for interpreting cron expressions.
+// If location is nil, UTC is used.
+func NewJobScheduler(ctx context.Context, location *time.Location) *JobScheduler {
+	if location == nil {
+		location = time.UTC
+	}
+	slog.InfoContext(ctx, "Initializing job scheduler", "timezone", location.String())
+	return &JobScheduler{
+		cron:     cron.New(cron.WithSeconds(), cron.WithLocation(location)),
+		jobs:     []schedulertypes.Job{},
+		jobsByID: make(map[string]schedulertypes.Job),
+		entryIDs: make(map[string]cron.EntryID),
+		context:  ctx,
+		location: location,
+	}
+}
+
+func (js *JobScheduler) RegisterJob(job schedulertypes.Job) {
+	js.jobs = append(js.jobs, job)
+	js.jobsByID[job.Name()] = job
+}
+
+func (js *JobScheduler) GetJob(jobID string) (schedulertypes.Job, bool) {
+	job, ok := js.jobsByID[jobID]
+	return job, ok
+}
+
+func (js *JobScheduler) StartScheduler() {
+	for _, job := range js.jobs {
+		currentJob := job
+		schedule := currentJob.Schedule(js.context)
+
+		slog.InfoContext(js.context, "Starting Job", "name", currentJob.Name(), "schedule", schedule)
+
+		entryID, err := js.cron.AddFunc(schedule, func() {
+			slog.InfoContext(js.context, "Job starting", "name", currentJob.Name(), "schedule", schedule)
+			currentJob.Run(js.context)
+			slog.InfoContext(js.context, "Job finished", "name", currentJob.Name())
+		})
+		if err != nil {
+			slog.ErrorContext(js.context, "Failed to schedule job", "name", currentJob.Name(), "schedule", schedule, "error", err)
+			continue
+		}
+
+		js.entryIDs[currentJob.Name()] = entryID
+	}
+	js.cron.Start()
+}
+
+func (js *JobScheduler) RescheduleJob(ctx context.Context, job schedulertypes.Job) error {
+	schedule := job.Schedule(ctx)
+
+	if entryID, ok := js.entryIDs[job.Name()]; ok {
+		js.cron.Remove(entryID)
+	}
+
+	entryID, err := js.cron.AddFunc(schedule, func() {
+		slog.InfoContext(ctx, "Job starting", "name", job.Name(), "schedule", schedule)
+		job.Run(ctx)
+		slog.InfoContext(ctx, "Job finished", "name", job.Name())
+	})
+	if err != nil {
+		return err
+	}
+
+	js.entryIDs[job.Name()] = entryID
+	slog.DebugContext(ctx, "Job rescheduled", "name", job.Name(), "schedule", schedule, "contextCanceled", ctx.Err() != nil)
+	return nil
+}
+
+// GetLocation returns the timezone location used by the scheduler for cron expressions.
+func (js *JobScheduler) GetLocation() *time.Location {
+	return js.location
+}
+
+func (js *JobScheduler) Run(ctx context.Context) error {
+	js.StartScheduler()
+	<-ctx.Done()
+	js.cron.Stop()
+	return nil
+}

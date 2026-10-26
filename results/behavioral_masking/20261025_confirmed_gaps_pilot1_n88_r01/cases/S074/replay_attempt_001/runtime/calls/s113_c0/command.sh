@@ -1,0 +1,1 @@
+cd /app && sed -n '570,790p' objects.go

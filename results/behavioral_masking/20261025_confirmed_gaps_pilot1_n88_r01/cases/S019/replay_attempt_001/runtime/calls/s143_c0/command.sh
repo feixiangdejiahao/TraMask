@@ -1,0 +1,1 @@
+cd /app && rm -f .tmp-*.ts && npx tsc --noEmit 2>&1 | head -20 && echo "===PRETTIER===" && npx prettier --check 'src/**/*.(js|ts)' 2>&1 | tail -20

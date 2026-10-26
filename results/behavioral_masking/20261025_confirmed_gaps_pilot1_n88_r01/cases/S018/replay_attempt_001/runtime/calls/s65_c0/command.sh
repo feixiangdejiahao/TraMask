@@ -1,0 +1,38 @@
+cd /app && python - <<'EOF'
+path = 'src/dateutil/rrule.py'
+with open(path) as f:
+    src = f.read()
+old = """        lines = ['BEGIN:VCALENDAR',
+                 'VERSION:2.0',
+                 'PRODID:-//dateutil//dateutil//EN',
+                 'BEGIN:VEVENT']
+        if (self._dtstart is not None and self._dtstart.tzinfo is not None and
+                _tzid(self._dtstart) != 'UTC'):
+            lines.append(_timezone_to_ical(self._dtstart.tzinfo, self._dtstart))
+        lines.append(str(self))
+        lines.append('END:VEVENT')
+        lines.append('END:VCALENDAR')"""
+new = """        lines = ['BEGIN:VCALENDAR',
+                 'VERSION:2.0',
+                 'PRODID:-//dateutil//dateutil//EN']
+        if (self._dtstart is not None and self._dtstart.tzinfo is not None and
+                _tzid(self._dtstart) != 'UTC'):
+            lines.append(_timezone_to_ical(self._dtstart.tzinfo, self._dtstart))
+        lines.append('BEGIN:VEVENT')
+        lines.append(str(self))
+        lines.append('END:VEVENT')
+        lines.append('END:VCALENDAR')"""
+assert old in src
+src = src.replace(old, new, 1)
+with open(path, 'w') as f:
+    f.write(src)
+print("to_ical placement fixed")
+EOF
+cd /app && python - <<'EOF'
+from datetime import datetime
+from dateutil import tz
+from dateutil.rrule import rrule, YEARLY
+r = rrule(YEARLY, count=3, dtstart=datetime(1997,9,2,9,0,tzinfo=tz.gettz('America/New_York')))
+print(r.to_ical())
+assert r.to_ical().index('BEGIN:VTIMEZONE') < r.to_ical().index('BEGIN:VEVENT')
+EOF

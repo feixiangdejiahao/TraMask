@@ -1,0 +1,1 @@
+cd /app && go test ./cmd/... -count=1 2>&1 | tail -10

@@ -1,0 +1,271 @@
+   880	            counts_table.delete_where()
+   881	            counts_table.insert_all(
+   882	                {"table": table.name, "count": table.execute_count()}
+   883	                for table in tables
+   884	            )
+   885	
+   886	    def execute_returning_dicts(
+   887	        self, sql: str, params: Optional[Union[Sequence, Dict[str, Any]]] = None
+   888	    ) -> List[dict]:
+   889	        return list(self.query(sql, params))
+   890	
+   891	
+   892	    def enable_safe_import(self) -> None:
+   893	        """
+   894	        Enable safe import mode for this database. While enabled the
+   895	        connection runs in autocommit mode and :meth:`create_import_checkpoint`
+   896	        can be used to create rollback checkpoints.
+   897	        """
+   898	        if not self._safe_import_enabled:
+   899	            self._safe_import_previous_isolation_level = self.conn.isolation_level
+   900	            self.conn.isolation_level = None
+   901	            self._safe_import_enabled = True
+   902	            self._safe_import_in_progress = True
+   903	
+   904	    def disable_safe_import(self) -> None:
+   905	        """
+   906	        Disable safe import mode for this database, restoring the previous
+   907	        transaction behaviour.
+   908	        """
+   909	        if self._safe_import_enabled:
+   910	            self.conn.isolation_level = self._safe_import_previous_isolation_level
+   911	            self._safe_import_enabled = False
+   912	            self._safe_import_in_progress = False
+   913	
+   914	    def _create_checkpoint(self) -> str:
+   915	        checkpoint_id = "sp_" + secrets.token_hex(16)
+   916	        self.execute(
+   917	            "SAVEPOINT {}".format(quote_identifier(checkpoint_id))
+   918	        )
+   919	        self._active_checkpoints.add(checkpoint_id)
+   920	        return checkpoint_id
+   921	
+   922	    def create_import_checkpoint(self) -> str:
+   923	        """
+   924	        Create a rollback checkpoint and return its checkpoint id. The id is
+   925	        an opaque non-empty string.
+   926	
+   927	        Raises :class:`SafeImportNotEnabledError` if safe import mode is not
+   928	        currently enabled.
+   929	        """
+   930	        if not self._safe_import_enabled:
+   931	            raise SafeImportNotEnabledError(
+   932	                "Safe import mode is not enabled - call enable_safe_import() first"
+   933	            )
+   934	        return self._create_checkpoint()
+   935	
+   936	    def _require_active_checkpoint(self, checkpoint_id: str) -> None:
+   937	        if checkpoint_id in self._active_checkpoints:
+   938	            return
+   939	        if checkpoint_id in self._finalized_checkpoints:
+   940	            raise CheckpointNotActiveError(
+   941	                "Checkpoint {} is no longer active".format(checkpoint_id)
+   942	            )
+   943	        raise CheckpointNotFoundError(
+   944	            "Checkpoint {} does not exist".format(checkpoint_id)
+   945	        )
+   946	
+   947	    def commit_checkpoint(self, checkpoint_id: str) -> None:
+   948	        """
+   949	        Commit a checkpoint created using :meth:`create_import_checkpoint`.
+   950	        Any changes made since the checkpoint was created are kept.
+   951	
+   952	        Committing finalizes the checkpoint: further commit or rollback calls
+   953	        with the same id will raise :class:`CheckpointNotActiveError`.
+   954	        """
+   955	        self._require_active_checkpoint(checkpoint_id)
+   956	        self.execute("RELEASE SAVEPOINT {}".format(quote_identifier(checkpoint_id)))
+   957	        self._active_checkpoints.discard(checkpoint_id)
+   958	        self._finalized_checkpoints.add(checkpoint_id)
+   959	
+   960	    def rollback_to_checkpoint(self, checkpoint_id: str) -> None:
+   961	        """
+   962	        Roll back to a checkpoint created using :meth:`create_import_checkpoint`,
+   963	        restoring the exact database state (including schema changes) from when
+   964	        the checkpoint was created.
+   965	
+   966	        Rolling back finalizes the checkpoint: further commit or rollback calls
+   967	        with the same id will raise :class:`CheckpointNotActiveError`.
+   968	        """
+   969	        self._require_active_checkpoint(checkpoint_id)
+   970	        quoted = quote_identifier(checkpoint_id)
+   971	        self.execute("ROLLBACK TO SAVEPOINT {}".format(quoted))
+   972	        self.execute("RELEASE SAVEPOINT {}".format(quoted))
+   973	        self._active_checkpoints.discard(checkpoint_id)
+   974	        self._finalized_checkpoints.add(checkpoint_id)
+   975	
+   976	    def cleanup_checkpoint(self, checkpoint_id: str) -> None:
+   977	        """
+   978	        Remove a checkpoint id from tracking. Active checkpoints are released
+   979	        (their changes are kept) and finalized checkpoints are simply forgotten.
+   980	
+   981	        After cleanup, commit/rollback calls with the same id raise
+   982	        :class:`CheckpointNotFoundError`.
+   983	        """
+   984	        if checkpoint_id in self._active_checkpoints:
+   985	            try:
+   986	                self.execute(
+   987	                    "RELEASE SAVEPOINT {}".format(quote_identifier(checkpoint_id))
+   988	                )
+   989	            except Exception:
+   990	                pass
+   991	            self._active_checkpoints.discard(checkpoint_id)
+   992	        elif checkpoint_id in self._finalized_checkpoints:
+   993	            self._finalized_checkpoints.discard(checkpoint_id)
+   994	        else:
+   995	            raise CheckpointNotFoundError(
+   996	                "Checkpoint {} does not exist".format(checkpoint_id)
+   997	            )
+   998	
+   999	    def _ensure_import_invariants_table(self) -> None:
+  1000	        self.execute(
+  1001	            _IMPORT_INVARIANTS_TABLE_CREATE_SQL.format(_IMPORT_INVARIANTS_TABLE)
+  1002	        )
+  1003	
+  1004	    def add_import_invariant(self, table: str, sql: str) -> str:
+  1005	        """
+  1006	        Add a persistent import invariant for a table. Returns an opaque
+  1007	        invariant id.
+  1008	
+  1009	        :param table: Name of the table the invariant applies to
+  1010	        :param sql: SQL invariant expression, or a ``SELECT`` statement
+  1011	        """
+  1012	        self._ensure_import_invariants_table()
+  1013	        invariant_id = "inv_" + secrets.token_hex(16)
+  1014	        with self._transaction():
+  1015	            self.execute(
+  1016	                'INSERT INTO {} ("table", id, expression) VALUES (?, ?, ?)'.format(
+  1017	                    quote_identifier(_IMPORT_INVARIANTS_TABLE)
+  1018	                ),
+  1019	                (table, invariant_id, sql),
+  1020	            )
+  1021	        return invariant_id
+  1022	
+  1023	    def remove_import_invariant(self, table: str, invariant_id: str) -> None:
+  1024	        """
+  1025	        Remove an import invariant for a table.
+  1026	
+  1027	        :param table: Name of the table
+  1028	        :param invariant_id: Id returned by :meth:`add_import_invariant`
+  1029	        """
+  1030	        self._ensure_import_invariants_table()
+  1031	        with self._transaction():
+  1032	            self.execute(
+  1033	                'DELETE FROM {} WHERE "table" = ? AND id = ?'.format(
+  1034	                    quote_identifier(_IMPORT_INVARIANTS_TABLE)
+  1035	                ),
+  1036	                (table, invariant_id),
+  1037	            )
+  1038	
+  1039	    def list_import_invariants(self, table: str) -> List[Dict[str, str]]:
+  1040	        """
+  1041	        Return a list of ``{"id": invariant_id, "expression": sql}``
+  1042	        dictionaries for the specified table.
+  1043	
+  1044	        :param table: Name of the table
+  1045	        """
+  1046	        self._ensure_import_invariants_table()
+  1047	        rows = self.execute(
+  1048	            'SELECT id, expression FROM {} WHERE "table" = ? ORDER BY rowid'.format(
+  1049	                quote_identifier(_IMPORT_INVARIANTS_TABLE)
+  1050	            ),
+  1051	            (table,),
+  1052	        ).fetchall()
+  1053	        return [{"id": row[0], "expression": row[1]} for row in rows]
+  1054	
+  1055	    def validate_import_invariants(self, table: str) -> Dict[str, Any]:
+  1056	        """
+  1057	        Validate every import invariant registered for ``table``.
+  1058	
+  1059	        Returns ``{"valid": bool, "failures": [{"id", "expression", "error"}]}``.
+  1060	
+  1061	        Invariants whose SQL starts with ``SELECT`` are evaluated directly and
+  1062	        the first column of the first row is treated as truthy/falsy. Other SQL
+  1063	        is treated as an expression: aggregate expressions are evaluated once
+  1064	        for the table while non-aggregate expressions must be true for every
+  1065	        row.
+  1066	        """
+  1067	        failures = []
+  1068	        invariants = self.list_import_invariants(table)
+  1069	        table_exists = self.table(table).exists()
+  1070	        count = self.table(table).count if table_exists else 0
+  1071	        for invariant in invariants:
+  1072	            expression = invariant["expression"]
+  1073	            ok = True
+  1074	            try:
+  1075	                if expression.lstrip().upper().startswith("SELECT"):
+  1076	                    rows = self.execute(expression).fetchall()
+  1077	                    ok = bool(rows and rows[0][0])
+  1078	                else:
+  1079	                    rows = self.execute(
+  1080	                        "SELECT ({}) AS _import_invariant FROM {}".format(
+  1081	                            expression, quote_identifier(table)
+  1082	                        )
+  1083	                    ).fetchall()
+  1084	                    if count == 0:
+  1085	                        # Non-aggregate expressions are vacuously true for an
+  1086	                        # empty table; aggregate expressions return one row.
+  1087	                        ok = bool(rows and rows[0][0]) if rows else True
+  1088	                    elif len(rows) == 1:
+  1089	                        ok = bool(rows[0][0])
+  1090	                    else:
+  1091	                        ok = all(bool(row[0]) for row in rows)
+  1092	            except Exception as e:
+  1093	                failures.append(
+  1094	                    {
+  1095	                        "id": invariant["id"],
+  1096	                        "expression": expression,
+  1097	                        "error": str(e),
+  1098	                    }
+  1099	                )
+  1100	                continue
+  1101	            if not ok:
+  1102	                failures.append(
+  1103	                    {
+  1104	                        "id": invariant["id"],
+  1105	                        "expression": expression,
+  1106	                        "error": "expression evaluated to false",
+  1107	                    }
+  1108	                )
+  1109	        return {"valid": not failures, "failures": failures}
+  1110	
+  1111	    def _format_import_error_report(
+  1112	        self,
+  1113	        table: Optional[str],
+  1114	        error: Optional[Exception],
+  1115	        failures: List[Dict[str, Any]],
+  1116	    ) -> str:
+  1117	        bits = []
+  1118	        if error is not None:
+  1119	            bits.append("Import error: {}".format(error))
+  1120	        if failures:
+  1121	            bits.append("Import invariant validation failed for table '{}':".format(table))
+  1122	            for failure in failures:
+  1123	                bits.append(
+  1124	                    "  {} {}: {}".format(
+  1125	                        failure["id"],
+  1126	                        failure["expression"],
+  1127	                        failure.get("error") or "false",
+  1128	                    )
+  1129	                )
+  1130	        return "\n".join(bits)
+  1131	
+  1132	    def safe_import(
+  1133	        self,
+  1134	        table: Optional[str],
+  1135	        operation: Callable[[], None],
+  1136	        strict: bool = False,
+  1137	    ) -> Dict[str, Any]:
+  1138	        """
+  1139	        Run ``operation`` inside a rollback checkpoint. On success the
+  1140	        checkpoint is committed and ``{"success": True}`` is returned. On
+  1141	        failure the database is rolled back to its pre-operation state.
+  1142	
+  1143	        If ``strict`` is ``True`` a failure raises an exception instead of
+  1144	        returning a result dictionary. Invariant failures raise
+  1145	        :class:`ImportInvariantError`.
+  1146	        """
+  1147	        return self._safe_import_operation(table, operation, strict=strict)
+  1148	
+  1149	    def _safe_import_operation(
+  1150	        self,

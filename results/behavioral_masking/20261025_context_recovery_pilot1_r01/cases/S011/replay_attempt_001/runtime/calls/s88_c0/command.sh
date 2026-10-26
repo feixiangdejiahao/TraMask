@@ -1,0 +1,1 @@
+cd /app && grep -n "## `container.dispose()`\|## The \`AwilixContainer\` object" README.md | head

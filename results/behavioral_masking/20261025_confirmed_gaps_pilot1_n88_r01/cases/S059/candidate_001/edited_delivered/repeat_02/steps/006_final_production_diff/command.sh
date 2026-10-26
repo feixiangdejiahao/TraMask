@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary 1454d2bc0f378d7f34766afafee68a77e7b85995 -- batch.go commit.go db.go durability.go durable.go event.go metrics.go open.go options.go record/log_writer.go wal/failover_writer.go wal/standalone_manager.go wal/wal.go

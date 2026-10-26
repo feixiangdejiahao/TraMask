@@ -1,0 +1,1 @@
+cd /app && sed -n '1,100p' backend/internal/huma/handlers/environments_test.go

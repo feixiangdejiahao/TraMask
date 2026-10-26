@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec vitest run tests/pair-tracking-modifiers.test.ts -t 'Removed pair works when the query is created before the removal' --maxWorkers 1 --minWorkers 1 --reporter=verbose

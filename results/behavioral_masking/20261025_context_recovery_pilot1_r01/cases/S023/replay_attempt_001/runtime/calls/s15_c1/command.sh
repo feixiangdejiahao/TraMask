@@ -1,0 +1,1 @@
+grep -n "forbid_extra\|init\b\|default\|detailed_validation" src/cattrs/gen/__init__.py | head -100

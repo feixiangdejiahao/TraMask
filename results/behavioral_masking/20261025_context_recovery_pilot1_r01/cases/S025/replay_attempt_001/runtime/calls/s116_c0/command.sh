@@ -1,0 +1,1 @@
+cd /app && grep -n "loading\|loadError\|searchTooShort\|retryCount\|clearCache\|debounceMs\|cacheResults\|staleWhileRevalidate" packages/core/dist/index.d.mts | head -30

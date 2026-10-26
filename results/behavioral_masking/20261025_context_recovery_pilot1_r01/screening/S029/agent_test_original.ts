@@ -1,0 +1,273 @@
+import { test } from "@cliffy/internal/testing/test";
+import { deleteEnv } from "@cliffy/internal/runtime/delete-env";
+import { setEnv } from "@cliffy/internal/runtime/set-env";
+import { dirname, fromFileUrl, join } from "@std/path";
+import { assertEquals, assertRejects } from "@std/assert";
+import { Command } from "../../command.ts";
+import { ConfigParseError, ConfigValidationError } from "../../config/mod.ts";
+
+const dataDir = join(
+  dirname(fromFileUrl(import.meta.url)),
+  "config_testdata",
+);
+
+function basicCommand() {
+  return new Command()
+    .throwErrors()
+    .config({ name: "basic", searchPaths: [dataDir] })
+    .option("--port <port:number>", "Port")
+    .option("--verbose <verbose:boolean>", "Verbose")
+    .option("--name <name:string>", "Name")
+    .option("--my-option <value:string>", "My option")
+    .option("--server.host <host:string>", "Host")
+    .option("--tags [tags:string]", "Tags", { collect: true })
+    .option("--count <count:number>", "Count")
+    .option("--enabled <enabled:boolean>", "Enabled");
+}
+
+test("[command] - config - loads config values and caches them", async () => {
+  const cmd = basicCommand();
+  const { options } = await cmd.parse([]);
+
+  assertEquals(options, {
+    port: 8080,
+    verbose: true,
+    name: "from-json",
+    myOption: "hello",
+    server: { host: "localhost" },
+    tags: ["a", "b"],
+    count: 0,
+    enabled: false,
+  });
+  assertEquals(cmd.getConfigValues(), {
+    port: 8080,
+    verbose: true,
+    name: "from-json",
+    myOption: "hello",
+    "server.host": "localhost",
+    tags: ["a", "b"],
+    count: 0,
+    enabled: false,
+  });
+  assertEquals(cmd.getConfigPath()?.endsWith("basic.json"), true);
+});
+
+test("[command] - config - loads rc config", async () => {
+  const cmd = new Command()
+    .throwErrors()
+    .config({ name: "basic", searchPaths: [dataDir], formats: [".rc"] })
+    .option("--port <port:number>", "Port")
+    .option("--verbose <verbose:boolean>", "Verbose")
+    .option("--name <name:string>", "Name")
+    .option("--enabled <enabled:boolean>", "Enabled")
+    .option("--count <count:number>", "Count");
+
+  const { options } = await cmd.parse([]);
+  assertEquals(options, {
+    port: 9090,
+    verbose: false,
+    name: "hello world",
+    enabled: true,
+    count: 42,
+  });
+  assertEquals(cmd.getConfigPath()?.endsWith(".basicrc"), true);
+});
+
+test("[command] - config - precedence cli over env over config", async () => {
+  setEnv("PORT", "5555");
+  try {
+    const cmd = basicCommand().env("PORT=<value:number>", "Port");
+    const { options } = await cmd.parse([]);
+    assertEquals(options.port, 5555);
+
+    const cmd2 = basicCommand().env("PORT=<value:number>", "Port");
+    const { options: options2 } = await cmd2.parse(["--port", "7777"]);
+    assertEquals(options2.port, 7777);
+  } finally {
+    deleteEnv("PORT");
+  }
+});
+
+test("[command] - config - merge configs with earlier paths taking precedence", async () => {
+  const cmd = new Command()
+    .throwErrors()
+    .config({
+      name: "merge",
+      searchPaths: [
+        `${dataDir}/merge`,
+        `${dataDir}`,
+      ],
+      mergeConfigs: true,
+    })
+    .option("--port <port:number>", "Port")
+    .option("--name <name:string>", "Name")
+    .option("--other <other:boolean>", "Other");
+
+  const { options } = await cmd.parse([]);
+  // Earlier path takes precedence.
+  assertEquals(options.port, 1111);
+  assertEquals(options.name, "a");
+  assertEquals(options.other, true);
+});
+
+test("[command] - config - only first matching config is used by default", async () => {
+  const cmd = new Command()
+    .throwErrors()
+    .config({
+      name: "merge",
+      searchPaths: [
+        `${dataDir}/merge`,
+        `${dataDir}`,
+      ],
+    })
+    .option("--port <port:number>", "Port")
+    .option("--name <name:string>", "Name")
+    .option("--other <other:boolean>", "Other");
+
+  const { options } = await cmd.parse([]);
+  assertEquals(options, { port: 1111, name: "a" });
+});
+
+test("[command] - config - subcommand inherits parent config values", async () => {
+  const cmd = new Command()
+    .throwErrors()
+    .config({ name: "parent", searchPaths: [dataDir] })
+    .option("--verbose <verbose:boolean>", "Verbose")
+    .option("--port <port:number>", "Port")
+    .option("--shared <value:string>", "Shared")
+    .command(
+      "sub",
+      new Command()
+        .option("--port <port:number>", "Port")
+        .action(() => {}),
+    );
+
+  const sub = cmd.getCommand("sub")!;
+  const { options } = await cmd.parse(["sub"]);
+
+  assertEquals(options, { verbose: true, port: 1111, shared: "parent" });
+  assertEquals(sub.getConfigValues(), {
+    verbose: true,
+    port: 1111,
+    shared: "parent",
+  });
+  assertEquals(sub.getConfigPath()?.endsWith("parent.json"), true);
+});
+
+test("[command] - config - subcommand config overrides inherited parent values", async () => {
+  const cmd = new Command()
+    .throwErrors()
+    .config({ name: "parent", searchPaths: [dataDir] })
+    .option("--verbose <verbose:boolean>", "Verbose")
+    .option("--port <port:number>", "Port")
+    .command(
+      "sub",
+      new Command()
+        .config({ name: "sub", searchPaths: [dataDir] })
+        .option("--port <port:number>", "Port")
+        .option("--sub-only <value:string>", "Sub only")
+        .action(() => {}),
+    );
+
+  const sub = cmd.getCommand("sub")!;
+  const { options } = await cmd.parse(["sub"]);
+
+  assertEquals(options, { verbose: true, port: 2222, subOnly: "sub" });
+  assertEquals(sub.getConfigValues(), {
+    verbose: true,
+    port: 2222,
+    subOnly: "sub",
+  });
+  assertEquals(sub.getConfigPath()?.endsWith("sub.json"), true);
+});
+
+test("[command] - config - returns empty values and undefined path when no config found", async () => {
+  const cmd = new Command()
+    .throwErrors()
+    .config({ name: "does-not-exist", searchPaths: [dataDir] })
+    .option("--port <port:number>", "Port");
+
+  const { options } = await cmd.parse([]);
+  assertEquals(options, {});
+  assertEquals(cmd.getConfigValues(), {});
+  assertEquals(cmd.getConfigPath(), undefined);
+});
+
+test("[command] - config - ignores unknown config keys", async () => {
+  const cmd = new Command()
+    .throwErrors()
+    .config({ name: "basic", searchPaths: [dataDir] })
+    .option("--port <port:number>", "Port")
+    .option("--verbose <verbose:boolean>", "Verbose");
+
+  const { options } = await cmd.parse([]);
+  assertEquals(options, { port: 8080, verbose: true });
+  assertEquals(cmd.getConfigValues(), { port: 8080, verbose: true });
+});
+
+test("[command] - config - throws ConfigParseError for malformed config", async () => {
+  const badPath = `${dataDir}/bad.json`;
+  await Deno.writeTextFile(badPath, "{ invalid json");
+  try {
+    await assertRejects(
+      () =>
+        new Command()
+          .throwErrors()
+          .config({ name: "bad", searchPaths: [dataDir] })
+          .option("--port <port:number>", "Port")
+          .parse([]),
+      ConfigParseError,
+    );
+  } finally {
+    await Deno.remove(badPath);
+  }
+});
+
+test("[command] - config - throws ConfigValidationError for type mismatch", async () => {
+  await assertRejects(
+    () =>
+      new Command()
+        .throwErrors()
+        .config({ name: "typebad", searchPaths: [dataDir] })
+        .option("--port <port:number>", "Port")
+        .parse([]),
+    ConfigValidationError,
+  );
+});
+
+test("[command] - config - supports custom parser", async () => {
+  const cmd = new Command()
+    .throwErrors()
+    .config({
+      name: "custom",
+      searchPaths: [dataDir],
+      formats: [".txt"],
+      parser: (content: string) => {
+        const result: Record<string, unknown> = {};
+        for (const line of content.split("\n")) {
+          if (!line.trim()) {
+            continue;
+          }
+          const [key, value] = line.split(":");
+          const parsed = value.trim();
+          result[key.trim()] = /^\d+$/.test(parsed) ? Number(parsed) : parsed;
+        }
+        return result;
+      },
+    })
+    .option("--foo <foo:string>", "Foo")
+    .option("--bar <bar:number>", "Bar");
+
+  const { options } = await cmd.parse([]);
+  assertEquals(options, { foo: "hello", bar: 42 });
+});
+
+test("[command] - config - satisfies required options", async () => {
+  const cmd = new Command()
+    .throwErrors()
+    .config({ name: "basic", searchPaths: [dataDir] })
+    .option("--port <port:number>", "Port", { required: true });
+
+  const { options } = await cmd.parse([]);
+  assertEquals(options.port, 8080);
+});

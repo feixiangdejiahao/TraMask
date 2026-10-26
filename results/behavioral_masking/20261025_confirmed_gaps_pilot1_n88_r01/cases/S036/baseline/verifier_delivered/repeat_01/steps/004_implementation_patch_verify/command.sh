@@ -1,0 +1,6 @@
+python3 -I -c '
+import hashlib,json,sys
+data=open(sys.argv[1],'"'"'rb'"'"').read();actual=hashlib.sha256(data).hexdigest()
+print(json.dumps({'"'"'path'"'"':sys.argv[1],'"'"'bytes'"'"':len(data),'"'"'sha256'"'"':actual}))
+if actual!=sys.argv[2]:raise RuntimeError('"'"'docker_copy_bytes_changed'"'"')
+' /tmp/tramask-c3c6aad914a64d3a881c/implementation.patch f9c140540ce699d66010369e391b444c72b3ca444935c0bf92e9f18e4b9ec8d1

@@ -1,0 +1,1 @@
+cd /app/backend && find . -maxdepth 2 -name "main.go" | head && cat /tmp/test_models.log 2>/dev/null

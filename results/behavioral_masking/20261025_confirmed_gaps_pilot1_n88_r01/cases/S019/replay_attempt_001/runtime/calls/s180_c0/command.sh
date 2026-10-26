@@ -1,0 +1,1 @@
+cd /app && sed -i "s/#c_1/#r_1/g; s/#c_2/#r_2/g" src/schema/actions/requiredIf.unit.test.ts && npx vitest run src/schema/actions/requiredIf.unit.test.ts --reporter=dot 2>&1 | tail -6

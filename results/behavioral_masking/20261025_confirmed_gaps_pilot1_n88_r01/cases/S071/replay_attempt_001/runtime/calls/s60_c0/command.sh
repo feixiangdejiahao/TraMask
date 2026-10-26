@@ -1,0 +1,1 @@
+cd /app && echo "=====error-options.ts=====" && cat src/error-options.ts && echo "=====error-sanitizer.ts=====" && cat src/error-sanitizer.ts && echo "=====error-class-registry.ts=====" && cat src/error-class-registry.ts

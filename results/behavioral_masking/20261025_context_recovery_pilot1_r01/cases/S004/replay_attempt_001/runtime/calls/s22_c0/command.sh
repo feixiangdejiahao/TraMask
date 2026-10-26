@@ -1,0 +1,1 @@
+cat tests/conftest.py; echo '=====FULL TESTS====='; cat -n tests/test_monitor.py

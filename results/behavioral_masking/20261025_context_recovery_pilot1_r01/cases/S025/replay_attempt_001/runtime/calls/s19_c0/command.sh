@@ -1,0 +1,1 @@
+cat packages/prompts/src/index.ts && echo "=====CORE INDEX=====" && cat packages/core/src/index.ts && echo "=====BUILD PRESET=====" && cat build.preset.ts && echo "=====VITEST?=====" && find . -maxdepth 2 -name 'vitest*' -o -maxdepth 2 -name '*.config.*' | grep -v node_modules

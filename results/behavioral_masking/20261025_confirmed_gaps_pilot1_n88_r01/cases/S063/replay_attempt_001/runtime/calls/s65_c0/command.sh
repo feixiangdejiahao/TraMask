@@ -1,0 +1,1 @@
+cd /app && grep -n "def recv_raw\|def settimeout_raw\|def close\|def shutdown_raw\|self.closed\|def can_recv_raw" pwnlib/tubes/process.py | head -30 && sed -n '360,430p' pwnlib/tubes/process.py

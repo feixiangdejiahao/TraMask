@@ -1,0 +1,1 @@
+cd /app && grep -A20 "towncrier\|tool.towncrier" pyproject.toml setup.cfg tox.ini 2>/dev/null | head -30; ls changelog.d/ | grep -E "feature|bugfix|misc|docs|deprecation|removal" | head

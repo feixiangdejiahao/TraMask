@@ -1,0 +1,1 @@
+cd /app/libs/core && wc -l langchain_core/runnables/base.py langchain_core/runnables/__init__.py && grep -n "def \|class " langchain_core/runnables/__init__.py | head -80

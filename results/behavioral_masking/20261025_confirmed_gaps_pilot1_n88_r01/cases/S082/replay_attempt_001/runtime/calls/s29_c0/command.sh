@@ -1,0 +1,1 @@
+grep -rn "bail_on_test_failure\|testsRanBeforeBail\|bailReason\|hasBailed\|getBailReport\|resetBailState" /app /root 2>/dev/null | head -50

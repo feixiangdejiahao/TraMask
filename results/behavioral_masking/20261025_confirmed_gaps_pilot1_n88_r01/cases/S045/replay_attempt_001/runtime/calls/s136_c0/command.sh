@@ -1,0 +1,1 @@
+cd /app && git status --ignored --short | grep -E "\.venv|uv" | head && ls -d libs/core/.venv 2>/dev/null && git check-ignore libs/core/.venv 2>/dev/null && echo "ignored"

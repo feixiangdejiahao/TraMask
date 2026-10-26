@@ -1,0 +1,1 @@
+cd /app && go test -count=1 -tags defaultargs ./vm -run '^TestDefaultArgumentsVisible$' -v

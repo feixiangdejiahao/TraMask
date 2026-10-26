@@ -1,0 +1,1 @@
+cd /app && grep -rn "func FromInterface" *.go && sed -n '1,100p' tengo.go

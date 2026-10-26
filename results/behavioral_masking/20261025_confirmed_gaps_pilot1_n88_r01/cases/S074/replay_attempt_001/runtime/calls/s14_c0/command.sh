@@ -1,0 +1,1 @@
+cd /app && cat bytecode.go && echo '=== VM top ===' && sed -n '1,220p' vm.go

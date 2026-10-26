@@ -1,0 +1,1 @@
+cat bandit/formatters/text.py

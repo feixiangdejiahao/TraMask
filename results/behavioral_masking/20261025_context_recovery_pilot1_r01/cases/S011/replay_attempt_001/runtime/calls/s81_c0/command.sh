@@ -1,0 +1,1 @@
+cd /app && npx prettier --check src/container.ts src/resolvers.ts src/errors.ts src/awilix.ts src/__tests__/initialize.test.ts 2>&1 | head -30

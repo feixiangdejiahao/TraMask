@@ -1,0 +1,1 @@
+cd /app && sed -n '20,35p' src/core/selectors.ts

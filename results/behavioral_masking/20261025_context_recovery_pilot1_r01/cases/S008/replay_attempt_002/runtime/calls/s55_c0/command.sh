@@ -1,0 +1,1 @@
+cd /app && grep -rn "type Summary struct" /root/go/pkg/mod/github.com/moby/moby* 2>/dev/null | head; ls /root/go/pkg/mod/github.com/moby/moby/

@@ -1,0 +1,1 @@
+cd /app && timeout 15 git ls-remote https://github.com/d5/tengo.git HEAD 2>&1 | head; echo "exit: $?"

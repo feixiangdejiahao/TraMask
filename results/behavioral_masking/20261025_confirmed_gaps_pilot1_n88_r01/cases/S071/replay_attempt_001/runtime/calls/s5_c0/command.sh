@@ -1,0 +1,1 @@
+cd /app && find src -type f | sort

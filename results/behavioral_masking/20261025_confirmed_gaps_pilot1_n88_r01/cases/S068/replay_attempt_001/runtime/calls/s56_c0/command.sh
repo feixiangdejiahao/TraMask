@@ -1,0 +1,1 @@
+cd /app && grep -n "def add_column\|def create_index\|def drop\|def enable_fts\|executescript" sqlite_utils/db.py | head -30

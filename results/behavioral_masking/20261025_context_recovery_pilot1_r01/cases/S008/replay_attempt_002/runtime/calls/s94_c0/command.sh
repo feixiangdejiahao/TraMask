@@ -1,0 +1,2 @@
+cd /app/backend && nohup go build -tags exclude_frontend ./internal/services/ ./internal/huma/handlers/ ./pkg/scheduler/ ./internal/bootstrap/ ./internal/models/ > /tmp/build3.log 2>&1 &
+echo "started pid $!"

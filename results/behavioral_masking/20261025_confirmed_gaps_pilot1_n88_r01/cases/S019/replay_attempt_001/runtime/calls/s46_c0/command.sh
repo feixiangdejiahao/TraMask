@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/utils/path.ts && echo "===PARSEPATHS===" && cat src/schema/actions/parsePaths/pathParser.ts && echo "===EXPRESS===" && cat src/schema/actions/parsePaths/expressPaths.ts && echo "===TYPES===" && cat src/schema/actions/parsePaths/types.ts

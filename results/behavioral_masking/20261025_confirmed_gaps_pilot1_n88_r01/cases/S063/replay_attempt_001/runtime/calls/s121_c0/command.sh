@@ -1,0 +1,1 @@
+cd /app && find . -maxdepth 3 -name 'test_*.py' -o -name '*_test.py' | head -20; ls test* 2>/dev/null; cat setup.py | grep -n "test" | head

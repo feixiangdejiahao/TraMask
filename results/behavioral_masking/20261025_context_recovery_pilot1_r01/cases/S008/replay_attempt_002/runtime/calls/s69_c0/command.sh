@@ -1,0 +1,1 @@
+cd /app && grep -n "VulnerabilityScan\|AutoHeal" types/settings/*.go

@@ -1,0 +1,1 @@
+cd /app && cat tsconfig.json && echo "=====" && cat docs/*.md 2>/dev/null | head -200 && ls docs

@@ -1,0 +1,1 @@
+sed -n '80,120p' bandit/core/tester.py

@@ -1,0 +1,1 @@
+cd /app && git add HISTORY.md docs/cattrs.rst docs/index.md docs/partial.md src/cattr/__init__.py src/cattr/partial.py src/cattrs/__init__.py src/cattrs/converters.py src/cattrs/partial.py tests/test_partial.py && git status --short

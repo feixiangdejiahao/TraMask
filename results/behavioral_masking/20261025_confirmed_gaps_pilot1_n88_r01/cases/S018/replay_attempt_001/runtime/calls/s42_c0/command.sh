@@ -1,0 +1,1 @@
+cd /app && grep -n "class rruleset" src/dateutil/rrule.py && sed -n "$(grep -n 'class rruleset' src/dateutil/rrule.py | cut -d: -f1),+130p" src/dateutil/rrule.py

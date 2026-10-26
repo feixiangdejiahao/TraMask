@@ -1,0 +1,1 @@
+cd /app && git diff sqlite_utils/db.py | sed -n '250,620p'

@@ -1,0 +1,1 @@
+find /root/.cache /root/.local /tmp -name '*.whl' -o -name '*dateutil*' 2>/dev/null | head -30

@@ -1,0 +1,1 @@
+GOROOT=$(go env GOROOT); grep -n "LookupSym\|MethodSet\|lookupSym" "$GOROOT/src/go/doc/comment.go" | head -20; echo "===="; grep -n "NewMethodSet\|MethodSet\|hasMethod\|Method(" "$GOROOT/src/go/doc/comment.go" | head -30

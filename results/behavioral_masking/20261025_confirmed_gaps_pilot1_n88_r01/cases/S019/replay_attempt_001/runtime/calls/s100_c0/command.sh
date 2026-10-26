@@ -1,0 +1,1 @@
+cd /app && sed -n '1,140p' src/entity/actions/update/types.ts && echo "===SYMBOLS===" && cat src/entity/actions/update/symbols/set.ts

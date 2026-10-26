@@ -1,0 +1,1 @@
+cd /app && git remote -v && git log --oneline -5 && git branch -r

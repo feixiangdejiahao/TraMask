@@ -1,0 +1,1 @@
+kill 25293 2>/dev/null; pkill -f 'go list -e' 2>/dev/null; sleep 1; cd /app && go test ./checkers/ -run 'Test(Tags|Docs|StableList)$' -count=1 2>&1 | tail -10

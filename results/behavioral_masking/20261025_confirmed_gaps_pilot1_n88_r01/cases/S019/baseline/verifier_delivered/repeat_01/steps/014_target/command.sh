@@ -1,0 +1,1 @@
+./node_modules/.bin/vitest run src/schema/conditionalRequirements.test.ts --config vitest.new.config.ts -t 'parser Zod schema enforces conditional requirements' --maxWorkers 1 --minWorkers 1 --reporter=verbose

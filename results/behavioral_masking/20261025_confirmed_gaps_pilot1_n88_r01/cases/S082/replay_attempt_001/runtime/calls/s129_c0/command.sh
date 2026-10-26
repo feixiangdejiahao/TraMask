@@ -1,0 +1,1 @@
+cd /app && grep -n "^});" tests/server_tests.js | tail -10

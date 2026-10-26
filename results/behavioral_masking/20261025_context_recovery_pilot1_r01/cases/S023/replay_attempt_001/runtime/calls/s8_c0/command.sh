@@ -1,0 +1,1 @@
+grep -n "version" pyproject.toml | head; git describe --tags 2>/dev/null; python -c "import cattrs; print(cattrs.__version__ if hasattr(cattrs,'__version__') else 'no version')"; grep -n "partial" HISTORY.md | head -50

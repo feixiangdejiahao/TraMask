@@ -1,0 +1,1 @@
+cd /app && git diff doc/source/config.rst doc/source/man/bandit.rst bandit/cli/main.py && echo '=== FUNCTIONAL TEST ADDITIONS ===' && git diff tests/functional/test_functional.py

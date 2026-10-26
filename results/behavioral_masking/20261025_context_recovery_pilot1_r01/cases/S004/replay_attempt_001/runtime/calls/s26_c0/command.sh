@@ -1,0 +1,1 @@
+cat pyproject.toml; echo '---'; python --version; echo '---'; cat pytest.ini; echo '---'; find .github -type f | sort

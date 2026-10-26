@@ -1,0 +1,1 @@
+cd /app && git status --short && git branch --show-current && echo "--- final diff stat ---" && git diff HEAD~1 --stat

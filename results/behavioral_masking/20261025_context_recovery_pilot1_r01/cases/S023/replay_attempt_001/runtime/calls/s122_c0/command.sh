@@ -1,0 +1,9 @@
+cd /app && git commit -m "Add partial structuring support
+
+Add BaseConverter.partial_structure (and the top-level cattrs.partial_structure),
+which partially structures attrs classes, dataclasses and TypedDicts from
+incomplete input mappings. The results are represented by PartialResult,
+which tracks the partially structured value, structured/failed fields, and
+errors. PartialResult.refine() can fix failed fields with new data.
+
+Closes #718" && git log --oneline -3

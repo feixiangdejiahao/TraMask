@@ -1,0 +1,1 @@
+sed -n '260,560p' tests/unit/cli/test_main.py

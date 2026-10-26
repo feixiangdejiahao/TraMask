@@ -1,0 +1,1 @@
+cd /app && git diff aiomonitor/monitor.py | head -300

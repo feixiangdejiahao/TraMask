@@ -1,0 +1,2 @@
+cd /app && nohup python -m pytest tests -q -o addopts="" --ignore=tests/test_cols.py --ignore=tests/test_preconf.py --ignore=tests/test_unstructure_collections.py --ignore=tests/preconf > /tmp/pytest_full.log 2>&1 &
+echo "started pid $!"

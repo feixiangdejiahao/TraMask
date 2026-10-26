@@ -1,0 +1,1 @@
+cd /app && npm test 2>&1 | tail -18 && echo "=== git status ===" && git status --short && echo "=== branch ===" && git branch --show-current

@@ -1,0 +1,1 @@
+cd /app && grep -rn "coalesce" --include="*.py" -i . | head -50

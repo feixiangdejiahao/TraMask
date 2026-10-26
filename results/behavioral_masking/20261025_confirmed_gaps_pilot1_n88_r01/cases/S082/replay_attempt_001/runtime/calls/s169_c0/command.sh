@@ -1,0 +1,1 @@
+cd /app && timeout 25 npx mocha tests/ci/ci_tests.js --grep "getExitCode" 2>&1 | tail -15

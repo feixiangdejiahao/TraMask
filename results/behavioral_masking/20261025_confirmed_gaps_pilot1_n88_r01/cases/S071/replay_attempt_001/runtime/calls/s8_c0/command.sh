@@ -1,0 +1,1 @@
+cd /app && cat src/is.ts && echo "=====UTIL=====" && cat src/util.ts

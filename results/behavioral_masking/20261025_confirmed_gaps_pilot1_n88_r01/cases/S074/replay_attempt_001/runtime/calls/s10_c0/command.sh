@@ -1,0 +1,1 @@
+cd /app && git branch -a && git tag -l | tail -20 && git remote -v && grep -n "bytecode" bytecode.go | head -30

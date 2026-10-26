@@ -1,0 +1,1 @@
+cat -n aiomonitor/webui/templates/index.html | sed -n '82,150p'

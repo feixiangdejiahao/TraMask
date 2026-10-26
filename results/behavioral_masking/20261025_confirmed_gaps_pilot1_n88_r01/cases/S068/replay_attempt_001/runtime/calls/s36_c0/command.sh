@@ -1,0 +1,1 @@
+cd /app && PYTHONPATH=/app python3 /tmp/repro.py

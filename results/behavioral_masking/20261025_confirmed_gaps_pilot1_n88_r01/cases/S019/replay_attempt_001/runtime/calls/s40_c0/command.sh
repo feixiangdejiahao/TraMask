@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/zodSchemer/parser/utils.ts && echo "===FORMATTER SCHEMA===" && cat src/schema/actions/zodSchemer/formatter/schema.ts && echo "===PARSER SCHEMA===" && cat src/schema/actions/zodSchemer/parser/schema.ts

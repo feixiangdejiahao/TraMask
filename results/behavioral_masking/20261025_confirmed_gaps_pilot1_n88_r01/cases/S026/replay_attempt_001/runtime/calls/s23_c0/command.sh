@@ -1,0 +1,1 @@
+cd /app && cat checkers/importShadow_checker.go && echo "===== dupImports =====" && cat checkers/dupImports_checker.go && echo "===== analyzer run =====" && cat checkers/analyzer/run.go

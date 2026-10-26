@@ -1,0 +1,1 @@
+cd /app && rm -f lib/*.test-d.ts && git status --short && git check-ignore lib && echo "lib ignored"

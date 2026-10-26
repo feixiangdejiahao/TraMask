@@ -1,0 +1,1 @@
+cd /app && cat packages/core/tsconfig.json && cat packages/react/package.json

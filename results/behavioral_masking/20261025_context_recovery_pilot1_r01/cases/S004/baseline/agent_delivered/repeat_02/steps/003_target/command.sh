@@ -1,0 +1,1 @@
+cd /app && python /tmp/web_test.py

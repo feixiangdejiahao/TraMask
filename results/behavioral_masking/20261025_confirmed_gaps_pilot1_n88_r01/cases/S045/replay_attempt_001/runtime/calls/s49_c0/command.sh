@@ -1,0 +1,1 @@
+cd /app/libs/core && grep -n "def __repr__\|def __str__\|def get_name" langchain_core/runnables/base.py | sed -n '1,20p'

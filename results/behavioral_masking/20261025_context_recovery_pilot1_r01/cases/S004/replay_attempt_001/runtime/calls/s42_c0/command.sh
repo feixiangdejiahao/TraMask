@@ -1,0 +1,210 @@
+cd /app && cat >> aiomonitor/termui/commands.py <<'EOF'
+
+
+def _print_snapshot_tasks_table(
+    stdout: TextIO,
+    title: str,
+    headers: Tuple[str, ...],
+    rows: List[Tuple[str, ...]],
+) -> None:
+    stdout.write(f"\n{title}\n")
+    table_data = [headers, *rows]
+    table = AsciiTable(table_data)
+    table.inner_row_border = False
+    table.inner_column_border = False
+    stdout.write(table.table)
+    stdout.write("\n")
+
+
+@monitor_cli.group(name="snapshot", aliases=["snap", "sn"])
+@custom_help_option
+@auto_command_done
+def do_snapshot_group(ctx: click.Context) -> None:
+    """Capture, inspect and compare frozen task state snapshots"""
+
+
+@do_snapshot_group.command(name="save", aliases=["s"])
+@click.option("--name", default=None, help="optional name for the snapshot")
+@custom_help_option
+def do_snapshot_save(ctx: click.Context, name: str | None) -> None:
+    """Capture a snapshot of the current task state"""
+    self: Monitor = ctx.obj
+
+    @auto_async_command_done
+    async def _do_snapshot_save(ctx: click.Context) -> None:
+        snapshot_id = await self.capture_snapshot(name=name)
+        if name:
+            print_ok(f"Saved snapshot {snapshot_id} ({name})")
+        else:
+            print_ok(f"Saved snapshot {snapshot_id}")
+
+    task = self._ui_loop.create_task(_do_snapshot_save(ctx))
+    self._termui_tasks.add(task)
+
+
+@do_snapshot_group.command(name="list", aliases=["ls"])
+@custom_help_option
+@auto_command_done
+def do_snapshot_list(ctx: click.Context) -> None:
+    """List snapshots"""
+    self: Monitor = ctx.obj
+    stdout = _get_current_stdout()
+    snapshots = self.list_snapshots()
+    rows = [
+        (
+            str(snapshot.id),
+            snapshot.name if snapshot.name is not None else "-",
+            str(snapshot.running_count),
+            str(snapshot.terminated_count),
+        )
+        for snapshot in snapshots
+    ]
+    _print_snapshot_tasks_table(
+        stdout,
+        f"{len(snapshots)} snapshots",
+        ("ID", "Name", "Running", "Terminated"),
+        rows,
+    )
+
+
+@do_snapshot_group.command(name="show")
+@click.argument("snapshot_id", shell_complete=complete_snapshot_id)
+@custom_help_option
+@auto_command_done
+def do_snapshot_show(ctx: click.Context, snapshot_id: str) -> None:
+    """Show the tasks frozen in a snapshot"""
+    self: Monitor = ctx.obj
+    stdout = _get_current_stdout()
+    try:
+        running_tasks = self.format_snapshot_task_list(snapshot_id)
+        terminated_tasks = self.format_snapshot_terminated_task_list(snapshot_id)
+    except KeyError:
+        print_fail(f"No snapshot {snapshot_id}")
+        return
+    _print_snapshot_tasks_table(
+        stdout,
+        f"Running tasks ({len(running_tasks)})",
+        ("Task ID", "State", "Name", "Coroutine", "Created Location", "Since"),
+        [
+            (
+                task.task_id,
+                task.state,
+                task.name,
+                task.coro,
+                task.created_location,
+                task.since,
+            )
+            for task in running_tasks
+        ],
+    )
+    _print_snapshot_tasks_table(
+        stdout,
+        f"Terminated tasks ({len(terminated_tasks)})",
+        ("Task ID", "Name", "Coro", "Since Started", "Since Terminated"),
+        [
+            (
+                task.task_id,
+                task.name,
+                task.coro,
+                task.started_since,
+                task.terminated_since,
+            )
+            for task in terminated_tasks
+        ],
+    )
+
+
+@do_snapshot_group.command(name="where")
+@click.argument("snapshot_id", shell_complete=complete_snapshot_id)
+@click.argument("task_id", shell_complete=complete_snapshot_task_id)
+@custom_help_option
+@auto_command_done
+def do_snapshot_where(
+    ctx: click.Context,
+    snapshot_id: str,
+    task_id: str,
+) -> None:
+    """Show the stack of a running task frozen in a snapshot"""
+    self: Monitor = ctx.obj
+    stdout = _get_current_stdout()
+    try:
+        formatted_stack_list = self.format_snapshot_task_stack(snapshot_id, task_id)
+    except KeyError:
+        try:
+            self.get_snapshot(snapshot_id)
+            print_fail(f"No task {task_id}")
+        except KeyError:
+            print_fail(f"No snapshot {snapshot_id}")
+        return
+    _print_formatted_stack(formatted_stack_list, stdout)
+
+
+@do_snapshot_group.command(name="diff")
+@click.argument("snapshot_id_1", shell_complete=complete_snapshot_id)
+@click.argument("snapshot_id_2", shell_complete=complete_snapshot_id)
+@custom_help_option
+@auto_command_done
+def do_snapshot_diff(
+    ctx: click.Context,
+    snapshot_id_1: str,
+    snapshot_id_2: str,
+) -> None:
+    """Compare two snapshots by task object ID"""
+    self: Monitor = ctx.obj
+    stdout = _get_current_stdout()
+    try:
+        diff = self.format_snapshot_diff(snapshot_id_1, snapshot_id_2)
+    except KeyError:
+        for snapshot_id in (snapshot_id_1, snapshot_id_2):
+            try:
+                self.get_snapshot(snapshot_id)
+            except KeyError:
+                print_fail(f"No snapshot {snapshot_id}")
+                return
+        raise
+
+    def rows_of(items) -> List[Tuple[str, ...]]:
+        rows = []
+        for item in items:
+            rows.append((
+                item.task_id,
+                item.kind,
+                item.info.name,
+                item.info.coro,
+            ))
+        return rows
+
+    _print_snapshot_tasks_table(
+        stdout,
+        f"Added ({len(diff.added)})",
+        ("Task ID", "Kind", "Name", "Coroutine"),
+        rows_of(diff.added),
+    )
+    _print_snapshot_tasks_table(
+        stdout,
+        f"Removed ({len(diff.removed)})",
+        ("Task ID", "Kind", "Name", "Coroutine"),
+        rows_of(diff.removed),
+    )
+    _print_snapshot_tasks_table(
+        stdout,
+        f"Common ({len(diff.common)})",
+        ("Task ID", "Kind", "Name", "Coroutine"),
+        rows_of(diff.common),
+    )
+
+
+@do_snapshot_group.command(name="delete", aliases=["rm", "del"])
+@click.argument("snapshot_id", shell_complete=complete_snapshot_id)
+@custom_help_option
+@auto_command_done
+def do_snapshot_delete(ctx: click.Context, snapshot_id: str) -> None:
+    """Delete a snapshot"""
+    self: Monitor = ctx.obj
+    try:
+        self.delete_snapshot(snapshot_id)
+        print_ok(f"Deleted snapshot {snapshot_id}")
+    except KeyError:
+        print_fail(f"No snapshot {snapshot_id}")
+EOF
+python -m py_compile aiomonitor/termui/commands.py && echo OK

@@ -1,0 +1,1 @@
+cd /app && cat backend/internal/huma/handlers/helpers.go && echo "=====CONTAINERS HEAD=====" && sed -n '1,120p' backend/internal/huma/handlers/containers.go

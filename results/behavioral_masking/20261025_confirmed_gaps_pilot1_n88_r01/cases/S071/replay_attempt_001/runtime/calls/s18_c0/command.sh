@@ -1,0 +1,123 @@
+cd /app && cat > src/error-stack.ts <<'EOF'
+import {
+  NormalizedErrorStackOptions,
+  RedactPaths,
+  StripInternalFrames,
+} from './error-options.js';
+
+export function normalizeStackNewlines(stack: string): string {
+  return stack.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+const SUPERJSON_INTERNAL_MARKERS = [
+  'src/transformer.ts',
+  'src/plainer.ts',
+  'src/index.ts',
+];
+
+function trimLeadingWhitespace(line: string): string {
+  return line.replace(/^\s+/, '');
+}
+
+function redactPath(line: string, mode: RedactPaths): string {
+  if (mode === 'none') {
+    return line;
+  }
+
+  if (mode === 'basename') {
+    // Replace "path/to/file.ts:1:2" with "file.ts:1:2" inside parentheses.
+    return line.replace(/\(([^()]*?)([^/\\()]+)\)/g, '($2)');
+  }
+
+  // strip_cwd - remove the current working directory prefix.
+  const cwd = process.cwd();
+  return line.split(cwd).join('');
+}
+
+function stripInternalFrames(
+  frames: string[],
+  mode: StripInternalFrames
+): string[] {
+  if (mode === 'none') {
+    return frames;
+  }
+
+  return frames.filter((frame) => {
+    if (
+      (mode === 'node' || mode === 'node_and_superjson') &&
+      frame.includes('node:internal')
+    ) {
+      return false;
+    }
+
+    if (
+      (mode === 'superjson' || mode === 'node_and_superjson') &&
+      SUPERJSON_INTERNAL_MARKERS.some((marker) => frame.includes(marker))
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function applyMaxStackLines(
+  frames: string[],
+  maxStackLines: number | undefined
+): string[] {
+  if (maxStackLines === undefined) {
+    return frames;
+  }
+
+  // maxStackLines counts the header line, which is kept separately.
+  const maxFrames = Math.max(0, maxStackLines - 1);
+  return frames.slice(0, maxFrames);
+}
+
+export function processStackString(
+  stack: string,
+  options: NormalizedErrorStackOptions
+): string {
+  const lines = normalizeStackNewlines(stack).split('\n');
+  const header = lines[0] ?? '';
+  let frames = lines.slice(1);
+
+  if (options.trimLeadingWhitespace) {
+    frames = frames.map(trimLeadingWhitespace);
+  }
+
+  if (options.redactPaths !== 'none') {
+    frames = frames.map((frame) => redactPath(frame, options.redactPaths));
+  }
+
+  frames = applyMaxStackLines(frames, options.maxStackLines);
+
+  frames = stripInternalFrames(frames, options.stripInternalFrames);
+
+  return [header, ...frames].join('\n');
+}
+
+export function processStackFrames(
+  stack: string,
+  options: NormalizedErrorStackOptions
+): { raw: string }[] {
+  const lines = normalizeStackNewlines(stack).split('\n');
+  const header = lines[0] ?? '';
+  let frames = lines.slice(1);
+
+  if (options.trimLeadingWhitespace) {
+    frames = frames.map(trimLeadingWhitespace);
+  }
+
+  frames = stripInternalFrames(frames, options.stripInternalFrames);
+
+  if (options.redactPaths !== 'none') {
+    frames = frames.map((frame) => redactPath(frame, options.redactPaths));
+  }
+
+  frames = applyMaxStackLines(frames, options.maxStackLines);
+
+  return [{ raw: header }, ...frames.map((frame) => ({ raw: frame }))];
+}
+EOF
+cat src/error-stack.ts

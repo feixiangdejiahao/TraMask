@@ -1,0 +1,221 @@
++          result.add(depName)
++        }
++        const depAncestors = collectAncestors(depName, visiting)
++        for (const ancestor of depAncestors) {
++          result.add(ancestor)
++        }
++      }
++      visiting.delete(name)
++      initializedAncestors.set(name, result)
++      return result
++    }
++
++    for (const entry of entries) {
++      collectAncestors(entry.name, new Set<string | symbol>())
++    }
++
++    // Compute levels: an initialized registration is in the current level once
++    // all of its initialized ancestors have been processed.
++    const levels: Array<InitializationLevel> = []
++    const processed = new Set<string | symbol>()
++    const remaining = new Set<string | symbol>(entries.map((e) => e.name))
++
++    while (remaining.size > 0) {
++      const levelEntries: Array<InitializationEntry> = []
++      for (const name of remaining) {
++        const ancestors = initializedAncestors.get(name) || new Set()
++        let ready = true
++        for (const ancestor of ancestors) {
++          if (!processed.has(ancestor)) {
++            ready = false
++            break
++          }
++        }
++        if (ready) {
++          levelEntries.push(byName.get(name)!)
++        }
++      }
++      if (levelEntries.length === 0) {
++        // Defensive; cycles are already detected above.
++        const first = remaining.values().next().value as string | symbol
++        throw new AwilixResolutionError(
++          first,
++          [],
++          'Cyclic dependencies detected.',
++        )
++      }
++      for (const entry of levelEntries) {
++        processed.add(entry.name)
++        remaining.delete(entry.name)
++      }
++      levels.push({ entries: levelEntries })
++    }
++
++    return levels
++  }
++
++  /**
++   * Initializes the container. Resolves all registrations with an `initializer`
++   * in dependency order, running initializers within a level concurrently.
++   */
++  function initialize(
++    options: InitializeOptions = {},
++  ): Promise<InitializeResult> {
++    if (initializationState.status === 'success') {
++      return Promise.resolve(initializationState.result)
++    }
++    if (initializationState.status === 'failed') {
++      return Promise.reject(
++        new Error(
++          'Cannot re-initialize the container because it previously failed.',
++        ),
++      )
++    }
++    if (initializationState.status === 'initializing') {
++      return initializationState.promise
++    }
++
++    let plan: Array<InitializationLevel>
++    try {
++      plan = buildInitializationPlan()
++    } catch (err) {
++      // Graph construction failures (e.g. cyclic dependencies) must not mark
++      // the container as failed, allowing initialize() to be retried.
++      return Promise.reject(err)
++    }
++
++    const promise = runInitialization(plan, options).then(
++      (result) => {
++        initializationState = { status: 'success', result }
++        return result
++      },
++      (err) => {
++        initializationState = { status: 'failed', error: err as Error }
++        throw err
++      },
++    )
++    initializationState = { status: 'initializing', promise }
++    return promise
++  }
++
++  /**
++   * Runs a level of initializers, waiting for all in-flight initializers to
++   * complete before throwing. If any initializer fails, the first error is
++   * rethrown after all tasks have settled.
++   */
++  async function runLevel<T>(
++    entries: Array<T>,
++    concurrency: number,
++    task: (entry: T) => Promise<void>,
++  ): Promise<void> {
++    if (entries.length === 0) {
++      return
++    }
++    let index = 0
++    const errors: unknown[] = []
++    const safeConcurrency =
++      Number.isFinite(concurrency) && concurrency > 0 ? concurrency : 1
++    const workerCount = Math.max(1, Math.min(safeConcurrency, entries.length))
++    const workers = Array.from({ length: workerCount }, async () => {
++      while (index < entries.length) {
++        const current = index++
++        try {
++          await task(entries[current])
++        } catch (err) {
++          errors.push(err)
++        }
++      }
++    })
++    await Promise.all(workers)
++    if (errors.length > 0) {
++      throw errors[0]
++    }
++  }
++
++  /**
++   * Stores an initialized value in the appropriate lifetime cache.
++   */
++  function setInitializedCacheValue(
++    name: string | symbol,
++    resolver: Resolver<any>,
++    value: any,
++  ): void {
++    const lifetime = resolver.lifetime || Lifetime.TRANSIENT
++    const targetCache =
++      lifetime === Lifetime.SINGLETON ? rootContainer.cache : container.cache
++    targetCache.set(name, { resolver, value })
++  }
++
++  /**
++   * Removes an initialized value from the lifetime caches.
++   */
++  function clearInitializedCacheValue(name: string | symbol): void {
++    container.cache.delete(name)
++    if (rootContainer.cache !== container.cache) {
++      rootContainer.cache.delete(name)
++    }
++  }
++
++  /**
++   * Rolls back already-initialized services in reverse order. Disposer errors
++   * are ignored so they never override the original initialization error.
++   */
++  async function rollbackInitialized(
++    stack: Array<InitializationEntry & { value: any }>,
++  ): Promise<void> {
++    for (let i = stack.length - 1; i >= 0; i--) {
++      const { name, resolver, value } = stack[i]
++      const disposable = resolver as DisposableResolver<any>
++      if (disposable.dispose) {
++        try {
++          await disposable.dispose(value)
++        } catch {
++          // Ignore disposer errors during rollback.
++        }
++      }
++      initializedValues.delete(name)
++      clearInitializedCacheValue(name)
++    }
++  }
++
++  /**
++   * Executes the initialization plan and returns metrics.
++   */
++  async function runInitialization(
++    levels: Array<InitializationLevel>,
++    options: InitializeOptions,
++  ): Promise<InitializeResult> {
++    const start = performance.now()
++    const metrics: Record<string | symbol, InitializeMetrics> = {}
++    const initializedStack: Array<InitializationEntry & { value: any }> = []
++
++    try {
++      for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
++        const level = levels[levelIndex]
++        await runLevel(
++          level.entries,
++          options.concurrency ?? Infinity,
++          async (entry) => {
++            const metricStart = performance.now()
++            let value: any
++            try {
++              const instance = entry.resolver.resolve(container)
++              const initializer = (entry.resolver as any)[
++                INITIALIZER
++              ] as Initializer<any>
++              const result = await initializer(instance)
++              value = result === undefined ? instance : result
++            } catch (err) {
++              throw new AwilixInitializationError(entry.name, err as Error)
++            }
++
++            initializedValues.set(entry.name, {
++              resolver: entry.resolver,
++              value,
++            })
++            setInitializedCacheValue(entry.name, entry.resolver, value)
++            initializedStack.push({ ...entry, value })
++            metrics[entry.name] = {
++              duration: performance.now() - metricStart,
++              level: levelIndex,
++            }

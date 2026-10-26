@@ -1,0 +1,1 @@
+cat aiomonitor/webui/templates/layout.html aiomonitor/webui/templates/index.html aiomonitor/webui/templates/trace.html aiomonitor/webui/templates/about.html

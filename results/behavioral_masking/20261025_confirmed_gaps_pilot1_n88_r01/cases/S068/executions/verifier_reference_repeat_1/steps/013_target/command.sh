@@ -1,0 +1,1 @@
+python -m pytest tests/test_safe_bulk_import.py -q -k "test_cli_enable_safe_import or test_cli_disable_safe_import"

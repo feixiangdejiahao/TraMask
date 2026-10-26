@@ -1,0 +1,1 @@
+find / -name "*.whl" -o -name "*.tar.gz" 2>/dev/null | grep -i -E "cattrs|attrs" | head; ls ~/.cache 2>/dev/null; find / -path "*site-packages/cattrs*" 2>/dev/null | head -20; find / -path "*site-packages/cattr*" 2>/dev/null | head -20

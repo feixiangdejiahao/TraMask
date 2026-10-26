@@ -1,0 +1,257 @@
+ bandit/cli/main.py        | 205 ++++++++++++++++++++++++++-
+ bandit/core/manager.py    | 354 ++++++++++++++++++++++++++++++++++++++++++++--
+ bandit/core/metrics.py    |   2 +
+ bandit/formatters/json.py |  12 ++
+ bandit/formatters/text.py |  11 ++
+ 5 files changed, 574 insertions(+), 10 deletions(-)
+=== manager diff ===
+diff --git a/bandit/core/manager.py b/bandit/core/manager.py
+index ffc13ca..e54ec66 100644
+--- a/bandit/core/manager.py
++++ b/bandit/core/manager.py
+@@ -2,8 +2,10 @@
+ # Copyright 2014 Hewlett-Packard Development Company, L.P.
+ #
+ # SPDX-License-Identifier: Apache-2.0
++import ast
+ import collections
+ import fnmatch
++import time
+ import io
+ import json
+ import logging
+@@ -15,6 +17,7 @@ import traceback
+ 
+ from rich import progress
+ 
++from bandit.core import cache as b_cache
+ from bandit.core import constants as b_constants
+ from bandit.core import extension_loader
+ from bandit.core import issue
+@@ -71,6 +74,19 @@ class BanditManager:
+         self.metrics = metrics.Metrics()
+         self.b_ts = b_test_set.BanditTestSet(config, profile)
+         self.scores = []
++        self.cache = None
++        self.cache_hits = 0
++        self.cache_misses = 0
++        self.cache_total_files = 0
++        self.files_cached = []
++        self.files_scanned = []
++        self.invalidation_counts = {
++            "file_changed": 0,
++            "config_changed": 0,
++            "expired": 0,
++            "not_cached": 0,
++        }
++        self.invalidation_reasons = {}
+ 
+     def get_skipped(self):
+         ret = []
+@@ -258,24 +274,42 @@ class BanditManager:
+         self.files_list = sorted(files_list)
+         self.excluded_files = sorted(excluded_files)
+ 
+-    def run_tests(self):
++    def run_tests(self, cache=None, force_rescan=False):
+         """Runs through all files in the scope
+ 
++        :param cache: Optional :class:`BanditCache` used for incremental
++            analysis
++        :param force_rescan: If True, bypass cache lookups but still store
++            results
+         :return: -
+         """
++        self.cache = cache
++        self.cache_total_files = len(self.files_list)
++
++        cached_scores = {}
++        scan_scores = {}
++        scan_cache_data = {}
++
++        files_to_scan = self.files_list
++        if cache is not None:
++            files_to_scan, cached_scores = self._prepare_cache(
++                cache, force_rescan
++            )
++
+         # if we have problems with a file, we'll remove it from the files_list
+         # and add it to the skipped list instead
+         new_files_list = list(self.files_list)
+         if (
+-            len(self.files_list) > PROGRESS_THRESHOLD
++            len(files_to_scan) > PROGRESS_THRESHOLD
+             and LOG.getEffectiveLevel() <= logging.INFO
+         ):
+-            files = progress.track(self.files_list)
++            files = progress.track(files_to_scan)
+         else:
+-            files = self.files_list
++            files = files_to_scan
+ 
+         for count, fname in enumerate(files):
+             LOG.debug("working on file : %s", fname)
++            self.files_scanned.append(fname)
+ 
+             try:
+                 if fname == "-":
+@@ -284,10 +318,22 @@ class BanditManager:
+                     new_files_list = [
+                         "<stdin>" if x == "-" else x for x in new_files_list
+                     ]
+-                    self._parse_file("<stdin>", fdata, new_files_list)
++                    self._parse_file(
++                        "<stdin>",
++                        fdata,
++                        new_files_list,
++                        scan_scores,
++                        scan_cache_data,
++                    )
+                 else:
+                     with open(fname, "rb") as fdata:
+-                        self._parse_file(fname, fdata, new_files_list)
++                        self._parse_file(
++                            fname,
++                            fdata,
++                            new_files_list,
++                            scan_scores,
++                            scan_cache_data,
++                        )
+             except OSError as e:
+                 self.skipped.append((fname, e.strerror))
+                 new_files_list.remove(fname)
+@@ -295,10 +341,42 @@ class BanditManager:
+         # reflect any files which may have been skipped
+         self.files_list = new_files_list
+ 
++        if cache is not None:
++            self._store_cache_entries(cache, scan_cache_data)
++            cache.save()
++
++        # Build scores in files_list order so verbose output stays aligned.
++        self.scores = []
++        for fname in self.files_list:
++            if fname in cached_scores:
++                self.scores.append(cached_scores[fname])
++            elif fname in scan_scores:
++                self.scores.append(scan_scores[fname])
++            else:
++                self.scores.append(self._empty_score())
++
++        self.metrics.data["_totals"]["cache_hits"] = self.cache_hits
++        self.metrics.data["_totals"]["cache_misses"] = self.cache_misses
++
+         # do final aggregation of metrics
+         self.metrics.aggregate()
+ 
+-    def _parse_file(self, fname, fdata, new_files_list):
++    def _parse_file(
++        self,
++        fname,
++        fdata,
++        new_files_list,
++        scan_scores=None,
++        scan_cache_data=None,
++    ):
++        def _record_scan(skipped=False, skip_reason=None, score=None):
++            if scan_cache_data is not None and fname != "<stdin>":
++                scan_cache_data[fname] = {
++                    "score": score,
++                    "skipped": skipped,
++                    "skip_reason": skip_reason,
++                }
++
+         try:
+             # parse the current file
+             data = fdata.read()
+@@ -320,7 +398,9 @@ class BanditManager:
+             except tokenize.TokenError:
+                 pass
+             score = self._execute_ast_visitor(fname, fdata, data, nosec_lines)
+-            self.scores.append(score)
++            if scan_scores is not None:
++                scan_scores[fname] = score
++            _record_scan(score=score)
+             self.metrics.count_issues([score])
+         except KeyboardInterrupt:
+             sys.exit(2)
+@@ -329,6 +409,10 @@ class BanditManager:
+                 (fname, "syntax error while parsing AST from file")
+             )
+             new_files_list.remove(fname)
++            _record_scan(
++                skipped=True,
++                skip_reason="syntax error while parsing AST from file",
++            )
+         except Exception as e:
+             LOG.error(
+                 "Exception occurred when executing tests against %s.", fname
+@@ -340,6 +424,9 @@ class BanditManager:
+ 
+             self.skipped.append((fname, "exception while scanning file"))
+             new_files_list.remove(fname)
++            _record_scan(
++                skipped=True, skip_reason="exception while scanning file"
++            )
+             LOG.debug("  Exception string: %s", e)
+             LOG.debug("  Exception traceback: %s", traceback.format_exc())
+ 
+@@ -367,6 +454,257 @@ class BanditManager:
+         return score
+ 
+ 
++    def _prepare_cache(self, cache, force_rescan):
++        """Decide which files to scan and load valid cached results.
++
++        :param cache: The :class:`BanditCache` to consult
++        :param force_rescan: If True, ignore cached results for every file
++        :return: A tuple of ``(files_to_scan, cached_scores)``
++        """
++        files_to_scan = []
++        cached_scores = {}
++        path_to_fname = {}
++        fname_to_path = {}
++
++        for fname in self.files_list:
++            path = os.path.abspath(fname)
++            path_to_fname[path] = fname
++            fname_to_path[fname] = path
++
++        statuses = {}
++        for fname in self.files_list:
++            path = fname_to_path[fname]
++            if fname in ("-", "<stdin>"):
++                statuses[path] = "not_cached"
++                continue
++            if force_rescan:
++                statuses[path] = "not_cached"
++                continue
++            entry = cache.get(path)
++            if entry is None:
++                statuses[path] = "not_cached"
++                continue
++            if entry.get("cache_key") != cache.cache_key:
++                statuses[path] = "config_changed"
++                continue
++            if self._cache_entry_expired(entry, cache.expiry_days):
++                statuses[path] = "expired"
++                continue
++            if not self._file_unchanged(path, entry):
++                statuses[path] = "file_changed"
++                continue
++            statuses[path] = "valid"
++
++        # Build a reverse dependency graph and propagate invalidation through
++        # it.  A visited set makes circular imports safe.
++        dependents = collections.defaultdict(list)
++        for entry_path, entry in cache.entries.items():
++            for dep in entry.get("dependencies") or []:
++                dependents[dep].append(entry_path)
++
++        invalid_paths = set()
++
++        def _invalidate(path):
++            if path in invalid_paths:
++                return
++            invalid_paths.add(path)
++            for dependent in dependents.get(path, []):

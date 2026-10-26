@@ -1,0 +1,1 @@
+cd /app && cat test/jest/values.js && echo '=== logic-component ===' && cat test/jest/logic-component.js

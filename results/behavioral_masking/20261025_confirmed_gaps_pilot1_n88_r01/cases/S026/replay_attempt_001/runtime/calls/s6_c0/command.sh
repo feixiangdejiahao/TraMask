@@ -1,0 +1,1 @@
+cd /app && cat checkers/deprecatedComment_checker.go && echo "===== checkers.go =====" && cat checkers/checkers.go && echo "===== linter dir =====" && ls -la linter && cat linter/*.go | head -200

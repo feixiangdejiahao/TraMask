@@ -1,0 +1,1 @@
+cd /app && sed -n '90,140p' packages/prompts/test/path.test.ts

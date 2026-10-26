@@ -1,0 +1,1 @@
+cd /app && git status --porcelain && echo "===== diff astwalk =====" && git diff checkers/internal/astwalk/ && echo "===== new files =====" && git status --porcelain | grep '^??'

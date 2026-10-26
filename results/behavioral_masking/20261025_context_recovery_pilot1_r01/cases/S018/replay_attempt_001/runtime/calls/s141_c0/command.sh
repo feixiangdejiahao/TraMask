@@ -1,0 +1,1 @@
+cd /app && cat bandit/core/__init__.py

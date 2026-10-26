@@ -1,0 +1,1 @@
+cd /app && git status && git log --oneline -2 && python -m flake8 bandit/core/nosec.py bandit/core/manager.py bandit/core/tester.py bandit/core/utils.py tests/unit/core/test_nosec.py tests/functional/test_functional.py && python -m testtools.run discover 2>&1 | tail -3

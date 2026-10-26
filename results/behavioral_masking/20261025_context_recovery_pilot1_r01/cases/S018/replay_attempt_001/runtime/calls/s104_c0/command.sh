@@ -1,0 +1,1 @@
+cd /app && sed -n '5,15p' bandit/core/manager.py && tail -5 bandit/core/manager.py | cat -A | tail -6

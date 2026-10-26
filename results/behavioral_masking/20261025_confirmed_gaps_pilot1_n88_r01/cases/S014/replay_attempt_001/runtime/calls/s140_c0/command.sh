@@ -1,0 +1,1 @@
+cd /app && git worktree add /tmp/clack-main main 2>&1 | tail -3 && head -10 packages/prompts/test/path.test.ts

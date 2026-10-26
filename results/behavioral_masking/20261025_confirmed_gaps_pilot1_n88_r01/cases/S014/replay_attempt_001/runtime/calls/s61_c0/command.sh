@@ -1,0 +1,1 @@
+cd /app && pnpm --filter @clack/core run build >/dev/null 2>&1 && pnpm --filter @clack/prompts run build >/dev/null 2>&1 && cd packages/prompts && npx vitest run test/autocomplete.test.ts 2>&1 | tail -8

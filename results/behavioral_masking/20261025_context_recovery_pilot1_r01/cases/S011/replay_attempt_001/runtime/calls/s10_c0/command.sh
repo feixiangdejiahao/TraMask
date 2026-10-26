@@ -1,0 +1,1 @@
+npm view awilix versions --json 2>/dev/null | tail -20; echo '---'; npm view awilix@latest version 2>/dev/null

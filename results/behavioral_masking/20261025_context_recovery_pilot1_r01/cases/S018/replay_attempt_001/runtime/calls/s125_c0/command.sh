@@ -1,0 +1,1 @@
+cd /app && grep -rn 'get_nosec\|nosec_lines' tests/unit --include='*.py' | grep -v test_nosec.py

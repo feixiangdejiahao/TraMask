@@ -1,0 +1,5 @@
+cd /app && timeout 30 python /tmp/test_mux_basic.py >/tmp/t1.log 2>&1 && echo "basic ok" || (echo "basic FAIL"; tail /tmp/t1.log)
+timeout 30 python /tmp/test_flow.py >/tmp/t2.log 2>&1 && echo "flow ok" || (echo "flow FAIL"; tail /tmp/t2.log)
+timeout 30 python /tmp/test_halfclose.py >/tmp/t3.log 2>&1 && echo "halfclose ok" || (echo "halfclose FAIL"; tail /tmp/t3.log)
+timeout 30 python /tmp/test_mux_ids.py >/tmp/t4.log 2>&1 && echo "ids ok" || (echo "ids FAIL"; tail /tmp/t4.log)
+timeout 60 python /tmp/test_concurrent.py >/tmp/t5.log 2>&1 && echo "concurrent ok" || (echo "concurrent FAIL"; tail /tmp/t5.log)

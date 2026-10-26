@@ -1,0 +1,1 @@
+cat -n packages/prompts/test/autocomplete.test.ts

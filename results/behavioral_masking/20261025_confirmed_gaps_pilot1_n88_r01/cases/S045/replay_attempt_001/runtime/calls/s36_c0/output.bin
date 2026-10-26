@@ -1,0 +1,151 @@
+                    return getattr(sig.return_annotation, "__args__", (Any,))[0]
+                return sig.return_annotation
+        except ValueError:
+            pass
+        return Any
+
+    @override
+    def get_output_schema(
+        self, config: RunnableConfig | None = None
+    ) -> type[BaseModel]:
+        # Override the default implementation.
+        # For a runnable lambda, we need to bring to provide the
+        # module of the underlying function when creating the model.
+        root_type = self.OutputType
+        func = getattr(self, "func", None) or self.afunc
+        module = getattr(func, "__module__", None)
+
+        if (
+            inspect.isclass(root_type)
+            and not isinstance(root_type, GenericAlias)
+            and issubclass(root_type, BaseModel)
+        ):
+            return root_type
+
+        return create_model_v2(
+            self.get_name("Output"),
+            root=root_type,
+            # To create the schema, we need to provide the module
+            # where the underlying function is defined.
+            # This allows pydantic to resolve type annotations appropriately.
+            module_name=module,
+        )
+
+    @functools.cached_property
+    def deps(self) -> list[Runnable]:
+        """The dependencies of this `Runnable`.
+
+        Returns:
+            The dependencies of this `Runnable`. If the function has nonlocal
+            variables that are `Runnable`s, they are considered dependencies.
+
+        """
+        if hasattr(self, "func"):
+            objects = get_function_nonlocals(self.func)
+        elif hasattr(self, "afunc"):
+            objects = get_function_nonlocals(self.afunc)
+        else:
+            objects = []
+
+        deps: list[Runnable] = []
+        for obj in objects:
+            if isinstance(obj, Runnable):
+                deps.append(obj)
+            elif isinstance(getattr(obj, "__self__", None), Runnable):
+                deps.append(obj.__self__)
+        return deps
+
+    @property
+    @override
+    def config_specs(self) -> list[ConfigurableFieldSpec]:
+        return get_unique_config_specs(
+            spec for dep in self.deps for spec in dep.config_specs
+        )
+
+    @override
+    def get_graph(self, config: RunnableConfig | None = None) -> Graph:
+        if deps := self.deps:
+            # Import locally to prevent circular import
+            from langchain_core.runnables.graph import Graph  # noqa: PLC0415
+
+            graph = Graph()
+            input_node = graph.add_node(self.get_input_schema(config))
+            output_node = graph.add_node(self.get_output_schema(config))
+            for dep in deps:
+                dep_graph = dep.get_graph()
+                dep_graph.trim_first_node()
+                dep_graph.trim_last_node()
+                if not dep_graph:
+                    graph.add_edge(input_node, output_node)
+                else:
+                    dep_first_node, dep_last_node = graph.extend(dep_graph)
+                    if not dep_first_node:
+                        msg = f"Runnable {dep} has no first node"
+                        raise ValueError(msg)
+                    if not dep_last_node:
+                        msg = f"Runnable {dep} has no last node"
+                        raise ValueError(msg)
+                    graph.add_edge(input_node, dep_first_node)
+                    graph.add_edge(dep_last_node, output_node)
+        else:
+            graph = super().get_graph(config)
+
+        return graph
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, RunnableLambda):
+            if hasattr(self, "func") and hasattr(other, "func"):
+                return self.func == other.func
+            if hasattr(self, "afunc") and hasattr(other, "afunc"):
+                return self.afunc == other.afunc
+            return False
+        return False
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        """Return a string representation of this `Runnable`."""
+        if self._repr is None:
+            if hasattr(self, "func") and isinstance(self.func, itemgetter):
+                self._repr = f"RunnableLambda({str(self.func)[len('operator.') :]})"
+            elif hasattr(self, "func"):
+                self._repr = f"RunnableLambda({get_lambda_source(self.func) or '...'})"
+            elif hasattr(self, "afunc"):
+                self._repr = (
+                    f"RunnableLambda(afunc={get_lambda_source(self.afunc) or '...'})"
+                )
+            else:
+                self._repr = "RunnableLambda(...)"
+        return self._repr
+
+    def _invoke(
+        self,
+        input_: Input,
+        run_manager: CallbackManagerForChainRun,
+        config: RunnableConfig,
+        **kwargs: Any,
+    ) -> Output:
+        if inspect.isgeneratorfunction(self.func):
+            output: Output | None = None
+            for chunk in call_func_with_variable_args(
+                cast("Callable[[Input], Iterator[Output]]", self.func),
+                input_,
+                config,
+                run_manager,
+                **kwargs,
+            ):
+                if output is None:
+                    output = chunk
+                else:
+                    try:
+                        output = output + chunk  # type: ignore[operator]
+                    except TypeError:
+                        output = chunk
+        else:
+            output = call_func_with_variable_args(
+                self.func, input_, config, run_manager, **kwargs
+            )
+        # If the output is a Runnable, invoke it
+        if isinstance(output, Runnable):
+            recursion_limit = config["recursion_limit"]

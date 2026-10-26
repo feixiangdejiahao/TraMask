@@ -1,0 +1,1 @@
+sed -n '1,200p' packages/core/src/index.ts

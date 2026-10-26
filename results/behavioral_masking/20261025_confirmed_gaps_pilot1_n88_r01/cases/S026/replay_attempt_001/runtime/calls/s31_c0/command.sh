@@ -1,0 +1,1 @@
+cd /app && git checkout -b broken-doc-link && go test ./checkers/ -run 'TestCheckers/deprecatedComment' -count=1 2>&1 | tail -30

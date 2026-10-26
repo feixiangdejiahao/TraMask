@@ -1,0 +1,1 @@
+cd /app/libs/core && sed -n '4399,4600p' langchain_core/runnables/base.py | grep -n "def stream\|def astream\|def transform\|def atransform\|_transform_stream_with_config\|_atransform_stream_with_config" 

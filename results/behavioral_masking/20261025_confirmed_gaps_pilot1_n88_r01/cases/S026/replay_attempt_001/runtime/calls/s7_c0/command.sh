@@ -1,0 +1,1 @@
+cd /app && cat linter/helpers.go && echo "===== linter.go (first 220) =====" && sed -n '1,220p' linter/linter.go

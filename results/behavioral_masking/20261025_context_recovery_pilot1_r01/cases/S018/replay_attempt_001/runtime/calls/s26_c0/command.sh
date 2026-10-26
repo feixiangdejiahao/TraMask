@@ -1,0 +1,1 @@
+cd /app && grep -rn 'nosec-begin\|nosec-end\|nosec-next-line\|next-statement\|region' . --include='*.py' --include='*.rst' --include='*.md' | head -30

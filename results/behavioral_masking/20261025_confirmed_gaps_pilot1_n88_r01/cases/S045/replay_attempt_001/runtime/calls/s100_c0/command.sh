@@ -1,0 +1,1 @@
+pip list 2>/dev/null | grep -iE "ruff|mypy|pytest" ; ls /app/.venv/bin 2>/dev/null | head; python -m ruff --version 2>&1 | head -2

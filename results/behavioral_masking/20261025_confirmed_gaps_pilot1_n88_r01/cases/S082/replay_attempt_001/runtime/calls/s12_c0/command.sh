@@ -1,0 +1,1 @@
+cd /app && ls lib/utils && echo '---' && sed -n '1,240p' lib/utils/reporter.js

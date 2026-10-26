@@ -1,0 +1,1 @@
+cd /app && grep -n 'python_requires\|Programming Language' setup.cfg setup.py

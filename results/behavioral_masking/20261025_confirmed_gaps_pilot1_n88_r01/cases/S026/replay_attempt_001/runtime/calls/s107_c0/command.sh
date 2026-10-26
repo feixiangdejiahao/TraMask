@@ -1,0 +1,1 @@
+cd /app && go vet ./checkers/ ./linter/ ./cmd/... 2>&1 | head -30

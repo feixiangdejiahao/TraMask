@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/dto/getSchemaDTO/schema.ts && echo "===fromDTO===" && cat src/schema/actions/fromDTO/fromSchemaDTO.ts 2>/dev/null; find src/schema/actions/fromDTO -name "*.ts" | grep -v test | sort && echo "===utils===" && cat src/schema/actions/dto/getSchemaDTO/utils.ts

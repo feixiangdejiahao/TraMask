@@ -1,0 +1,1 @@
+cd /app && git checkout -b add-partial-structure && git branch --show-current

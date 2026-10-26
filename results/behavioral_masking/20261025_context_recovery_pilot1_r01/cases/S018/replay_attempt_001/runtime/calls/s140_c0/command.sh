@@ -1,0 +1,1 @@
+cd /app && python -m testtools.run tests.unit.core.test_docs_util 2>&1 | tail -5

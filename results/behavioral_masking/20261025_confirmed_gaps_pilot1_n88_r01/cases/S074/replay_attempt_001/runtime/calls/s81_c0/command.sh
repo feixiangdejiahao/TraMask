@@ -1,0 +1,1 @@
+cd /app && sed -i 's|runScript(t, `out := 1`)|runScript(t, src)|' zz_repro3_test.go && go test -run 'TestGoCallNestedTransferIsolation|TestGoCallGlobalMutation' -v . 2>&1 | tail -40

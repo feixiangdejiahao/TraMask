@@ -1,0 +1,1 @@
+cd /app/packages/prompts && npx vitest run test/path.test.ts 2>&1 | grep -A5 "FAIL\|failed" | head -40; echo "TMPDIR=$TMPDIR"; ls -ld /tmp

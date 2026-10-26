@@ -1,0 +1,1 @@
+cd /app && nl -ba src/schema/string/schema_.ts | sed -n '1,120p' && echo "===RECORD schema_.ts===" && nl -ba src/schema/record/schema_.ts | sed -n '1,160p' && echo "===RECORD types===" && cat src/schema/record/types.ts

@@ -1,0 +1,1 @@
+cd /app && grep -n "5.0.0" CHANGELOG.md | head -5 && sed -n '40,75p' CHANGELOG.md

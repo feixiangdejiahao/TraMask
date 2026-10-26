@@ -1,0 +1,1 @@
+pnpm exec vitest run test/prompts/async-autocomplete.test.ts -t 'previous AbortController is aborted when new fetch starts'

@@ -1,0 +1,1 @@
+cd /app && git status --short && ls check_* 2>/dev/null; echo done

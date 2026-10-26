@@ -1,0 +1,1 @@
+git log --oneline -15 && echo "---REMOTE---" && git remote -v && echo "---NODE---" && node --version && echo "---PNPM---" && pnpm --version

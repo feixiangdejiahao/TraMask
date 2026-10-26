@@ -1,0 +1,347 @@
+package checkers
+
+import (
+	"go/ast"
+	"go/types"
+
+	"github.com/go-critic/go-critic/checkers/internal/astwalk"
+	"github.com/go-critic/go-critic/linter"
+)
+
+func init() {
+	var info linter.CheckerInfo
+	info.Name = "importShadow"
+	info.Tags = []string{linter.StyleTag, linter.OpinionatedTag}
+	info.Summary = "Detects when imported package names shadowed in the assignments"
+	info.Before = `
+// "path/filepath" is imported.
+filepath := "foo.txt"`
+	info.After = `
+filename := "foo.txt"`
+
+	collection.AddChecker(&info, func(ctx *linter.CheckerContext) (linter.FileWalker, error) {
+		ctx.Require.PkgObjects = true
+		return astwalk.WalkerForLocalDef(&importShadowChecker{ctx: ctx}, ctx.TypesInfo), nil
+	})
+}
+
+type importShadowChecker struct {
+	astwalk.WalkHandler
+	ctx *linter.CheckerContext
+}
+
+func (c *importShadowChecker) VisitLocalDef(def astwalk.Name, _ ast.Expr) {
+	for pkgObj, name := range c.ctx.PkgObjects {
+		if name == def.ID.Name && name != "_" {
+			c.warn(def.ID, name, pkgObj.Imported())
+		}
+	}
+}
+
+func (c *importShadowChecker) warn(id ast.Node, importedName string, pkg *types.Package) {
+	if isStdlibPkg(pkg) {
+		c.ctx.Warn(id, "shadow of imported package '%s'", importedName)
+	} else {
+		c.ctx.Warn(id, "shadow of imported from '%s' package '%s'", pkg.Path(), importedName)
+	}
+}
+===== dupImports =====
+package checkers
+
+import (
+	"fmt"
+	"go/ast"
+
+	"github.com/go-critic/go-critic/linter"
+)
+
+func init() {
+	var info linter.CheckerInfo
+	info.Name = "dupImport"
+	info.Tags = []string{linter.StyleTag, linter.ExperimentalTag}
+	info.Summary = "Detects multiple imports of the same package under different aliases"
+	info.Before = `
+import (
+	"fmt"
+	printing "fmt" // Imported the second time
+)`
+	info.After = `
+import(
+	"fmt"
+)`
+
+	collection.AddChecker(&info, func(ctx *linter.CheckerContext) (linter.FileWalker, error) {
+		return &dupImportChecker{ctx: ctx}, nil
+	})
+}
+
+type dupImportChecker struct {
+	ctx *linter.CheckerContext
+}
+
+func (c *dupImportChecker) WalkFile(f *ast.File) {
+	imports := make(map[string][]*ast.ImportSpec)
+	for _, importDcl := range f.Imports {
+		pkg := importDcl.Path.Value
+		imports[pkg] = append(imports[pkg], importDcl)
+	}
+
+	for _, importList := range imports {
+		if len(importList) == 1 {
+			continue
+		}
+		c.warn(importList)
+	}
+}
+
+func (c *dupImportChecker) warn(importList []*ast.ImportSpec) {
+	msg := fmt.Sprintf("package is imported %d times under different aliases on lines", len(importList))
+	for idx, importDcl := range importList {
+		switch {
+		case idx == len(importList)-1:
+			msg += " and"
+		case idx > 0:
+			msg += ","
+		}
+		msg += fmt.Sprintf(" %d", c.ctx.FileSet.Position(importDcl.Pos()).Line)
+	}
+	for _, importDcl := range importList {
+		c.ctx.Warn(importDcl, msg)
+	}
+}
+===== analyzer run =====
+package analyzer
+
+import (
+	"fmt"
+	"log"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	_ "github.com/go-critic/go-critic/checkers" // Register go-critic checkers
+	"github.com/go-critic/go-critic/linter"
+
+	"golang.org/x/tools/go/analysis"
+)
+
+type gocritic struct {
+	infoList  []*linter.CheckerInfo
+	goVersion linter.GoVersion
+}
+
+var (
+	globalGocriticMu        sync.Mutex
+	globalGocritic          *gocritic
+	globalInitErrorReported bool
+)
+
+func runAnalyzer(pass *analysis.Pass) (interface{}, error) {
+	critic, err := prepareGocritic()
+	if err != nil {
+		return nil, fmt.Errorf("init error: %w", err)
+	}
+
+	ctx := linter.NewContext(pass.Fset, pass.TypesSizes)
+	ctx.GoVersion = critic.goVersion
+	ctx.SetPackageInfo(pass.TypesInfo, pass.Pkg)
+
+	checkers, err := critic.createCheckers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, f := range pass.Files {
+		filename := filepath.Base(pass.Fset.Position(f.Pos()).Filename)
+		ctx.SetFileInfo(filename, f)
+
+		for _, c := range checkers {
+			warnings := c.Check(f)
+			for _, warning := range warnings {
+				pass.Report(asDiag(c, warning))
+			}
+		}
+	}
+
+	return nil, nil
+}
+
+func asDiag(c *linter.Checker, warning linter.Warning) analysis.Diagnostic {
+	diag := analysis.Diagnostic{
+		Pos:     warning.Pos,
+		Message: fmt.Sprintf("%s: %s", c.Info.Name, warning.Text),
+	}
+
+	if warning.HasQuickFix() {
+		diag.SuggestedFixes = []analysis.SuggestedFix{
+			{
+				Message: "suggested replacement",
+				TextEdits: []analysis.TextEdit{
+					{
+						Pos:     warning.Suggestion.From,
+						End:     warning.Suggestion.To,
+						NewText: warning.Suggestion.Replacement,
+					},
+				},
+			},
+		}
+	}
+	return diag
+}
+
+// prepareGocritic initializes a new gocritic object,
+// but unlike newGocritic() it could use a cached version.
+func prepareGocritic() (*gocritic, error) {
+	if DisableCache {
+		return newGocritic()
+	}
+
+	globalGocriticMu.Lock()
+	defer globalGocriticMu.Unlock()
+
+	// Don't report init error ever again if it was already reported.
+	if globalInitErrorReported {
+		return nil, nil
+	}
+
+	if globalGocritic != nil {
+		return globalGocritic, nil
+	}
+
+	critic, err := newGocritic()
+	if err != nil {
+		globalInitErrorReported = true
+		return nil, err
+	}
+	globalGocritic = critic
+	return critic, nil
+}
+
+func newGocritic() (*gocritic, error) {
+	critic := &gocritic{
+		infoList: filterCheckersList(registeredCheckers),
+	}
+
+	ver, err := linter.ParseGoVersion(flagGoVersion)
+	if err != nil {
+		return nil, err
+	}
+	critic.goVersion = ver
+
+	for _, info := range critic.infoList {
+		for pname, param := range info.Params {
+			key := checkerParamName(info, pname)
+			switch param.Value.(type) {
+			case int:
+				info.Params[pname].Value = *intParams[key]
+			case bool:
+				info.Params[pname].Value = *boolParams[key]
+			case string:
+				info.Params[pname].Value = *stringParams[key]
+			default:
+				panic("unreachable") // Checked in AddChecker
+			}
+		}
+	}
+
+	return critic, nil
+}
+
+func filterCheckersList(infoList []*linter.CheckerInfo) []*linter.CheckerInfo {
+	parseKeys := func(keys []string, byName, byTag map[string]bool) {
+		for _, key := range keys {
+			if strings.HasPrefix(key, "#") {
+				byTag[key[len("#"):]] = true
+			} else {
+				byName[key] = true
+			}
+		}
+	}
+	splitValues := func(s string) []string {
+		parts := strings.Split(s, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		return parts
+	}
+
+	disableArg := flagDisable
+	if disableArg == "<default>" {
+		if flagEnableAll {
+			disableArg = ""
+		} else {
+			disableArg = "#experimental,#opinionated,#performance"
+		}
+	}
+
+	enabledByName := make(map[string]bool)
+	enabledTags := make(map[string]bool)
+	parseKeys(splitValues(flagEnable), enabledByName, enabledTags)
+	disabledByName := make(map[string]bool)
+	disabledTags := make(map[string]bool)
+	parseKeys(splitValues(disableArg), disabledByName, disabledTags)
+
+	enabledByTag := func(info *linter.CheckerInfo) bool {
+		for _, tag := range info.Tags {
+			if enabledTags[tag] {
+				return true
+			}
+		}
+		return false
+	}
+	disabledByTag := func(info *linter.CheckerInfo) string {
+		for _, tag := range info.Tags {
+			if disabledTags[tag] {
+				return tag
+			}
+		}
+		return ""
+	}
+
+	var filtered []*linter.CheckerInfo
+
+	for _, info := range infoList {
+		enabled := flagEnableAll || enabledByName[info.Name] || enabledByTag(info)
+		notice := ""
+
+		switch {
+		case !enabled:
+			notice = "not enabled by name or tag (-enable)"
+		case disabledByName[info.Name]:
+			enabled = false
+			notice = "disabled by name (-disable)"
+		default:
+			if tag := disabledByTag(info); tag != "" {
+				enabled = false
+				notice = fmt.Sprintf("disabled by %q tag (-disable)", tag)
+			}
+		}
+
+		if flagDebugInit && !enabled {
+			log.Printf("\tdebug: %s: %s", info.Name, notice)
+		}
+		if !enabled {
+			continue
+		}
+		filtered = append(filtered, info)
+	}
+	if flagDebugInit {
+		for _, info := range filtered {
+			log.Printf("\tdebug: %s is enabled", info.Name)
+		}
+	}
+
+	return filtered
+}
+
+func (critic *gocritic) createCheckers(ctx *linter.Context) ([]*linter.Checker, error) {
+	checkers := make([]*linter.Checker, len(critic.infoList))
+	for i, info := range critic.infoList {
+		c, err := linter.NewChecker(ctx, info)
+		if err != nil {
+			return nil, fmt.Errorf("init %s: %w", info.Name, err)
+		}
+		checkers[i] = c
+	}
+	return checkers, nil
+}

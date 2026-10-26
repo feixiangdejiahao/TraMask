@@ -1,0 +1,1 @@
+git log --oneline --all -30 && echo '---status---' && git status && echo '---tags---' && git tag

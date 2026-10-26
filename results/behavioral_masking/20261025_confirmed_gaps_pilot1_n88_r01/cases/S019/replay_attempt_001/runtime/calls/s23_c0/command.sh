@@ -1,0 +1,1 @@
+cd /app && for f in src/schema/*/schema_.ts; do echo "=== $f ==="; grep -n "class.*Schema_\|  required\|  optional\|  key\|  savedAs\|  hidden" "$f" | head -20; done

@@ -1,0 +1,292 @@
+diff --git a/sqlite_utils/cli.py b/sqlite_utils/cli.py
+index 9b9ee20..8220dc1 100644
+--- a/sqlite_utils/cli.py
++++ b/sqlite_utils/cli.py
+@@ -962,6 +962,12 @@ def insert_upsert_options(*, require_pk=False):
+                     default=False,
+                     help="Apply STRICT mode to created table",
+                 ),
++                click.option(
++                    "--safe-mode",
++                    is_flag=True,
++                    default=False,
++                    help="Use safe import mode with rollback checkpoints",
++                ),
+             )
+         ):
+             fn = decorator(fn)
+@@ -1006,6 +1012,7 @@ def insert_upsert_implementation(
+     bulk_sql=None,
+     functions=None,
+     strict=False,
++    safe_mode=False,
+ ):
+     db = sqlite_utils.Database(path)
+     _register_db_for_cleanup(db)
+@@ -1140,6 +1147,13 @@ def insert_upsert_implementation(
+ 
+         # For bulk_sql= we use cursor.executemany() instead
+         if bulk_sql:
++            if safe_mode:
++                result = db.safe_bulk_execute(
++                    bulk_sql, docs, batch_size=batch_size or 0
++                )
++                if not result["success"]:
++                    raise click.ClickException(result["error_report"])
++                return
+             if batch_size:
+                 doc_chunks = chunks(docs, batch_size)
+             else:
+@@ -1150,9 +1164,25 @@ def insert_upsert_implementation(
+             return
+ 
+         try:
+-            db.table(table).insert_all(
+-                docs, pk=pk, batch_size=batch_size, alter=alter, **extra_kwargs
+-            )
++            if safe_mode:
++                def _run_safe_import():
++                    db.table(table).insert_all(
++                        docs,
++                        pk=pk,
++                        batch_size=batch_size,
++                        alter=alter,
++                        **extra_kwargs,
++                    )
++                    if tracker is not None:
++                        db.table(table).transform(types=tracker.types)
++
++                safe_result = db.safe_import(table, _run_safe_import)
++                if not safe_result["success"]:
++                    raise click.ClickException(safe_result["error_report"])
++            else:
++                db.table(table).insert_all(
++                    docs, pk=pk, batch_size=batch_size, alter=alter, **extra_kwargs
++                )
+         except Exception as e:
+             if (
+                 isinstance(e, OperationalError)
+@@ -1176,7 +1206,7 @@ def insert_upsert_implementation(
+                 )
+             else:
+                 raise
+-        if tracker is not None:
++        if tracker is not None and not safe_mode:
+             db.table(table).transform(types=tracker.types)
+ 
+         # Clean up open file-like objects
+@@ -1248,6 +1278,7 @@ def insert(
+     not_null,
+     default,
+     strict,
++    safe_mode,
+ ):
+     """
+     Insert records from FILE into a table, creating the table if it
+@@ -1328,6 +1359,7 @@ def insert(
+             not_null=not_null,
+             default=default,
+             strict=strict,
++            safe_mode=safe_mode,
+         )
+     except UnicodeDecodeError as ex:
+         raise click.ClickException(UNICODE_ERROR.format(ex))
+@@ -1365,6 +1397,7 @@ def upsert(
+     load_extension,
+     silent,
+     strict,
++    safe_mode,
+ ):
+     """
+     Upsert records based on their primary key. Works like 'insert' but if
+@@ -1411,6 +1444,7 @@ def upsert(
+             load_extension=load_extension,
+             silent=silent,
+             strict=strict,
++            safe_mode=safe_mode,
+         )
+     except UnicodeDecodeError as ex:
+         raise click.ClickException(UNICODE_ERROR.format(ex))
+@@ -1432,6 +1466,9 @@ def upsert(
+ )
+ @import_options
+ @load_extension_option
++@click.option(
++    "--safe-mode", is_flag=True, default=False, help="Use safe import mode with rollback checkpoints"
++)
+ def bulk(
+     path,
+     sql,
+@@ -1453,6 +1490,7 @@ def bulk(
+     no_headers,
+     encoding,
+     load_extension,
++    safe_mode,
+ ):
+     """
+     Execute parameterized SQL against the provided list of documents.
+@@ -1499,11 +1537,164 @@ def bulk(
+             silent=False,
+             bulk_sql=sql,
+             functions=functions,
++            safe_mode=safe_mode,
+         )
+     except (OperationalError, sqlite3.IntegrityError) as e:
+         raise click.ClickException(str(e))
+ 
+ 
++
++@cli.command(name="enable-safe-import")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@load_extension_option
++def enable_safe_import(path, load_extension):
++    """Enable safe import mode for a database
++
++    While enabled, ``create_import_checkpoint()`` can be used to create
++    rollback checkpoints and bulk imports can be run atomically.
++
++    Example:
++
++    \b
++        sqlite-utils enable-safe-import data.db
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    db.enable_safe_import()
++
++
++@cli.command(name="disable-safe-import")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@load_extension_option
++def disable_safe_import(path, load_extension):
++    """Disable safe import mode for a database
++
++    Example:
++
++    \b
++        sqlite-utils disable-safe-import data.db
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    db.disable_safe_import()
++
++
++@cli.command(name="add-import-invariant")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("table")
++@click.argument("sql")
++@load_extension_option
++def add_import_invariant(path, table, sql, load_extension):
++    """Add an import invariant to a table
++
++    The invariant is an SQL expression, or a SELECT statement. It is
++    validated after every safe-mode import.
++
++    Example:
++
++    \b
++        sqlite-utils add-import-invariant data.db items 'COUNT(*) > 0'
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    invariant_id = db.add_import_invariant(table, sql)
++    click.echo(invariant_id)
++
++
++@cli.command(name="remove-import-invariant")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("table")
++@click.argument("invariant_id")
++@load_extension_option
++def remove_import_invariant(path, table, invariant_id, load_extension):
++    """Remove an import invariant from a table
++
++    Example:
++
++    \b
++        sqlite-utils remove-import-invariant data.db items inv_abc123
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    db.remove_import_invariant(table, invariant_id)
++
++
++@cli.command(name="list-import-invariants")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("table")
++@load_extension_option
++def list_import_invariants(path, table, load_extension):
++    """List import invariants for a table
++
++    Outputs each invariant id followed by its SQL.
++
++    Example:
++
++    \b
++        sqlite-utils list-import-invariants data.db items
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    for invariant in db.list_import_invariants(table):
++        click.echo("{}\t{}".format(invariant["id"], invariant["expression"]))
++
++
++@cli.command(name="validate-import-invariants")
++@click.argument(
++    "path",
++    type=click.Path(exists=True, file_okay=True, dir_okay=False, allow_dash=False),
++    required=True,
++)
++@click.argument("table")
++@load_extension_option
++def validate_import_invariants(path, table, load_extension):
++    """Validate import invariants for a table
++
++    Always exits 0, even if invariants fail. Output indicates pass or fail
++    and lists any failing invariant ids.
++
++    Example:
++
++    \b
++        sqlite-utils validate-import-invariants data.db items
++    """
++    db = sqlite_utils.Database(path)
++    _register_db_for_cleanup(db)
++    _load_extensions(db, load_extension)
++    result = db.validate_import_invariants(table)
++    if result["valid"]:
++        click.echo("Pass: all import invariants for '{}' are valid".format(table))
++    else:
++        click.echo("Fail: {} import invariant(s) failed for '{}'".format(len(result["failures"]), table))
++        for failure in result["failures"]:
++            click.echo("  {}".format(failure["id"]))
++
++
+ @cli.command(name="create-database")
+ @click.argument(
+     "path",

@@ -1,0 +1,1 @@
+cd /app && sed -n '1,360p' lib/runners/tap_process_test_runner.js

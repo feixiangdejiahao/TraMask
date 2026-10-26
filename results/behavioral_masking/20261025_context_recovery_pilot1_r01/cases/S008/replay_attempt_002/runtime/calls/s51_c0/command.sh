@@ -1,0 +1,1 @@
+cd /app && find /root/go/pkg/mod/github.com/moby -path '*api/types/container*' -name '*.go' | head -10 && grep -rn "type Summary struct" /root/go/pkg/mod/github.com/moby/moby*/api/types/container/*.go 2>/dev/null | head

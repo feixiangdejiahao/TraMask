@@ -1,0 +1,1 @@
+cd /app && cat src/core/reducers.ts && echo '=== connect.ts ===' && cat src/core/connect.ts

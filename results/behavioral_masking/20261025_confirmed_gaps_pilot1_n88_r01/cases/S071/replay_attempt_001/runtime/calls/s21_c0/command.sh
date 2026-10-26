@@ -1,0 +1,1 @@
+cd /app && nl -ba src/transformer.ts | sed -n '1,260p'

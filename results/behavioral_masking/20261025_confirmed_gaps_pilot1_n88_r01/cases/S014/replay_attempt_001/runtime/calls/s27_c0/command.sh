@@ -1,0 +1,1 @@
+cd /app && nl -ba packages/core/src/prompts/autocomplete.ts | sed -n '50,65p;365,380p;455,470p'

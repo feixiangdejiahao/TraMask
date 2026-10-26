@@ -1,0 +1,1 @@
+cd /app/packages/core && npx vitest run test/prompts/async-autocomplete.test.ts --reporter=verbose 2>&1 | grep -E "✓|×|→" | sed -n '17,40p'

@@ -1,0 +1,1 @@
+cd /app/packages/core && pnpm exec vitest run tests/pair-tracking-modifiers.test.ts 2>&1 | tail -60

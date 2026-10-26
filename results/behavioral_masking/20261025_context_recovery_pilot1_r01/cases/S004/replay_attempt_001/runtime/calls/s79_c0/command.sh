@@ -1,0 +1,1 @@
+cd /app && mypy aiomonitor 2>&1 | tail -40

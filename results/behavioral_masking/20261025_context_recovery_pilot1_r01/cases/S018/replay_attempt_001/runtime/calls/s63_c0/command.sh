@@ -1,0 +1,1 @@
+cd /app && ls tests/unit/core && ls tests/unit/cli

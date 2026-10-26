@@ -1,0 +1,1 @@
+cd /app/libs/core && awk 'length($0) > 100 {print FILENAME":"NR": "length($0)}' tests/unit_tests/runnables/test_coalesce.py | head

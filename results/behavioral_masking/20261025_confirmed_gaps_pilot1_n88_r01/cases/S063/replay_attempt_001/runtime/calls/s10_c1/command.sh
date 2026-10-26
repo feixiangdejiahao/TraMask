@@ -1,0 +1,1 @@
+cd /app && nl -ba pwnlib/tubes/sock.py | sed -n '1,220p'

@@ -1,0 +1,1 @@
+cd /app && sed -i 's/run_coroutine_threadsafe(asyncio.Event(), monitor._ui_loop)/run_coroutine_threadsafe(_ui_create_event(), monitor._ui_loop)/; /def invoke_command/a\    async def _ui_create_event():\n        return asyncio.Event()' /tmp/cli_test.py && python /tmp/cli_test.py

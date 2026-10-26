@@ -1,0 +1,1 @@
+cd /app && cat src/schema/types/index.ts && echo "===ITEM schema_.ts===" && cat src/schema/item/schema_.ts && echo "===ITEM schema.ts===" && cat src/schema/item/schema.ts

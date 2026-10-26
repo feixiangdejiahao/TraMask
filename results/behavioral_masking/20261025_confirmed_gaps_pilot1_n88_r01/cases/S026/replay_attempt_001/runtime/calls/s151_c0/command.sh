@@ -1,0 +1,1 @@
+cd /app && git branch -vv && git log --oneline --graph -3 && git status --porcelain && echo "CLEAN"

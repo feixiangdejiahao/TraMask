@@ -1,0 +1,1 @@
+GOROOT=$(go env GOROOT); sed -n '270,340p' "$GOROOT/src/go/doc/comment/parse.go"; echo "-----"; grep -n "lookupSym" "$GOROOT/src/go/doc/comment/parse.go"

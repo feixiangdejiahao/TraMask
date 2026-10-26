@@ -1,0 +1,1 @@
+pip download aiomonitor==0.7.2 -d /tmp/dl --no-deps 2>&1 | tail -5 || echo "NO NET"; ls /tmp/dl 2>/dev/null

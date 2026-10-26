@@ -1,0 +1,1 @@
+cd /app && grep -n "def wait_for_connection\|class listen\|def __init__" pwnlib/tubes/listen.py | head && sed -n '1,80p' pwnlib/tubes/listen.py

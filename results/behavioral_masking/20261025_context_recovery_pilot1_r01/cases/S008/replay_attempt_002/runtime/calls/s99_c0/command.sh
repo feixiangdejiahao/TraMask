@@ -1,0 +1,1 @@
+cd /app/backend && timeout 120 go test ./internal/services/ -run 'Drift' -count=1 -v 2>&1 | tail -60

@@ -1,0 +1,1 @@
+cd /app && git remote -v; echo "---"; timeout 10 npm view testem versions --json 2>&1 | tail -30

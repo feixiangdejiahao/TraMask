@@ -1,0 +1,1 @@
+cd /app && grep -n "getExitCode\|reporter" tests/ci/ci_tests.js | head -30 && sed -n '420,490p' tests/ci/ci_tests.js

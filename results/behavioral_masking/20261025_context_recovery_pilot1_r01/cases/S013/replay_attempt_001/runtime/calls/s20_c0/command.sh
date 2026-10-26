@@ -1,0 +1,1 @@
+cd /app && nl -ba src/resolvers.ts | sed -n '440,530p'

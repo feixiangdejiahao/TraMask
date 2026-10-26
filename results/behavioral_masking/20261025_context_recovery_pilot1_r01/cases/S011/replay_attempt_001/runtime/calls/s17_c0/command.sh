@@ -1,0 +1,1 @@
+cat src/param-parser.ts | head -60; echo '---'; grep -n "dependencies" src/resolvers.ts

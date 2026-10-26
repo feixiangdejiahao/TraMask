@@ -1,0 +1,1 @@
+cd /app && npx tsc --noEmit -p packages/core/tsconfig.json 2>&1 | head -50

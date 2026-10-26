@@ -1,0 +1,1 @@
+cd /app && npx tsc --noEmit 2>&1 | head -20 && echo "TSC OK" && npx vitest run src/schema/actions/zodSchemer src/schema/actions/dto src/schema/actions/jsonSchemer --reporter=dot 2>&1 | tail -15

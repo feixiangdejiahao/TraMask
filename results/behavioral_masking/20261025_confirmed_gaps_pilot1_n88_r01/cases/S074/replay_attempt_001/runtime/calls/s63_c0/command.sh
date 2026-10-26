@@ -1,0 +1,1 @@
+cd /app && sed -n '10,28p' vm.go && grep -n "v.ctx = &functionContext" vm.go

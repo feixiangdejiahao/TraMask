@@ -1,0 +1,1 @@
+cd /app && grep -rn "Clone" --include="*_test.go" . | head -20

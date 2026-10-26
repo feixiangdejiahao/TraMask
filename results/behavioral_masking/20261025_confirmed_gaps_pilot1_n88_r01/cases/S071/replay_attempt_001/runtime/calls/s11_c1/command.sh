@@ -1,0 +1,1 @@
+cd /app && timeout 10 curl -sL https://raw.githubusercontent.com/blitz-js/superjson/master/src/error-options.ts 2>&1 | head -100 || echo "NO NETWORK"

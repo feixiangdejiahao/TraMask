@@ -1,0 +1,1 @@
+cd /app && sed -i 's/TestClient(app)/TestClient(aiohttp.test_utils.TestServer(app))/' /tmp/webtest2.py && python /tmp/webtest2.py

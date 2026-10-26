@@ -1,0 +1,1 @@
+cd /app && sed -n '1,80p' backend/internal/services/settings_service_test.go

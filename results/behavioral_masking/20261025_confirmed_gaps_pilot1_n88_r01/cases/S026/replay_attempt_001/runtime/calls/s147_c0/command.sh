@@ -1,0 +1,1 @@
+cd /app && go build ./... && go test ./checkers/ -run 'TestCheckers/brokenDocLink' -count=1 2>&1 | tail -5

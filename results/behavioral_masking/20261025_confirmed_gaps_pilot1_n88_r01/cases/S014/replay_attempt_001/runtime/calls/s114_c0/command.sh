@@ -1,0 +1,1 @@
+cd /app && sed -n '312,430p' packages/core/src/prompts/autocomplete.ts

@@ -1,0 +1,1 @@
+find src -type f | sort && echo "---PACKAGE---" && cat package.json

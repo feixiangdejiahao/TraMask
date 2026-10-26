@@ -1,0 +1,506 @@
+diff --git a/ast/astutil/walk.go b/ast/astutil/walk.go
+index 19068cb..8dedf28 100644
+--- a/ast/astutil/walk.go
++++ b/ast/astutil/walk.go
+@@ -1,3 +1,4 @@
++//go:build !appengine
+ // +build !appengine
+ 
+ package astutil
+@@ -196,6 +197,11 @@ func walkExpr(expr ast.Expr, f WalkFunc) error {
+ 	case *ast.ParenExpr:
+ 		return walkExpr(expr.SubExpr, f)
+ 	case *ast.FuncExpr:
++		for _, d := range expr.Defaults {
++			if err := walkExpr(d, f); err != nil {
++				return err
++			}
++		}
+ 		return walkStmt(expr.Stmt, f)
+ 	case *ast.LetsExpr:
+ 		if err := walkExprs(expr.LHSS, f); err != nil {
+diff --git a/ast/expr.go b/ast/expr.go
+index 939ab8f..36fafc3 100644
+--- a/ast/expr.go
++++ b/ast/expr.go
+@@ -132,10 +132,11 @@ type SliceExpr struct {
+ // FuncExpr provide function expression.
+ type FuncExpr struct {
+ 	ExprImpl
+-	Name   string
+-	Stmt   Stmt
+-	Params []string
+-	VarArg bool
++	Name     string
++	Stmt     Stmt
++	Params   []string
++	VarArg   bool
++	Defaults []Expr
+ }
+ 
+ // LetsExpr provide multiple expression of let.
+diff --git a/parser/lexer.go b/parser/lexer.go
+index 4a9e6c1..b7fd4a8 100644
+--- a/parser/lexer.go
++++ b/parser/lexer.go
+@@ -87,6 +87,11 @@ func (s *Scanner) Init(src string) {
+ 	s.src = []rune(src)
+ }
+ 
++// Source returns the source code.
++func (s *Scanner) Source() string {
++	return string(s.src)
++}
++
+ // Scan analyses token, and decide identify or literals.
+ func (s *Scanner) Scan() (tok int, lit string, pos ast.Position, err error) {
+ retry:
+@@ -587,10 +592,21 @@ func (l *Lexer) Error(msg string) {
+ 
+ // Parse provides way to parse the code using Scanner.
+ func Parse(s *Scanner) (ast.Stmt, error) {
++	src := s.Source()
++	newSrc, defaults, err := preprocessDefaultParams(src)
++	if err != nil {
++		return nil, err
++	}
++	if newSrc != src {
++		s = &Scanner{src: []rune(newSrc)}
++	}
+ 	l := Lexer{s: s}
+ 	if yyParse(&l) != 0 {
+ 		return nil, l.e
+ 	}
++	if err := attachFuncDefaults(l.stmt, defaults); err != nil {
++		return nil, err
++	}
+ 	return l.stmt, l.e
+ }
+ 
+diff --git a/vm/vm.go b/vm/vm.go
+index 949a53b..b64cffa 100644
+--- a/vm/vm.go
++++ b/vm/vm.go
+@@ -54,6 +54,7 @@ var (
+ 	trueValue                 = reflect.ValueOf(true)
+ 	falseValue                = reflect.ValueOf(false)
+ 	zeroValue                 = reflect.Value{}
++	missingParamValue         = reflect.ValueOf(reflect.Value{})
+ 	reflectValueNilValue      = reflect.ValueOf(nilValue)
+ 	reflectValueErrorNilValue = reflect.ValueOf(reflect.New(errorType).Elem())
+ 
+diff --git a/vm/vmExprFunction.go b/vm/vmExprFunction.go
+index 37c15d9..e0ae70f 100644
+--- a/vm/vmExprFunction.go
++++ b/vm/vmExprFunction.go
+@@ -36,22 +36,32 @@ func (runInfo *runInfoStruct) funcExpr() {
+ 	runVMFunction := func(in []reflect.Value) []reflect.Value {
+ 		runInfo := runInfoStruct{ctx: in[0].Interface().(context.Context), options: runInfo.options, env: envFunc.NewEnv(), stmt: funcExpr.Stmt, rv: nilValue}
+ 
+-		// add Params to newEnv, except last Params
+-		for i := 0; i < len(funcExpr.Params)-1; i++ {
+-			runInfo.rv = in[i+1].Interface().(reflect.Value)
+-			runInfo.env.DefineValue(funcExpr.Params[i], runInfo.rv)
+-		}
+-		// add last Params to newEnv
+-		if len(funcExpr.Params) > 0 {
+-			if funcExpr.VarArg {
++		// add Params to newEnv
++		for i := 0; i < len(funcExpr.Params); i++ {
++			if funcExpr.VarArg && i == len(funcExpr.Params)-1 {
+ 				// function is variadic, add last Params to newEnv without convert to Interface and then reflect.Value
+-				runInfo.rv = in[len(funcExpr.Params)]
+-				runInfo.env.DefineValue(funcExpr.Params[len(funcExpr.Params)-1], runInfo.rv)
+-			} else {
+-				// function is not variadic, add last Params to newEnv
+-				runInfo.rv = in[len(funcExpr.Params)].Interface().(reflect.Value)
+-				runInfo.env.DefineValue(funcExpr.Params[len(funcExpr.Params)-1], runInfo.rv)
++				runInfo.rv = in[i+1]
++				runInfo.env.DefineValue(funcExpr.Params[i], runInfo.rv)
++				continue
++			}
++			rv := in[i+1].Interface().(reflect.Value)
++			if !rv.IsValid() {
++				// parameter was omitted by the call; evaluate its default value
++				if funcExpr.Defaults == nil || funcExpr.Defaults[i] == nil {
++					runInfo.err = newStringError(funcExpr, fmt.Sprintf("function wants %v arguments but received %v", len(funcExpr.Params), providedArgCount(in, len(funcExpr.Params), funcExpr.VarArg)))
++					runInfo.err = newError(funcExpr, runInfo.err)
++					return []reflect.Value{reflectValueNilValue, reflect.ValueOf(reflect.ValueOf(newError(funcExpr, runInfo.err)))}
++				}
++				runInfo.expr = funcExpr.Defaults[i]
++				runInfo.expr.SetPosition(funcExpr.Position())
++				runInfo.invokeExpr()
++				if runInfo.err != nil {
++					runInfo.err = newError(funcExpr, runInfo.err)
++					return []reflect.Value{reflectValueNilValue, reflect.ValueOf(reflect.ValueOf(newError(funcExpr, runInfo.err)))}
++				}
++				rv = runInfo.rv
+ 			}
++			runInfo.env.DefineValue(funcExpr.Params[i], rv)
+ 		}
+ 
+ 		// run function statements
+@@ -207,6 +217,25 @@ func checkIfRunVMFunction(rt reflect.Type) bool {
+ 	return true
+ }
+ 
++// providedArgCount returns the number of arguments explicitly provided to a VM
++// function call. Omitted parameters are represented by invalid reflect.Value
++// placeholders, and variadic elements are counted individually.
++func providedArgCount(in []reflect.Value, numParams int, varArg bool) int {
++	count := 0
++	for i := 0; i < numParams; i++ {
++		if varArg && i == numParams-1 {
++			if in[i+1].IsValid() {
++				count += in[i+1].Len()
++			}
++			continue
++		}
++		if in[i+1].Interface().(reflect.Value).IsValid() {
++			count++
++		}
++	}
++	return count
++}
++
+ // makeCallArgs creates the arguments reflect.Value slice for the four different kinds of functions.
+ // Also returns true if CallSlice should be used on the arguments, or false if Call should be used.
+ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool, callExpr *ast.CallExpr) ([]reflect.Value, bool) {
+@@ -228,8 +257,16 @@ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool
+ 
+ 	// number of expressions
+ 	numExprs := len(callExpr.SubExprs)
+-	// checks to short circuit wrong number of arguments
+-	if (!rt.IsVariadic() && !callExpr.VarArg && numIn != numExprs) ||
++	// checks to short circuit wrong number of arguments.
++	// VM functions allow a normal call to omit trailing arguments; missing
++	// arguments are filled in by runVMFunction using default values.
++	if isRunVMFunction && !callExpr.VarArg {
++		if !rt.IsVariadic() && numExprs > numIn {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
++			return nil, false
++		}
++	} else if (!rt.IsVariadic() && !callExpr.VarArg && numIn != numExprs) ||
+ 		(rt.IsVariadic() && callExpr.VarArg && (numIn < numExprs || numIn > numExprs+1)) ||
+ 		(rt.IsVariadic() && !callExpr.VarArg && numIn > numExprs+1) ||
+ 		(!rt.IsVariadic() && callExpr.VarArg && numIn < numExprs) {
+@@ -244,74 +281,106 @@ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool
+ 	}
+ 
+ 	var args []reflect.Value
+-	indexIn := 0
+-	indexInReal := 0
+-	indexExpr := 0
+-
+ 	if numInReal > numExprs {
+ 		args = make([]reflect.Value, 0, numInReal)
+ 	} else {
+ 		args = make([]reflect.Value, 0, numExprs)
+ 	}
++	indexInReal := 0
++	indexExpr := 0
++
+ 	if isRunVMFunction {
+ 		// for runVMFunction first arg is always context
+ 		args = append(args, reflect.ValueOf(runInfo.ctx))
+ 		indexInReal++
+ 	}
+ 
+-	// create arguments except the last one
+-	for indexInReal < numInReal-1 && indexExpr < numExprs-1 {
+-		runInfo.expr = callExpr.SubExprs[indexExpr]
++	// appendExpr evaluates an expression and appends it as an argument.
++	appendExpr := func(expr ast.Expr, inType reflect.Type) bool {
++		runInfo.expr = expr
+ 		runInfo.invokeExpr()
+ 		if runInfo.err != nil {
+-			return nil, false
++			return false
+ 		}
+ 		if isRunVMFunction {
+ 			args = append(args, reflect.ValueOf(runInfo.rv))
+ 		} else {
+-			runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, rt.In(indexInReal))
++			var rv reflect.Value
++			rv, runInfo.err = convertReflectValueToType(runInfo.rv, inType)
+ 			if runInfo.err != nil {
+-				runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
+-					"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
++				runInfo.err = newStringError(expr,
++					"function wants argument type "+inType.String()+" but received type "+runInfo.rv.Type().String())
+ 				runInfo.rv = nilValue
+-				return nil, false
++				return false
+ 			}
+-			args = append(args, runInfo.rv)
++			args = append(args, rv)
+ 		}
+-		indexIn++
+ 		indexInReal++
++		return true
++	}
++
++	// appendMissing fills omitted trailing parameters for VM functions.
++	appendMissing := func(count int) {
++		for i := 0; i < count; i++ {
++			args = append(args, missingParamValue)
++			indexInReal++
++		}
++	}
++
++	// Convert the argument at the given expression index to a VM/Go argument
++	// for the given parameter type.
++	convertExpr := func(exprIndex int, inType reflect.Type) bool {
++		return appendExpr(callExpr.SubExprs[exprIndex], inType)
++	}
++
++	// create arguments except the last one
++	for indexInReal < numInReal-1 && indexExpr < numExprs-1 {
++		if !convertExpr(indexExpr, rt.In(indexInReal)) {
++			return nil, false
++		}
+ 		indexExpr++
+ 	}
+ 
+ 	if !rt.IsVariadic() && !callExpr.VarArg {
+ 		// function is not variadic and call is not variadic
+-		// add last arguments and return
+-		runInfo.expr = callExpr.SubExprs[indexExpr]
+-		runInfo.invokeExpr()
+-		if runInfo.err != nil {
+-			return nil, false
+-		}
+-		if runInfo.err != nil {
+-			return nil, false
++		for indexExpr < numExprs && indexInReal < numInReal {
++			if !convertExpr(indexExpr, rt.In(indexInReal)) {
++				return nil, false
++			}
++			indexExpr++
+ 		}
+-		if isRunVMFunction {
+-			args = append(args, reflect.ValueOf(runInfo.rv))
+-		} else {
+-			runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, rt.In(indexInReal))
+-			if runInfo.err != nil {
+-				runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
+-					"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
++		if indexInReal < numInReal {
++			if !isRunVMFunction {
++				runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
+ 				runInfo.rv = nilValue
+ 				return nil, false
+ 			}
+-			args = append(args, runInfo.rv)
++			appendMissing(numInReal - indexInReal)
+ 		}
+ 		return args, false
+ 	}
+ 
+ 	if !rt.IsVariadic() && callExpr.VarArg {
+ 		// function is not variadic and call is variadic
+-		runInfo.expr = callExpr.SubExprs[indexExpr]
++		if numExprs == 0 {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
++			return nil, false
++		}
++		if numExprs > numIn {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
++			return nil, false
++		}
++		// first numExprs-1 expressions are fixed arguments
++		for indexExpr < numExprs-1 && indexInReal < numInReal-1 {
++			if !convertExpr(indexExpr, rt.In(indexInReal)) {
++				return nil, false
++			}
++			indexExpr++
++		}
++		// last expression must be a slice to expand into remaining parameters
++		runInfo.expr = callExpr.SubExprs[numExprs-1]
+ 		runInfo.invokeExpr()
+ 		if runInfo.err != nil {
+ 			return nil, false
+@@ -321,27 +390,27 @@ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool
+ 			runInfo.rv = nilValue
+ 			return nil, false
+ 		}
+-		if runInfo.rv.Len() < numIn-indexIn {
++		needed := numInReal - indexInReal
++		if runInfo.rv.Len() < needed {
+ 			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs+runInfo.rv.Len()-1))
+ 			runInfo.rv = nilValue
+ 			return nil, false
+ 		}
+-
+ 		indexSlice := 0
+-		for indexInReal < numInReal {
++		for indexInReal < numInReal && indexSlice < runInfo.rv.Len() {
+ 			if isRunVMFunction {
+ 				args = append(args, reflect.ValueOf(runInfo.rv.Index(indexSlice)))
+ 			} else {
+-				runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv.Index(indexSlice), rt.In(indexInReal))
++				var rv reflect.Value
++				rv, runInfo.err = convertReflectValueToType(runInfo.rv.Index(indexSlice), rt.In(indexInReal))
+ 				if runInfo.err != nil {
+-					runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
++					runInfo.err = newStringError(callExpr.SubExprs[numExprs-1],
+ 						"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
+ 					runInfo.rv = nilValue
+ 					return nil, false
+ 				}
+-				args = append(args, runInfo.rv)
++				args = append(args, rv)
+ 			}
+-			indexIn++
+ 			indexInReal++
+ 			indexSlice++
+ 		}
+@@ -350,78 +419,95 @@ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool
+ 
+ 	// function is variadic and call may or may not be variadic
+ 
+-	if indexExpr == numExprs {
+-		// no more expressions, return what we have and let reflect Call handle if call is variadic or not
+-		return args, false
+-	}
+-
+-	if numIn > numExprs {
+-		// there are more arguments after this one, so does not matter if call is variadic or not
+-		// add the last argument then return what we have and let reflect Call handle if call is variadic or not
+-		runInfo.expr = callExpr.SubExprs[indexExpr]
+-		runInfo.invokeExpr()
+-		if runInfo.err != nil {
++	if callExpr.VarArg {
++		// function is variadic and call is variadic
++		if numExprs > numIn {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
+ 			return nil, false
+ 		}
+-		if isRunVMFunction {
+-			args = append(args, reflect.ValueOf(runInfo.rv))
+-		} else {
+-			runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, rt.In(indexInReal))
+-			if runInfo.err != nil {
+-				runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
+-					"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
+-				runInfo.rv = nilValue
+-				return nil, false
++		if numExprs == numIn {
++			// last expression is the variadic slice
++			// first numIn-1 expressions are fixed arguments
++			for indexExpr < numExprs-1 && indexInReal < numInReal-1 {
++				if !convertExpr(indexExpr, rt.In(indexInReal)) {
++					return nil, false
++				}
++				indexExpr++
+ 			}
+-			args = append(args, runInfo.rv)
+-		}
+-		return args, false
+-	}
+-
+-	if rt.IsVariadic() && !callExpr.VarArg {
+-		// function is variadic and call is not variadic
+-		sliceType := rt.In(numInReal - 1).Elem()
+-		for indexExpr < numExprs {
+-			runInfo.expr = callExpr.SubExprs[indexExpr]
++			runInfo.expr = callExpr.SubExprs[numExprs-1]
+ 			runInfo.invokeExpr()
+ 			if runInfo.err != nil {
+ 				return nil, false
+ 			}
++			sliceType := rt.In(numInReal - 1)
++			if sliceType.Kind() == reflect.Interface && !runInfo.rv.IsNil() {
++				sliceType = sliceType.Elem()
++			}
+ 			runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, sliceType)
+ 			if runInfo.err != nil {
+-				runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
++				runInfo.err = newStringError(callExpr.SubExprs[numExprs-1],
+ 					"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
+ 				runInfo.rv = nilValue
+ 				return nil, false
+ 			}
+ 			args = append(args, runInfo.rv)
++			return args, true
++		}
++		// numExprs == numIn-1: last expression fills the last fixed parameter
++		// and the variadic parameter is empty.
++		for indexExpr < numExprs-1 && indexInReal < numInReal-1 {
++			if !convertExpr(indexExpr, rt.In(indexInReal)) {
++				return nil, false
++			}
++			indexExpr++
++		}
++		if indexExpr < numExprs {
++			if !convertExpr(indexExpr, rt.In(indexInReal)) {
++				return nil, false
++			}
+ 			indexExpr++
+ 		}
+ 		return args, false
+-
+ 	}
+ 
+-	// function is variadic and call is variadic
+-	// the only time we return CallSlice is true
+-	sliceType := rt.In(numInReal - 1)
+-	if sliceType.Kind() == reflect.Interface && !runInfo.rv.IsNil() {
+-		sliceType = sliceType.Elem()
++	// function is variadic and call is not variadic
++	// fill fixed parameters
++	for indexExpr < numExprs && indexInReal < numInReal-1 {
++		if !convertExpr(indexExpr, rt.In(indexInReal)) {
++			return nil, false
++		}
++		indexExpr++
+ 	}
+-	runInfo.expr = callExpr.SubExprs[indexExpr]
+-	runInfo.invokeExpr()
+-	if runInfo.err != nil {
+-		return nil, false
++	// if not enough fixed arguments, fill with defaults (VM) or error (Go)
++	if indexInReal < numInReal-1 {
++		if !isRunVMFunction {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
++			return nil, false
++		}
++		appendMissing(numInReal - 1 - indexInReal)
+ 	}
+-	runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, sliceType)
+-	if runInfo.err != nil {
+-		runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
+-			"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
+-		runInfo.rv = nilValue
+-		return nil, false
++	// remaining expressions become variadic elements
++	sliceType := rt.In(numInReal - 1).Elem()
++	for indexExpr < numExprs {
++		runInfo.expr = callExpr.SubExprs[indexExpr]
++		runInfo.invokeExpr()
++		if runInfo.err != nil {
++			return nil, false
++		}
++		var rv reflect.Value
++		rv, runInfo.err = convertReflectValueToType(runInfo.rv, sliceType)
++		if runInfo.err != nil {
++			runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
++				"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
++			runInfo.rv = nilValue
++			return nil, false
++		}
++		args = append(args, rv)
++		indexExpr++
+ 	}
+-	args = append(args, runInfo.rv)
+-
+-	return args, true
++	return args, false
+ }
+ 
+ // processCallReturnValues get/converts the values returned from a function call into our normal reflect.Value, error

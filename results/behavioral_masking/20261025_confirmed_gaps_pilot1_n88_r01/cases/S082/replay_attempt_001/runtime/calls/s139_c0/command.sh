@@ -1,0 +1,1 @@
+cd /app && npx mocha tests/client_tests.js 2>&1 | tail -30

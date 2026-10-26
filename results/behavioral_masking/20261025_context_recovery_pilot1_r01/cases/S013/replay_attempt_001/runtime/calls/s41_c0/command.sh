@@ -1,0 +1,1 @@
+cd /app && grep -rn "BuildResolver" src/ --include="*.ts" | grep -v "src/resolvers.ts"

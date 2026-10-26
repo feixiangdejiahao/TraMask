@@ -1,0 +1,434 @@
+diff --git a/bandit/core/tester.py b/bandit/core/tester.py
+index 32642a5..d6efcfc 100644
+--- a/bandit/core/tester.py
++++ b/bandit/core/tester.py
+@@ -9,6 +9,7 @@ import warnings
+ from bandit.core import constants
+ from bandit.core import context as b_context
+ from bandit.core import utils
++from bandit.core.nosec import Nosec
+ 
+ warnings.formatwarning = utils.warnings_formatter
+ LOG = logging.getLogger(__name__)
+@@ -53,7 +54,7 @@ class BanditTester:
+                     result = test(context)
+ 
+                 if result is not None:
+-                    nosec_tests_to_skip = self._get_nosecs_from_contexts(
++                    nosec = self._get_nosecs_from_contexts(
+                         temp_context, test_result=result
+                     )
+ 
+@@ -77,16 +78,15 @@ class BanditTester:
+                         result.test_id = test._test_id
+ 
+                     # don't skip the test if there was no nosec comment
+-                    if nosec_tests_to_skip is not None:
+-                        # If the set is empty then it means that nosec was
+-                        # used without test number -> update nosecs counter.
+-                        # If the test id is in the set of tests to skip,
+-                        # log and increment the skip by test count.
+-                        if not nosec_tests_to_skip:
++                    if nosec is not None:
++                        # A blanket suppression counts as a nosec comment.
++                        # A specific suppression increments the skipped tests
++                        # counter when the finding's test ID is in the set.
++                        if nosec.is_blanket():
+                             LOG.debug("skipped, nosec without test number")
+                             self.metrics.note_nosec()
+                             continue
+-                        if result.test_id in nosec_tests_to_skip:
++                        if result.test_id in nosec.tests:
+                             LOG.debug(
+                                 f"skipped, nosec for test {result.test_id}"
+                             )
+@@ -103,12 +103,11 @@ class BanditTester:
+                     val = constants.RANKING_VALUES[result.confidence]
+                     scores["CONFIDENCE"][con] += val
+                 else:
+-                    nosec_tests_to_skip = self._get_nosecs_from_contexts(
+-                        temp_context
+-                    )
++                    nosec = self._get_nosecs_from_contexts(temp_context)
+                     if (
+-                        nosec_tests_to_skip
+-                        and test._test_id in nosec_tests_to_skip
++                        nosec is not None
++                        and not nosec.is_blanket()
++                        and test._test_id in nosec.tests
+                     ):
+                         LOG.warning(
+                             f"nosec encountered ({test._test_id}), but no "
+@@ -125,33 +124,17 @@ class BanditTester:
+         return scores
+ 
+     def _get_nosecs_from_contexts(self, context, test_result=None):
+-        """Use context and optional test result to get set of tests to skip.
++        """Use context and optional test result to get suppression to apply.
++
+         :param context: temp context
+         :param test_result: optional test result
+-        :return: set of tests to skip for the line based on contexts
++        :return: Nosec object for the finding, or None if no suppression
+         """
+-        nosec_tests_to_skip = set()
+-        base_tests = (
+-            self.nosec_lines.get(test_result.lineno, None)
+-            if test_result
+-            else None
+-        )
+-        context_tests = utils.get_nosec(self.nosec_lines, context)
+-
+-        # if both are none there were no comments
+-        # this is explicitly different from being empty.
+-        # empty set indicates blanket nosec comment without
+-        # individual test names or ids
+-        if base_tests is None and context_tests is None:
+-            nosec_tests_to_skip = None
+-
+-        # combine tests from current line and context line
+-        if base_tests is not None:
+-            nosec_tests_to_skip.update(base_tests)
+-        if context_tests is not None:
+-            nosec_tests_to_skip.update(context_tests)
+-
+-        return nosec_tests_to_skip
++        nosec = None
++        if test_result:
++            nosec = self.nosec_lines.get(test_result.lineno, None)
++        context_nosec = utils.get_nosec(self.nosec_lines, context)
++        return Nosec.combine(nosec, context_nosec)
+ 
+     @staticmethod
+     def report_error(test, context, error):
+
+diff --git a/tests/functional/test_functional.py b/tests/functional/test_functional.py
+index 08b1c5c..93f41d1 100644
+--- a/tests/functional/test_functional.py
++++ b/tests/functional/test_functional.py
+@@ -3,6 +3,7 @@
+ #
+ # SPDX-License-Identifier: Apache-2.0
+ import os
++import tempfile
+ from contextlib import contextmanager
+ 
+ import testtools
+@@ -708,6 +709,77 @@ class FunctionalTests(testtools.TestCase):
+         }
+         self.check_example("try_except_pass.py", expect)
+ 
++    def _run_temp_file(self, source):
++        """Run bandit against a temporary file and return issue list."""
++        with tempfile.NamedTemporaryFile(
++            "w", suffix=".py", delete=False
++        ) as tmp:
++            tmp.write(source)
++            path = tmp.name
++        self.addCleanup(os.remove, path)
++        self.b_mgr.metrics = metrics.Metrics()
++        self.b_mgr.scores = []
++        self.b_mgr.discover_files([path], True)
++        self.b_mgr.run_tests()
++        return self.b_mgr.get_issue_list()
++
++    def test_nosec_region(self):
++        """Test # nosec-begin and # nosec-end directives."""
++        source = """# nosec-begin B602
++subprocess.Popen('/bin/ls *', shell=True)
++subprocess.call(['/bin/ls', '-l'])
++# nosec-end
++subprocess.Popen('/bin/ls *', shell=True)
++"""
++        issues = self._run_temp_file(source)
++        self.assertEqual(2, len(issues))
++        self.assertEqual(["B603", "B602"], [i.test_id for i in issues])
++        self.assertEqual([3, 5], [i.lineno for i in issues])
++        m = self.b_mgr.metrics.data["_totals"]
++        self.assertEqual(0, m["nosec"])
++        self.assertEqual(1, m["skipped_tests"])
++
++    def test_nosec_next_line(self):
++        """Test # nosec-next-line directive."""
++        source = """# nosec-next-line
++(
++    subprocess.call(['/bin/ls', '-l'])
++)
++subprocess.call(['/bin/ls', '-l'])
++"""
++        issues = self._run_temp_file(source)
++        self.assertEqual(1, len(issues))
++        self.assertEqual("B603", issues[0].test_id)
++        self.assertEqual(5, issues[0].lineno)
++        m = self.b_mgr.metrics.data["_totals"]
++        self.assertEqual(1, m["nosec"])
++        self.assertEqual(0, m["skipped_tests"])
++
++    def test_nosec_directives_ignored_with_ignore_nosec(self):
++        """Test that all nosec directives are ignored with --ignore-nosec."""
++        source = """# nosec-begin
++subprocess.call(['/bin/ls', '-l'])
++# nosec-next-line
++subprocess.call(['/bin/ls', '-l'])
++"""
++        with tempfile.NamedTemporaryFile(
++            "w", suffix=".py", delete=False
++        ) as tmp:
++            tmp.write(source)
++            path = tmp.name
++        self.addCleanup(os.remove, path)
++        self.b_mgr.metrics = metrics.Metrics()
++        self.b_mgr.scores = []
++        self.b_mgr.ignore_nosec = True
++        self.b_mgr.discover_files([path], True)
++        self.b_mgr.run_tests()
++        issues = self.b_mgr.get_issue_list()
++        self.assertEqual(2, len(issues))
++        self.assertEqual([2, 4], [i.lineno for i in issues])
++        m = self.b_mgr.metrics.data["_totals"]
++        self.assertEqual(0, m["nosec"])
++        self.assertEqual(0, m["skipped_tests"])
++
+     def test_metric_gathering(self):
+         expect = {
+             "nosec": 2,
+
+diff --git a/tests/unit/core/test_manager.py b/tests/unit/core/test_manager.py
+index 5d20c56..0e6f304 100644
+--- a/tests/unit/core/test_manager.py
++++ b/tests/unit/core/test_manager.py
+@@ -12,6 +12,7 @@ from bandit.core import config
+ from bandit.core import constants
+ from bandit.core import issue
+ from bandit.core import manager
++from bandit.core import test_set
+ 
+ 
+ class ManagerTests(testtools.TestCase):
+@@ -393,3 +394,226 @@ class ManagerTests(testtools.TestCase):
+                 [issue_a, issue_b], [issue_a, issue_b, issue_c]
+             ),
+         )
++
++
++class NosecDirectiveTests(testtools.TestCase):
++    """Tests for nosec directive parsing and processing."""
++
++    def setUp(self):
++        super().setUp()
++        self.config = config.BanditConfig()
++        self.testset = test_set.BanditTestSet(config=self.config)
++        self.enabled_ids = manager._get_enabled_test_ids(self.testset)
++        self.all_ids = manager._get_all_test_ids()
++
++    def test_parse_nosec_directive_begin(self):
++        self.assertEqual(
++            ("begin", "B602"),
++            manager._parse_nosec_directive("# nosec-begin B602"),
++        )
++
++    def test_parse_nosec_directive_begin_no_selector(self):
++        self.assertEqual(
++            ("begin", ""),
++            manager._parse_nosec_directive("# nosec-begin"),
++        )
++
++    def test_parse_nosec_directive_end(self):
++        self.assertEqual(
++            ("end", None),
++            manager._parse_nosec_directive("# nosec-end"),
++        )
++
++    def test_parse_nosec_directive_end_extra_text(self):
++        self.assertEqual(
++            ("end", None),
++            manager._parse_nosec_directive("# nosec-end whatever"),
++        )
++
++    def test_parse_nosec_directive_next(self):
++        self.assertEqual(
++            ("next", "B602"),
++            manager._parse_nosec_directive("# nosec-next-line B602"),
++        )
++
++    def test_parse_nosec_directive_case_insensitive(self):
++        self.assertEqual(
++            ("begin", "b602"),
++            manager._parse_nosec_directive("# NOSEC-BEGIN b602"),
++        )
++        self.assertEqual(
++            ("end", None),
++            manager._parse_nosec_directive("# NOSEC-END"),
++        )
++        self.assertEqual(
++            ("next", "b602"),
++            manager._parse_nosec_directive("# NOSEC-NEXT-LINE b602"),
++        )
++
++    def test_parse_nosec_directive_inline_not_directive(self):
++        self.assertIsNone(
++            manager._parse_nosec_directive("# nosec B602"),
++        )
++
++    def test_parse_selector_blank_is_blanket(self):
++        nosec = manager._parse_selector("", self.enabled_ids, self.all_ids)
++        self.assertTrue(nosec.is_blanket())
++
++    def test_parse_selector_all_is_blanket(self):
++        nosec = manager._parse_selector("all", self.enabled_ids, self.all_ids)
++        self.assertTrue(nosec.is_blanket())
++
++    def test_parse_selector_none_is_no_suppression(self):
++        self.assertIsNone(
++            manager._parse_selector("none", self.enabled_ids, self.all_ids)
++        )
++
++    def test_parse_selector_specific_id(self):
++        nosec = manager._parse_selector(
++            "B602", self.enabled_ids, self.all_ids
++        )
++        self.assertFalse(nosec.is_blanket())
++        self.assertEqual({"B602"}, nosec.tests)
++
++    def test_parse_selector_case_insensitive_id(self):
++        nosec = manager._parse_selector(
++            "b602", self.enabled_ids, self.all_ids
++        )
++        self.assertEqual({"B602"}, nosec.tests)
++
++    def test_parse_selector_test_name(self):
++        nosec = manager._parse_selector(
++            "subprocess_popen_with_shell_equals_true",
++            self.enabled_ids,
++            self.all_ids,
++        )
++        self.assertEqual({"B602"}, nosec.tests)
++
++    def test_parse_selector_union_comma(self):
++        nosec = manager._parse_selector(
++            "B602, B603", self.enabled_ids, self.all_ids
++        )
++        self.assertEqual({"B602", "B603"}, nosec.tests)
++
++    def test_parse_selector_union_space(self):
++        nosec = manager._parse_selector(
++            "B602 B603", self.enabled_ids, self.all_ids
++        )
++        self.assertEqual({"B602", "B603"}, nosec.tests)
++
++    def test_parse_selector_union_operator(self):
++        nosec = manager._parse_selector(
++            "B602 | B603", self.enabled_ids, self.all_ids
++        )
++        self.assertEqual({"B602", "B603"}, nosec.tests)
++
++    def test_parse_selector_intersection(self):
++        nosec = manager._parse_selector(
++            "B602 & B603", self.enabled_ids, self.all_ids
++        )
++        self.assertEqual(set(), nosec.tests)
++
++    def test_parse_selector_difference(self):
++        nosec = manager._parse_selector(
++            "all - B602", self.enabled_ids, self.all_ids
++        )
++        self.assertEqual(self.enabled_ids - {"B602"}, nosec.tests)
++
++    def test_parse_selector_negation(self):
++        nosec = manager._parse_selector(
++            "!B602", self.enabled_ids, self.all_ids
++        )
++        self.assertEqual(self.enabled_ids - {"B602"}, nosec.tests)
++
++    def test_parse_selector_glob(self):
++        nosec = manager._parse_selector(
++            "B60*", self.enabled_ids, self.all_ids
++        )
++        self.assertTrue({"B601", "B602", "B603", "B607"}.issubset(nosec.tests))
++
++    def test_parse_selector_parentheses(self):
++        nosec = manager._parse_selector(
++            "(B602 | B603) & !B603", self.enabled_ids, self.all_ids
++        )
++        self.assertEqual({"B602"}, nosec.tests)
++
++    def test_parse_selector_fallback(self):
++        nosec = manager._parse_selector(
++            "B602 B607 B999", self.enabled_ids, self.all_ids
++        )
++        self.assertEqual({"B602", "B607"}, nosec.tests)
++
++    def test_is_skip_line(self):
++        self.assertTrue(manager._is_skip_line(b""))
++        self.assertTrue(manager._is_skip_line(b"   "))
++        self.assertTrue(manager._is_skip_line(b"# comment"))
++        self.assertTrue(manager._is_skip_line(b"("))
++        self.assertTrue(manager._is_skip_line(b")"))
++        self.assertTrue(manager._is_skip_line(b"[ ]"))
++        self.assertTrue(manager._is_skip_line(b";"))
++        self.assertTrue(manager._is_skip_line(b"..."))
++        self.assertFalse(manager._is_skip_line(b"x = 1"))
++        self.assertFalse(manager._is_skip_line(b"subprocess.call(...)"))
++
++    def test_process_region_directives(self):
++        lines = [
++            b"# nosec-begin",
++            b"subprocess.call(['/bin/ls', '-l'])",
++            b"# nosec-end",
++            b"subprocess.call(['/bin/ls', '-l'])",
++        ]
++        directives = [(1, "begin", ""), (3, "end", None)]
++        nosec_lines = manager.BanditManager._process_nosec_directives(
++            self._fake_manager(), lines, b"\n".join(lines), directives, {}
++        )
++        self.assertIn(2, nosec_lines)
++        self.assertTrue(nosec_lines[2].is_blanket())
++        self.assertNotIn(1, nosec_lines)
++        self.assertNotIn(3, nosec_lines)
++        self.assertNotIn(4, nosec_lines)
++
++    def test_process_next_line_directive(self):
++        lines = [
++            b"# nosec-next-line",
++            b"(",
++            b"    subprocess.call(['/bin/ls', '-l'])",
++            b")",
++            b"subprocess.call(['/bin/ls', '-l'])",
++        ]
++        directives = [(1, "next", "")]
++        nosec_lines = manager.BanditManager._process_nosec_directives(
++            self._fake_manager(),
++            lines,
++            b"\n".join(lines),
++            directives,
++            {},
++        )
++        for lineno in (2, 3, 4):
++            self.assertIn(lineno, nosec_lines)
++            self.assertTrue(nosec_lines[lineno].is_blanket())
++        self.assertNotIn(5, nosec_lines)
++
++    def test_process_region_indent_auto_end(self):
++        lines = [
++            b"def foo():",
++            b"    # nosec-begin",
++            b"    subprocess.call(['/bin/ls', '-l'])",
++            b"    subprocess.call(['/bin/ls', '-l'])",
++            b"",
++            b"subprocess.call(['/bin/ls', '-l'])",
++        ]
++        directives = [(2, "begin", "")]
++        nosec_lines = manager.BanditManager._process_nosec_directives(
++            self._fake_manager(), lines, b"\n".join(lines), directives, {}
++        )
++        self.assertIn(3, nosec_lines)
++        self.assertIn(4, nosec_lines)
++        # The blank line is still part of the region (blank lines do not
++        # carry indentation), but the module-level line is not.
++        self.assertNotIn(6, nosec_lines)
++
++    def _fake_manager(self):
++        class FakeManager:
++            b_ts = self.testset
++
++        return FakeManager()

@@ -1,0 +1,8 @@
+cd /app && timeout 60 python -m doctest pwnlib/tubes/buffer.py >/dev/null 2>&1 && echo "buffer doctest ok"
+timeout 30 python /tmp/test_mux_basic.py >/dev/null 2>&1 && echo "basic ok"
+timeout 30 python /tmp/test_flow.py >/dev/null 2>&1 && echo "flow ok"
+timeout 30 python /tmp/test_mux_ids.py >/dev/null 2>&1 && echo "ids ok"
+timeout 30 python /tmp/test_halfclose.py >/dev/null 2>&1 && echo "halfclose ok"
+timeout 30 python /tmp/test_mux_validation.py >/dev/null 2>&1 && echo "validation ok"
+timeout 60 python /tmp/test_concurrent.py >/dev/null 2>&1 && echo "concurrent ok"
+timeout 30 python /tmp/test_process_mux.py >/dev/null 2>&1 && echo "process mux ok"

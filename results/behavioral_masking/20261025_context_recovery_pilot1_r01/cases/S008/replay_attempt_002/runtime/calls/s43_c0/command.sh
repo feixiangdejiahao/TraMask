@@ -1,0 +1,1 @@
+cd /app && grep -rn "func NewEnvProxyMiddlewareWithParam" backend/internal/middleware/*.go backend/pkg/**/*.go 2>/dev/null | head && find backend -name "*.go" | xargs grep -ln "NewEnvProxyMiddlewareWithParam" | head

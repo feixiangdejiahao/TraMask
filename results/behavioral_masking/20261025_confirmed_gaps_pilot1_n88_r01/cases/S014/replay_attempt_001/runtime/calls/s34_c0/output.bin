@@ -1,0 +1,200 @@
+diff --git a/packages/prompts/src/autocomplete.ts b/packages/prompts/src/autocomplete.ts
+index bb4dc69..dd3362a 100644
+--- a/packages/prompts/src/autocomplete.ts
++++ b/packages/prompts/src/autocomplete.ts
+@@ -47,9 +47,17 @@ interface AutocompleteSharedOptions<Value> extends CommonOptions {
+ 	 */
+ 	message: string;
+ 	/**
+-	 * Available options for the autocomplete prompt.
++	 * Available options for the autocomplete prompt. May be a static array, a
++	 * synchronous function, or an async resolver that receives the current search
++	 * and an AbortSignal and returns the (possibly filtered) options.
+ 	 */
+-	options: Option<Value>[] | ((this: AutocompletePrompt<Option<Value>>) => Option<Value>[]);
++	options:
++		| Option<Value>[]
++		| ((
++				this: AutocompletePrompt<Option<Value>>,
++				search: string,
++				opts: { signal: AbortSignal }
++		  ) => Option<Value>[] | Promise<Option<Value>[]>);
+ 	/**
+ 	 * Maximum number of items to display at once.
+ 	 */
+@@ -67,6 +75,68 @@ interface AutocompleteSharedOptions<Value> extends CommonOptions {
+ 	 * If not provided, a default filter that matches label, hint, and value is used.
+ 	 */
+ 	filter?: (search: string, option: Option<Value>) => boolean;
++	/**
++	 * Delay in milliseconds before an async fetch is triggered after typing stops.
++	 * @default 200
++	 */
++	debounceMs?: number;
++	/**
++	 * Enables caching of async results keyed by search term.
++	 * @default false
++	 */
++	cacheResults?: boolean;
++	/**
++	 * Maximum number of cached search results to retain.
++	 * @default 100
++	 */
++	maxCacheSize?: number;
++	/**
++	 * Non-empty searches shorter than this value are suppressed.
++	 * Empty searches always fetch.
++	 * @default 1
++	 */
++	minSearchLength?: number;
++	/**
++	 * Serves cached results immediately while refetching in the background.
++	 * Requires `cacheResults`.
++	 * @default false
++	 */
++	staleWhileRevalidate?: boolean;
++	/**
++	 * Number of retry attempts after a failed async fetch.
++	 * @default 0
++	 */
++	maxRetries?: number;
++	/**
++	 * Base delay in milliseconds before retrying a failed fetch.
++	 * @default 0
++	 */
++	retryDelay?: number;
++	/**
++	 * Controls retry delay progression.
++	 * @default 'linear'
++	 */
++	retryBackoff?: 'linear' | 'exponential';
++	/**
++	 * Options shown when all retries are exhausted and `loadError` is set.
++	 */
++	fallbackOptions?: Option<Value>[];
++	/**
++	 * Keeps the prompt loading and defers applying results until this many
++	 * milliseconds have elapsed since the fetch started.
++	 * @default 0
++	 */
++	loadingMinDuration?: number;
++	/**
++	 * Message shown while async options are loading.
++	 * @default "Loading..."
++	 */
++	loadingMessage?: string;
++	/**
++	 * Message shown when no options match the current search.
++	 * @default "No matches found"
++	 */
++	noResultsMessage?: string;
+ }
+ 
+ export interface AutocompleteOptions<Value> extends AutocompleteSharedOptions<Value> {
+@@ -81,11 +151,21 @@ export interface AutocompleteOptions<Value> extends AutocompleteSharedOptions<Va
+ }
+ 
+ export const autocomplete = <Value>(opts: AutocompleteOptions<Value>) => {
+-	const prompt = new AutocompletePrompt({
++	const prompt = new AutocompletePrompt<Option<Value>>({
+ 		options: opts.options,
+ 		initialValue: opts.initialValue ? [opts.initialValue] : undefined,
+ 		initialUserInput: opts.initialUserInput,
+ 		placeholder: opts.placeholder,
++		debounceMs: opts.debounceMs,
++		cacheResults: opts.cacheResults,
++		maxCacheSize: opts.maxCacheSize,
++		minSearchLength: opts.minSearchLength,
++		maxRetries: opts.maxRetries,
++		retryDelay: opts.retryDelay,
++		retryBackoff: opts.retryBackoff,
++		staleWhileRevalidate: opts.staleWhileRevalidate,
++		fallbackOptions: opts.fallbackOptions,
++		loadingMinDuration: opts.loadingMinDuration,
+ 		filter:
+ 			opts.filter ??
+ 			((search: string, opt: Option<Value>) => {
+@@ -153,7 +233,6 @@ export const autocomplete = <Value>(opts: AutocompleteOptions<Value>) => {
+ 						searchText = ` ${this.userInputWithCursor}`;
+ 					}
+ 
+-					// Show match count if filtered
+ 					const matches =
+ 						this.filteredOptions.length !== options.length
+ 							? styleText(
+@@ -162,57 +241,65 @@ export const autocomplete = <Value>(opts: AutocompleteOptions<Value>) => {
+ 								)
+ 							: '';
+ 
+-					// No matches message
++					// Async status messages
++					const minSearchLength = opts.minSearchLength ?? 1;
++					const loading = this.loading
++						? [`${styleText(barStyle, S_BAR)}  ${styleText('dim', opts.loadingMessage ?? 'Loading...')}`]
++						: [];
++					const tooShort = this.searchTooShort
++						? [
++								`${styleText(barStyle, S_BAR)}  ${styleText('yellow', `Type at least ${minSearchLength} characters`)}`,
++							]
++						: [];
++					const fetchError = this.loadError
++						? [`${styleText(barStyle, S_BAR)}  ${styleText('red', this.loadError)}`]
++						: [];
+ 					const noResults =
+-						this.filteredOptions.length === 0 && userInput
+-							? [`${guidePrefix}${styleText('yellow', 'No matches found')}`]
++						this.filteredOptions.length === 0 &&
++						userInput &&
++						!this.loading &&
++						!this.searchTooShort &&
++						!this.loadError
++							? [
++									`${styleText(barStyle, S_BAR)}  ${styleText('yellow', opts.noResultsMessage ?? 'No matches found')}`,
++								]
+ 							: [];
+ 
+-					const validationError =
+-						this.state === 'error' ? [`${guidePrefix}${styleText('yellow', this.error)}`] : [];
++					const errorMessage =
++						this.state === 'error'
++							? [`${styleText(barStyle, S_BAR)}  ${styleText('yellow', this.error)}`]
++							: [];
+ 
+-					if (hasGuide) {
+-						headings.push(`${guidePrefix.trimEnd()}`);
+-					}
+-					headings.push(
+-						`${guidePrefix}${styleText('dim', 'Search:')}${searchText}${matches}`,
++					const headerLines = [
++						...`${headings.join('\n')}${styleText(barStyle, S_BAR)}`.split('\n'),
++						`${styleText(barStyle, S_BAR)}  ${styleText('dim', 'Search:')} ${searchText}${matches}`,
++						...loading,
++						...tooShort,
+ 						...noResults,
+-						...validationError
+-					);
+-
+-					// Show instructions
+-					const instructions = [
+-						`${styleText('dim', '↑/↓')} to select`,
+-						`${styleText('dim', 'Enter:')} confirm`,
+-						`${styleText('dim', 'Type:')} to search`,
++						...fetchError,
++						...errorMessage,
+ 					];
++					const footerLines = [
++						`${styleText(barStyle, S_BAR)}  ${['↑/↓ to navigate', 'Tab: select', 'Enter: confirm', 'Type: to search'].join(' • ')}`,
++						styleText(barStyle, S_BAR_END),
++					];
++
++					// Get limited options for display
++					const displayOptions = this.loading
++						? []
++						: limitOptions({
++								cursor: this.cursor,
++								options: this.filteredOptions,
++								style: opt,
++								maxItems: opts.maxItems,
++								output: opts.output,
++								rowPadding: headerLines.length + footerLines.length,
++							});

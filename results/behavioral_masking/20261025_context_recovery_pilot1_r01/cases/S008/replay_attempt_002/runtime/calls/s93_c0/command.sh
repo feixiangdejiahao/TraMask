@@ -1,0 +1,1 @@
+cd /app && sed -n '1,30p' backend/frontend/frontend.go && ls backend/frontend/

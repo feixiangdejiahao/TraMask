@@ -1,0 +1,1 @@
+cd /app && grep -n "requiredIf" -A12 src/schema/anyOf/schema_.ts | head -30 && echo "===LIST===" && grep -n "requiredIf" -A12 src/schema/list/schema_.ts | head -30

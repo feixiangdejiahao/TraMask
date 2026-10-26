@@ -1,0 +1,1 @@
+cd /app && cat src/schema/types/schemaProps.ts && echo "===SCHEMA type===" && cat src/schema/types/schema.ts && echo "===ATTRIBUTE type===" && cat src/schema/types/attribute.ts && echo "===checkSchemaProps===" && cat src/schema/utils/checkSchemaProps.ts

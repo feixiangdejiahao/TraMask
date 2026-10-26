@@ -1,0 +1,1 @@
+cd /app && sed -n '1,140p' src/core/reducers.ts && echo '=== BUILD ===' && cat src/kea/build.ts

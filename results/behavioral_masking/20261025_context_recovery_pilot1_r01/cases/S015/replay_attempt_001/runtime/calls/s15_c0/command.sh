@@ -1,0 +1,1 @@
+cat bandit/__init__.py && git remote -v && pip show bandit 2>/dev/null | head -20

@@ -1,0 +1,220 @@
+     1	"""
+     2	Multiplex multiple logical, bidirectional channels over a single underlying tube.
+     3	
+     4	This module provides :class:`TubeMultiplexer`, which frames data sent over a
+     5	single underlying :class:`pwnlib.tubes.tube.tube` into multiple independent
+     6	logical channels, and :class:`MuxChannel`, the tube-like object returned for
+     7	each logical channel.
+     8	"""
+     9	
+    10	import collections
+    11	import logging
+    12	import struct
+    13	import threading
+    14	import time
+    15	
+    16	from pwnlib.log import getLogger
+    17	from pwnlib.timeout import Timeout
+    18	from pwnlib.tubes.tube import tube
+    19	
+    20	log = getLogger(__name__)
+    21	
+    22	# Message types used in the framing protocol
+    23	_MSG_OPEN   = 1   # Open a new channel
+    24	_MSG_DATA   = 2   # Data for an open channel
+    25	_MSG_CLOSE  = 3   # Fully close a channel
+    26	_MSG_ACK    = 4   # Acknowledge a channel open
+    27	_MSG_NACK   = 5   # Reject a channel open
+    28	_MSG_PAUSE  = 6   # Ask the peer to pause sending on this channel
+    29	_MSG_RESUME = 7   # Ask the peer to resume sending on this channel
+    30	_MSG_FIN    = 8   # Half-close: local send direction is finished
+    31	_MSG_MUX_CLOSE = 9  # The whole multiplexer is being closed
+    32	
+    33	_HDR_FMT = "!II"
+    34	_HDRLEN = struct.calcsize(_HDR_FMT)
+    35	
+    36	_MAX_CHANNEL_ID = 65535
+    37	
+    38	# How often the reader thread wakes up to check for a closed underlying tube.
+    39	_POLL_INTERVAL = 0.1
+    40	
+    41	
+    42	class TubeMultiplexer(object):
+    43	    """Multiplex multiple logical channels over one underlying tube.
+    44	
+    45	    Arguments:
+    46	        underlying(tube): The underlying tube to multiplex over.
+    47	        max_channels(int): Maximum number of simultaneously open channels.
+    48	            Must be between 1 and 65535.
+    49	        high_water_mark(int): Number of queued bytes for a channel which
+    50	            causes the remote sender to be paused.
+    51	        low_water_mark(int): Number of queued bytes for a channel which
+    52	            causes the remote sender to be resumed.
+    53	
+    54	    Examples:
+    55	
+    56	        >>> import pwnlib.tubes.mux  # doctest: +SKIP
+    57	    """
+    58	
+    59	    def __init__(self, underlying, max_channels=256,
+    60	                 high_water_mark=1048576, low_water_mark=262144):
+    61	        if not isinstance(underlying, tube):
+    62	            raise TypeError("underlying must be an instance of pwnlib.tubes.tube.tube")
+    63	        if not isinstance(max_channels, int) or isinstance(max_channels, bool) \
+    64	                or max_channels < 1 or max_channels > _MAX_CHANNEL_ID:
+    65	            raise ValueError("max_channels must be an integer in [1, 65535]")
+    66	        if low_water_mark > high_water_mark:
+    67	            raise ValueError("low_water_mark cannot exceed high_water_mark")
+    68	
+    69	        self._underlying = underlying
+    70	        self._max_channels = max_channels
+    71	        self._high_water_mark = high_water_mark
+    72	        self._low_water_mark = low_water_mark
+    73	
+    74	        #: Dictionary mapping open channel IDs to their :class:`MuxChannel`.
+    75	        self.channels = {}
+    76	
+    77	        self._channels_lock = threading.RLock()
+    78	        self._write_lock = threading.Lock()
+    79	        self._closed = False
+    80	        self._closed_cond = threading.Condition()
+    81	
+    82	        # Queue of channels accepted from the remote side, for accept_channel()
+    83	        self._accept_cond = threading.Condition()
+    84	        self._accept_queue = collections.deque()
+    85	
+    86	        self._next_channel_id = 1
+    87	
+    88	        # Start the reader thread which consumes frames from the underlying tube.
+    89	        self._reader_thread = threading.Thread(
+    90	            target=self._reader_loop, daemon=True,
+    91	            name="pwntools-tube-mux-reader")
+    92	        self._reader_thread.start()
+    93	
+    94	    # ------------------------------------------------------------------
+    95	    # Public properties
+    96	    # ------------------------------------------------------------------
+    97	    @property
+    98	    def max_channels(self):
+    99	        return self._max_channels
+   100	
+   101	    @property
+   102	    def high_water_mark(self):
+   103	        return self._high_water_mark
+   104	
+   105	    @high_water_mark.setter
+   106	    def high_water_mark(self, value):
+   107	        self._high_water_mark = value
+   108	
+   109	    @property
+   110	    def low_water_mark(self):
+   111	        return self._low_water_mark
+   112	
+   113	    @low_water_mark.setter
+   114	    def low_water_mark(self, value):
+   115	        self._low_water_mark = value
+   116	
+   117	    @property
+   118	    def closed(self):
+   119	        return self._closed
+   120	
+   121	    # ------------------------------------------------------------------
+   122	    # Channel management
+   123	    # ------------------------------------------------------------------
+   124	    def open_channel(self, channel_id=None, timeout=None):
+   125	        """Open a new logical channel and wait for remote acknowledgement.
+   126	
+   127	        Arguments:
+   128	            channel_id(int): Explicit channel ID, or None to auto-allocate.
+   129	            timeout(float): Maximum time in seconds to wait for the remote
+   130	                acknowledgement.  ``None`` waits forever.
+   131	
+   132	        Returns:
+   133	            The newly created :class:`MuxChannel`.
+   134	
+   135	        Raises:
+   136	            TypeError: If ``channel_id`` is not an integer.
+   137	            ValueError: If ``channel_id`` is out of range, already in use, or
+   138	                exceeds the multiplexer capacity.
+   139	            TimeoutError: If the remote does not acknowledge in time.
+   140	            EOFError: If the multiplexer is closed.
+   141	        """
+   142	        if self._closed:
+   143	            raise EOFError("multiplexer is closed")
+   144	
+   145	        if channel_id is None:
+   146	            channel_id = self._allocate_channel_id()
+   147	        else:
+   148	            if not isinstance(channel_id, int) or isinstance(channel_id, bool):
+   149	                raise TypeError("channel_id must be an integer")
+   150	            if channel_id < 1 or channel_id > _MAX_CHANNEL_ID:
+   151	                raise ValueError("channel_id must be in [1, 65535]")
+   152	            if channel_id > self._max_channels:
+   153	                raise ValueError("channel_id exceeds max_channels")
+   154	            with self._channels_lock:
+   155	                if channel_id in self.channels:
+   156	                    raise ValueError("channel_id already in use")
+   157	                if len(self.channels) >= self._max_channels:
+   158	                    raise ValueError("max_channels exceeded")
+   159	
+   160	        channel = MuxChannel(self, channel_id)
+   161	
+   162	        with self._channels_lock:
+   163	            if self._closed:
+   164	                raise EOFError("multiplexer is closed")
+   165	            if channel_id in self.channels:
+   166	                raise ValueError("channel_id already in use")
+   167	            if len(self.channels) >= self._max_channels:
+   168	                raise ValueError("max_channels exceeded")
+   169	            self.channels[channel_id] = channel
+   170	
+   171	        try:
+   172	            self._send_frame(channel_id, _MSG_OPEN)
+   173	        except EOFError:
+   174	            self._remove_channel(channel_id)
+   175	            raise
+   176	
+   177	        if not channel._open_event.wait(timeout):
+   178	            # Clean up the failed channel and tell the remote side to forget it.
+   179	            self._remove_channel(channel_id)
+   180	            try:
+   181	                self._send_frame(channel_id, _MSG_CLOSE)
+   182	            except EOFError:
+   183	                pass
+   184	            raise TimeoutError("timed out waiting for channel acknowledgement")
+   185	
+   186	        if channel._open_failed:
+   187	            self._remove_channel(channel_id)
+   188	            raise EOFError("remote refused to open channel")
+   189	
+   190	        return channel
+   191	
+   192	    def _allocate_channel_id(self):
+   193	        with self._channels_lock:
+   194	            if len(self.channels) >= self._max_channels:
+   195	                raise ValueError("max_channels exceeded")
+   196	            start = self._next_channel_id
+   197	            cid = start
+   198	            for _ in range(self._max_channels):
+   199	                if cid not in self.channels:
+   200	                    self._next_channel_id = cid + 1
+   201	                    if self._next_channel_id > self._max_channels:
+   202	                        self._next_channel_id = 1
+   203	                    return cid
+   204	                cid += 1
+   205	                if cid > self._max_channels:
+   206	                    cid = 1
+   207	                if cid == start:
+   208	                    break
+   209	            raise ValueError("max_channels exceeded")
+   210	
+   211	    def _remove_channel(self, channel_id):
+   212	        with self._channels_lock:
+   213	            self.channels.pop(channel_id, None)
+   214	
+   215	    def accept_channel(self, timeout=None):
+   216	        """Wait for the remote side to open a channel.
+   217	
+   218	        Arguments:
+   219	            timeout(float): Maximum time in seconds to wait.  ``None`` waits
+   220	                forever.

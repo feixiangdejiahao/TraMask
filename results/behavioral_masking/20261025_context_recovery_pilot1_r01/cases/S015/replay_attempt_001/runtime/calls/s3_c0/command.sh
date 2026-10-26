@@ -1,0 +1,1 @@
+pwd && ls -la && git status && git log --oneline -5

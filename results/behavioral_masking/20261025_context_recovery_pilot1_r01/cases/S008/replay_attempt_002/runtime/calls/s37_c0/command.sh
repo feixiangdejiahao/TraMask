@@ -1,0 +1,1 @@
+cd /app && sed -n '1,160p' backend/internal/services/docker_client_service.go

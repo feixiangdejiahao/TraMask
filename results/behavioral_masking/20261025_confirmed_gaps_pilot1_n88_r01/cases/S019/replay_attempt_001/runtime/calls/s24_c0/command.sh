@@ -1,0 +1,1 @@
+cd /app && cat src/schema/item/types.ts && echo "===ITEM INDEX===" && cat src/schema/item/index.ts && echo "===does entity use item?===" && grep -rn "schema.item\|\.item(" src/entity --include="*.ts" | grep -v test | head -20

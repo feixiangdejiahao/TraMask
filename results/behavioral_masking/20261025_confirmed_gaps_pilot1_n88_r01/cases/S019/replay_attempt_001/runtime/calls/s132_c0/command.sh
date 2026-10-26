@@ -1,0 +1,1 @@
+cd /app && npx vitest run src/entity --reporter=dot 2>&1 | tail -30

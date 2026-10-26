@@ -1,0 +1,186 @@
+cd /app && python - <<'EOF'
+path = 'src/dateutil/rrule.py'
+with open(path) as f:
+    src = f.read()
+
+start = src.index("    def __str__(self):")
+end = src.index("    def replace(self, **kwargs):")
+
+new_block = '''    def __str__(self):
+        """
+        Output a string that would generate this RRULE if passed to rrulestr.
+        This is mostly compatible with RFC5545, except for the
+        dateutil-specific extension BYEASTER.
+        """
+
+        output = []
+        if self._dtstart:
+            output.append(_dtstart_ical_str(self._dtstart))
+        output.append(self._rrule_str())
+        return '\\n'.join(output)
+
+    def _rrule_str(self):
+        """
+        Return the RRULE line for this rule (with the ``RRULE:`` prefix but
+        without the DTSTART line).
+        """
+
+        parts = ['FREQ=' + FREQNAMES[self._freq]]
+        if self._interval != 1:
+            parts.append('INTERVAL=' + str(self._interval))
+
+        if self._wkst:
+            parts.append('WKST=' + repr(weekday(self._wkst))[0:2])
+
+        if self._count is not None:
+            parts.append('COUNT=' + str(self._count))
+
+        if self._until:
+            if self._until.tzinfo is None:
+                parts.append(self._until.strftime('UNTIL=%Y%m%dT%H%M%S'))
+            else:
+                until_utc = self._until.astimezone(datetime.timezone.utc)
+                parts.append(until_utc.strftime('UNTIL=%Y%m%dT%H%M%SZ'))
+
+        if self._original_rule.get('byweekday') is not None:
+            # The str() method on weekday objects doesn't generate
+            # RFC5545-compliant strings, so we should modify that.
+            original_rule = dict(self._original_rule)
+            wday_strings = []
+            for wday in original_rule['byweekday']:
+                if wday.n:
+                    wday_strings.append('{n:+d}{wday}'.format(
+                        n=wday.n,
+                        wday=repr(wday)[0:2]))
+                else:
+                    wday_strings.append(repr(wday))
+
+            original_rule['byweekday'] = wday_strings
+        else:
+            original_rule = self._original_rule
+
+        partfmt = '{name}={vals}'
+        for name, key in [('BYSETPOS', 'bysetpos'),
+                          ('BYMONTH', 'bymonth'),
+                          ('BYMONTHDAY', 'bymonthday'),
+                          ('BYYEARDAY', 'byyearday'),
+                          ('BYWEEKNO', 'byweekno'),
+                          ('BYDAY', 'byweekday'),
+                          ('BYHOUR', 'byhour'),
+                          ('BYMINUTE', 'byminute'),
+                          ('BYSECOND', 'bysecond'),
+                          ('BYEASTER', 'byeaster')]:
+            value = original_rule.get(key)
+            if value:
+                parts.append(partfmt.format(name=name, vals=(','.join(str(v)
+                                                             for v in value))))
+
+        return 'RRULE:' + ';'.join(parts)
+
+    @property
+    def dtstart(self):
+        """The start of the recurrence rule."""
+        return self._dtstart
+
+    @property
+    def freq(self):
+        """The frequency of the recurrence rule."""
+        return self._freq
+
+    @property
+    def interval(self):
+        """The interval between recurrences."""
+        return self._interval
+
+    @property
+    def until(self):
+        """The upper-bound limit of the recurrence rule."""
+        return self._until
+
+    def count(self):
+        """
+        Returns the number of recurrences in this rule. If a ``count``
+        parameter was supplied to the constructor, that value is returned
+        directly; otherwise the entire rule is iterated to determine its
+        length.
+        """
+        if self._count is not None:
+            return self._count
+        return super(rrule, self).count()
+
+    def __eq__(self, other):
+        if not isinstance(other, rrule):
+            return NotImplemented
+        return (self._freq == other._freq and
+                self._interval == other._interval and
+                self._dtstart == other._dtstart and
+                self._until == other._until and
+                self._count == other._count and
+                self._wkst == other._wkst and
+                self._bysetpos == other._bysetpos and
+                self._bymonth == other._bymonth and
+                self._byyearday == other._byyearday and
+                self._byeaster == other._byeaster and
+                self._bymonthday == other._bymonthday and
+                self._bynmonthday == other._bynmonthday and
+                self._byweekno == other._byweekno and
+                self._byweekday == other._byweekday and
+                self._bynweekday == other._bynweekday and
+                self._byhour == other._byhour and
+                self._byminute == other._byminute and
+                self._bysecond == other._bysecond)
+
+    def __ne__(self, other):
+        return not self == other
+
+    def __hash__(self):
+        return hash((self._freq, self._interval, self._dtstart, self._until,
+                     self._count, self._wkst, self._bysetpos, self._bymonth,
+                     self._byyearday, self._byeaster, self._bymonthday,
+                     self._bynmonthday, self._byweekno, self._byweekday,
+                     self._bynweekday, self._byhour, self._byminute,
+                     self._bysecond))
+
+    def __repr__(self):
+        args = ['freq=' + FREQNAMES[self._freq]]
+        if self._interval != 1:
+            args.append('interval={0}'.format(self._interval))
+        if self._wkst is not None:
+            args.append('wkst=' + repr(weekday(self._wkst)))
+        if self._count is not None:
+            args.append('count={0}'.format(self._count))
+        if self._until is not None:
+            args.append('until=' + repr(self._until))
+        if self._dtstart is not None:
+            args.append('dtstart=' + repr(self._dtstart))
+        for key, value in self._original_rule.items():
+            if value is not None:
+                args.append('{0}={1}'.format(key, repr(value)))
+        return 'rrule({0})'.format(', '.join(args))
+
+    def to_ical(self):
+        """
+        Serialize this rule as an iCalendar VCALENDAR/VEVENT. A VTIMEZONE
+        block is included for non-UTC timezone-aware DTSTART values.
+        """
+        lines = ['BEGIN:VCALENDAR',
+                 'VERSION:2.0',
+                 'PRODID:-//dateutil//dateutil//EN',
+                 'BEGIN:VEVENT']
+        if (self._dtstart is not None and self._dtstart.tzinfo is not None and
+                _tzid(self._dtstart) != 'UTC'):
+            lines.append(_timezone_to_ical(self._dtstart.tzinfo, self._dtstart))
+        lines.append(str(self))
+        lines.append('END:VEVENT')
+        lines.append('END:VCALENDAR')
+        return '\\r\\n'.join(lines)
+
+'''
+
+src = src[:start] + new_block + src[end:]
+
+with open(path, 'w') as f:
+    f.write(src)
+print("rrule class updated")
+EOF
+python -c "import ast; ast.parse(open('src/dateutil/rrule.py').read()); print('syntax ok')"

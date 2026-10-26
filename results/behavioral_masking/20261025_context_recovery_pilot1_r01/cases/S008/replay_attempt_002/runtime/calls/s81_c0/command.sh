@@ -1,0 +1,1 @@
+cat /tmp/build.log 2>/dev/null; ps aux | grep '[g]o build' | head -3

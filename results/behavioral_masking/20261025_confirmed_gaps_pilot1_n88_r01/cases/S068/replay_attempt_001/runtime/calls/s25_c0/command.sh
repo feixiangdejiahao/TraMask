@@ -1,0 +1,1 @@
+sed -n '1,120p' tests/test_cli_bulk.py && echo "=== insert head ===" && sed -n '1,100p' tests/test_cli_insert.py

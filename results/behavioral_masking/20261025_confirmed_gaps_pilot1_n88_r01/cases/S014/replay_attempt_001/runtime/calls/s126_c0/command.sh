@@ -1,0 +1,1 @@
+cd /app && grep -n "dist" .gitignore | head && git status --short

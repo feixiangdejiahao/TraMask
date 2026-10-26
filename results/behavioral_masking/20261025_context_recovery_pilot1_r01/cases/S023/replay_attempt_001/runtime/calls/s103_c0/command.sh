@@ -1,0 +1,17 @@
+cd /app && python - <<'EOF'
+from attrs import define
+from cattrs import Converter
+@define
+class Inner:
+    x: int
+    y: int
+@define
+class Outer:
+    inner: Inner
+    z: int = 5
+c = Converter()
+res = c.partial_structure({"inner": {"x": 3}}, Outer)
+res2 = res.refine({"inner": {"y": 4}})
+res3 = res2.refine({"z": 10})
+print(res3.value, res3.is_complete, res3.failed_fields)
+EOF

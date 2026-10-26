@@ -1,0 +1,1 @@
+cd /app && git remote -v && echo '---' && git log --all --oneline | head -20 && echo '---' && git rev-parse --abbrev-ref HEAD

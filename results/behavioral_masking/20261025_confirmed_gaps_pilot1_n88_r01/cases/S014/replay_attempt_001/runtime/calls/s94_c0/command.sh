@@ -1,0 +1,1 @@
+cd /app && grep -n "loadError = undefined" packages/core/dist/index.mjs | head && grep -n "this.loadError = undefined" packages/core/src/prompts/autocomplete.ts | head && sed -n '333,342p' packages/core/src/prompts/autocomplete.ts

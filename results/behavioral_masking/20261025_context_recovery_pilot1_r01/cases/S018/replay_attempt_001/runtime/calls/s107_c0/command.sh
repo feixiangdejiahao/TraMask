@@ -1,0 +1,1 @@
+cd /app && nl -ba tests/unit/core/test_nosec.py | sed -n '45,180p'

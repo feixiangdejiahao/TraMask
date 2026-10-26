@@ -1,0 +1,1 @@
+cd /app && grep -n "func NewAuthMiddleware\|func (m \*AuthMiddleware)" backend/internal/middleware/auth_middleware.go | head && sed -n '1,100p' backend/internal/middleware/auth_middleware.go

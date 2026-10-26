@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/parsePaths/transformPaths.ts && echo "===FINDER===" && cat src/schema/actions/finder/finder.ts

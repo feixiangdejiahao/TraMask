@@ -1,0 +1,1 @@
+cd /app && sed -n '1,60p' backend/internal/api/diagnostics_handler.go && echo "=====GITOPS ROUTES?=====" && grep -rn "RegisterRoutes\|authMiddleware" backend/internal/api/*.go | head

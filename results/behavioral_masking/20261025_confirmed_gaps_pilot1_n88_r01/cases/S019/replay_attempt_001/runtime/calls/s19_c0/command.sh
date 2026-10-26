@@ -1,0 +1,1 @@
+cd /app && cat src/entity/actions/update/expressUpdate/expressUpdate.ts && echo "===SET===" && cat src/entity/actions/update/expressUpdate/updates/set.ts && echo "===UTILS===" && cat src/entity/actions/update/expressUpdate/updates/utils.ts

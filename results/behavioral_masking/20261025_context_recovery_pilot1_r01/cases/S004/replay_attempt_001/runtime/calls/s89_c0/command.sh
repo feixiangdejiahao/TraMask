@@ -1,0 +1,1 @@
+cd /app && git diff aiomonitor/termui/commands.py | head -280

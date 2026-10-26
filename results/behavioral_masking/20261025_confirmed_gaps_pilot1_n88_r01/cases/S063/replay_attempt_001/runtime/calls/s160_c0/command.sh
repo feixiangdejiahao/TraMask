@@ -1,0 +1,1 @@
+cd /app && python -m py_compile pwnlib/tubes/mux.py pwnlib/tubes/buffer.py pwnlib/tubes/tube.py pwnlib/tubes/__init__.py && echo "compile ok"

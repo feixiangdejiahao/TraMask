@@ -1,0 +1,1 @@
+cd /app/libs/core && grep -n "def \|class Runnable\|class RunnableSerializable\|class RunnableBinding\|class RunnableCallable\|class RunnableLambda" langchain_core/runnables/base.py | head -120

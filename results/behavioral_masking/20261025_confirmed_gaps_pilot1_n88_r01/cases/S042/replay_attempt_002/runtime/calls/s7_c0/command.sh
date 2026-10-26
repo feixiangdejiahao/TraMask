@@ -1,0 +1,1 @@
+cat packages/core/src/query/types.ts && echo '---symbols---' && cat packages/core/src/query/symbols.ts && echo '---cursor---' && cat packages/core/src/query/utils/tracking-cursor.ts

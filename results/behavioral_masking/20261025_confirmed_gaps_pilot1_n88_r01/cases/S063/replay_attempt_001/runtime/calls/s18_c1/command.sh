@@ -1,0 +1,1 @@
+cd /app && grep -n "fromsocket\|class process" pwnlib/tubes/process.py pwnlib/tubes/remote.py pwnlib/tubes/sock.py | head

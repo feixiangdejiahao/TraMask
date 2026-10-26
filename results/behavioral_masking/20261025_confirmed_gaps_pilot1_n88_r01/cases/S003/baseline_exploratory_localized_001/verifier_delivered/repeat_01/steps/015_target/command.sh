@@ -1,0 +1,1 @@
+go test -tags 'compliance exclude_frontend' ./internal/bootstrap -run '^TestWiring_SetupRouterRegistersDriftRoutes$' -count=1 -v

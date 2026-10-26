@@ -1,0 +1,1 @@
+pip download bandit==1.9.4 --no-deps -d /tmp/bandit_dl 2>&1 | tail -5 || true

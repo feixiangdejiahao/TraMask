@@ -1,0 +1,1013 @@
+===== src/kea/context.ts =====
+import { activatePlugin, runPlugins } from './plugins'
+import { createStore } from './store'
+import { Context, ContextOptions } from '../types'
+import type { Store } from 'redux'
+import { corePlugin } from '../core'
+
+let context: Context
+
+export function getContext(): Context {
+  return context
+}
+
+export const getStoreState = () => getContext().store.getState()
+
+export function setContext(newContext: Context): void {
+  context = newContext
+}
+
+let contextId = 0
+
+export function openContext(options: ContextOptions = {}, initial = false): Context {
+  if (context) {
+    console.error('[KEA] overwriting already opened context. This may lead to errors.')
+  }
+
+  const { plugins, createStore: createStoreOptions = true, defaults, ...otherOptions } = options
+
+  const newContext = {
+    contextId: `kea-context-${contextId++}`,
+    plugins: {
+      activated: [],
+      events: {},
+      logicFields: {},
+      contexts: {},
+    },
+
+    inputCounter: 0,
+    reducerDefaults: defaults,
+    wrapperContexts: new WeakMap(),
+    buildHeap: [],
+
+    mount: {
+      counter: {},
+      mounted: {},
+    },
+
+    react: {
+      contexts: new WeakMap(),
+    },
+
+    reducers: {
+      tree: {},
+      roots: {},
+      redux: {},
+      whitelist: false,
+      combined: undefined,
+    },
+
+    store: undefined as unknown as Store, // will be redefined below
+    __store: undefined,
+
+    options: {
+      debug: false,
+      proxyFields: true,
+      flatDefaults: false,
+      attachStrategy: 'dispatch',
+      detachStrategy: 'dispatch',
+      defaultPath: ['kea', 'logic'],
+      ...otherOptions,
+    },
+  } as Context
+
+  // defer creating a store on the default resetContext() until it's requested
+  Object.defineProperty(newContext, 'store', {
+    get: function get() {
+      const store: Store = (newContext as any)['__store']
+      if (!store && createStoreOptions) {
+        return createStore(typeof createStoreOptions === 'object' ? createStoreOptions : {})
+      }
+      return store
+    },
+    set: function set(store) {
+      ;(newContext as any)['__store'] = store
+    },
+  })
+
+  setContext(newContext)
+
+  activatePlugin(corePlugin)
+
+  runPlugins('afterOpenContext', newContext, options)
+
+  if (plugins) {
+    for (const plugin of plugins) {
+      activatePlugin(plugin)
+    }
+  }
+
+  if (!initial && createStoreOptions) {
+    context.store // trigger the getter that creates the store
+  }
+
+  return context
+}
+
+export function closeContext(): void {
+  if (context) {
+    runPlugins('beforeCloseContext', context)
+  }
+
+  context = undefined as unknown as Context
+}
+
+export function resetContext(options: ContextOptions = {}, initial = false): Context {
+  if (context) {
+    closeContext()
+  }
+
+  return openContext(options, initial)
+}
+
+export function getPluginContext<Context = Record<string, any>>(name: string): Context {
+  const { plugins } = getContext()
+  if (!plugins.contexts[name]) {
+    plugins.contexts[name] = {}
+  }
+  return plugins.contexts[name] as Context
+}
+
+export function setPluginContext<Context extends Record<string, any> = Record<string, any>>(
+  name: string,
+  pluginContext: Context,
+): void {
+  const { plugins } = getContext()
+  plugins.contexts[name] = pluginContext
+}
+===== src/kea/kea.ts =====
+import { getContext } from './context'
+import { getBuiltLogic, getCachedBuiltLogicByKey, getCachedBuiltLogicByProps } from './build'
+import { wrapComponent } from '../react/wrap'
+import {
+  AnyComponent,
+  BuiltLogic,
+  KeaComponent,
+  Logic,
+  LogicBuilder,
+  LogicInput,
+  LogicWrapper,
+  Props,
+  KeyType,
+} from '../types'
+
+/*
+
+  Initializes logic and creates a wrapper that can be used to mount the logic or wrap
+  it around React components.
+
+  Logic Wrapper:
+
+  - const logic = kea(input)
+
+  Default behaviour (see below for explanations):
+
+  - logic()          === logic.build()
+  - logic(props)     === logic.build(props)
+  - logic(Component) === logic.wrap(Component)
+
+  Functions defined on wrappers:
+
+  - logic.wrap(Component) # wrap around a React component
+  - logic.build(props)    # build logic; optionally using props
+  - logic.extend(input)   # add more input; does not alter already built logic
+
+  Built Logic:
+
+  - builtLogic = logic(props) = logic.build(props)
+
+  Functions on built logic:
+
+  - builtLogic.mount()         # mount the logic and return a function to unmount
+  - builtLogic.mount(callback) # mount, run callback and unmount immediately
+  - builtLogic.isMounted()     # check if logic is mounted
+
+  Fields on built logic (core plugin):
+
+  - builtLogic.path
+  - builtLogic.pathString
+  - builtLogic.props
+
+  - builtLogic.connections
+  - builtLogic.actions
+  - builtLogic.defaults
+  - builtLogic.reducers
+  - builtLogic.reducerOptions
+  - builtLogic.reducer
+  - builtLogic.selector
+  - builtLogic.selectors
+
+  NB! If your input does not have a key, all the builtLogic fields can be directly
+      accessed with logic.field (e.g. logic.actions). All these fields are
+      automatically passed through logic.build(), so:
+
+      logic.actions === logic().actions === logic.build().actions
+
+      If your input has a key, you must build it with props before you can access
+      its fields:
+
+      logic(props).actions === logic.build(props).actions
+
+  PS! Building logic is a fast operation. If we have already built the logic for the
+      corresponding input and key combination (the key is derived from props), it
+      will just be returned from the cache and connected with the new props.
+      Feel free to call logic(props) as often as you need to.
+
+  Constants on logic wrappers and built logic:
+
+  - logic._isKea           # true if logic wrapper
+  - builtLogic._isKeaBuild # true if built logic
+
+*/
+
+export function kea<L extends Logic = Logic>(
+  input: LogicInput<L> | (LogicBuilder<L> | LogicInput<L>)[],
+): LogicWrapper<L> {
+  const wrapper: LogicWrapper<L> = function (props?: L['props']): BuiltLogic<L> | KeaComponent {
+    if (typeof props === 'object' || typeof props === 'undefined') {
+      return wrapper.build(props)
+    }
+    return wrapper.wrap(props)
+  } as LogicWrapper<L>
+
+  wrapper._isKea = true
+  wrapper.inputs = (Array.isArray(input) ? input : [input]) as (LogicInput | LogicBuilder)[]
+
+  wrapper.wrap = (Component: AnyComponent) => wrapComponent(Component, wrapper)
+  wrapper.build = (props?: Props) => getBuiltLogic(wrapper, props)
+  wrapper.mount = () => wrapper.build().mount()
+  wrapper.unmount = () => wrapper.build().unmount()
+  wrapper.isMounted = (keyOrProps?: Record<string, any> | KeyType) => !!wrapper.findMounted(keyOrProps)
+  wrapper.findMounted = (keyOrProps?: Record<string, any> | KeyType) => {
+    try {
+      return wrapper.find(keyOrProps)
+    } catch (e) {
+      return null
+    }
+  }
+  wrapper.findAllMounted = () => {
+    const wrapperContext = getContext().wrapperContexts.get(wrapper)
+    const found: BuiltLogic<L>[] = []
+    if (!wrapperContext) {
+      return found
+    }
+    const {
+      mount: { counter },
+    } = getContext()
+    for (const logic of wrapperContext.builtLogics.values()) {
+      if (counter[logic.pathString] > 0) {
+        found.push(logic as BuiltLogic<L>)
+      }
+    }
+    return found
+  }
+  wrapper.find = (keyOrProps?: Record<string, any> | KeyType) => {
+    const builtLogic =
+      typeof keyOrProps === 'object' || typeof keyOrProps === 'undefined'
+        ? getCachedBuiltLogicByProps<L>(wrapper, keyOrProps)
+        : getCachedBuiltLogicByKey<L>(wrapper, keyOrProps)
+    if (builtLogic && getContext().mount.counter[builtLogic.pathString] > 0) {
+      return builtLogic
+    }
+    const keyString =
+      typeof keyOrProps !== 'undefined'
+        ? ` with ${typeof keyOrProps === 'object' ? 'props' : 'key'} ${JSON.stringify(keyOrProps)}`
+        : ''
+    throw new Error(`[KEA] Can not find mounted ${builtLogic?.pathString ?? 'logic'}${keyString}`)
+  }
+  wrapper.extend = <ExtendLogic extends Logic = L>(
+    extendedInput:
+      | (LogicInput<ExtendLogic> | LogicBuilder<ExtendLogic>)[]
+      | LogicInput<ExtendLogic>
+      | LogicBuilder<ExtendLogic>,
+  ) => {
+    const wrapperContext = getContext().wrapperContexts.get(wrapper)
+    if (wrapperContext) {
+      throw new Error(`[KEA] Can not extend logic once it has been built.`)
+    }
+    if (Array.isArray(extendedInput)) {
+      wrapper.inputs = wrapper.inputs.concat(extendedInput as (LogicInput<Logic> | LogicBuilder<Logic>)[])
+    } else {
+      wrapper.inputs.push(extendedInput as LogicInput<Logic> | LogicBuilder<Logic>)
+    }
+    return wrapper as unknown as LogicWrapper<ExtendLogic>
+  }
+
+  if (getContext().options.proxyFields) {
+    proxyFields(wrapper)
+  }
+
+  return wrapper
+}
+
+export function proxyFieldToLogic<L extends Logic = Logic>(wrapper: LogicWrapper<L>, key: keyof L): void {
+  if (!wrapper.hasOwnProperty(key)) {
+    Object.defineProperty(wrapper, key, {
+      get: function () {
+        let logic = wrapper.findMounted()
+        if (!logic && getContext().buildHeap.length > 0) {
+          logic = wrapper.build()
+        }
+        if (logic) {
+          return logic[key]
+        } else {
+          throw new Error(unmountedActionError(String(key), wrapper.build().pathString))
+        }
+      },
+    })
+  }
+}
+
+export function proxyFields<L extends Logic = Logic>(wrapper: LogicWrapper<L>): void {
+  const reservedProxiedKeys = ['path', 'pathString', 'props'] as ['path', 'pathString', 'props']
+  for (const key of reservedProxiedKeys) {
+    proxyFieldToLogic(wrapper, key)
+  }
+  for (const key of Object.keys(getContext().plugins.logicFields)) {
+    proxyFieldToLogic(wrapper, key as keyof Logic)
+  }
+}
+
+export function unmountedActionError(key: string, path: string): string {
+  return `[KEA] Can not access "${key}" on logic "${path}" because it is not mounted!
+This can happen in several situations:
+- You may need to add the "connect(otherLogic)" logic builder, or "useMountedLogic(otherLogic)" hook to make sure the logic is mounted.
+- If "otherLogic" is undefined, your bundler may import and execute code in an unfavourable order. Switch to a function: "connect(() => otherLogic)" 
+- It may be that the logic has already unmounted. Do you have a listener that is missing a breakpoint?`
+}
+===== src/kea/build.ts =====
+import { runPlugins } from './plugins'
+import { getContext } from './context'
+
+import { mountLogic, unmountLogic } from './mount'
+
+import { Logic, LogicWrapper, Props, LogicInput, BuiltLogic, LogicBuilder, WrapperContext, KeyType } from '../types'
+import { addConnection } from '../core/connect'
+import { key, path, props } from '../core'
+import { shallowCompare } from '../utils'
+import { batchChanges } from '../react/hooks'
+
+// Converts `input` into `logic` by running all build steps in succession
+function applyInputToLogic(logic: BuiltLogic, input: LogicInput | LogicBuilder) {
+  runPlugins('beforeLogic', logic, input)
+
+  // Logic builder
+  if (typeof input === 'function') {
+    input(logic)
+  } else {
+    // Legacy kea({}) object style
+    'props' in input && props(input.props)(logic)
+    'key' in input && typeof input.key !== 'undefined' && key(input.key)(logic)
+    'path' in input && input.path && path(input.path)(logic)
+
+    if (input.inherit) {
+      for (const inheritLogic of input.inherit) {
+        for (const inheritInput of inheritLogic.inputs) {
+          applyInputToLogic(logic, inheritInput)
+        }
+      }
+    }
+
+    runPlugins('legacyBuild', logic, input)
+
+    if (input.extend) {
+      for (const innerInput of input.extend) {
+        applyInputToLogic(logic, innerInput)
+      }
+    }
+  }
+
+  runPlugins('afterLogic', logic, input)
+
+  return logic
+}
+
+export function getBuiltLogic<L extends Logic = Logic>(
+  wrapper: LogicWrapper<L>,
+  props: L['props'] | undefined,
+): BuiltLogic<L> {
+  // return a cached build if possible
+  const wrapperContext = getWrapperContext(wrapper)
+  if (wrapperContext.isBuilding) {
+    throw new Error(`[KEA] Circular build detected.`)
+  }
+
+  const cachedLogic = getCachedBuiltLogicByProps(wrapper, props)
+  if (cachedLogic) {
+    let prevPropsClone: Props | null = null
+    if (
+      props &&
+      (!cachedLogic.props ||
+        (cachedLogic.lastProps !== props &&
+          (!shallowCompare(cachedLogic.lastProps, props) ||
+            !shallowCompare(cachedLogic.props, { ...cachedLogic.props, ...props }))))
+    ) {
+      prevPropsClone = { ...cachedLogic.props }
+      Object.assign(cachedLogic.props, props)
+      cachedLogic.lastProps = props
+    }
+    if (prevPropsClone && cachedLogic.events.propsChanged) {
+      const newPropsClone = { ...cachedLogic.props }
+      batchChanges(() => {
+        cachedLogic.events.propsChanged?.(newPropsClone, prevPropsClone)
+      })
+    }
+    return cachedLogic
+  }
+
+  // create a random path
+  const uniqueId = ++getContext().inputCounter
+  const path = [...getContext().options.defaultPath, uniqueId]
+  ;(path as any)['_keaAutomaticPath'] = true
+  wrapperContext.isBuilding = true
+
+  // create a blank logic, and add the basic fields and methods
+  // other core fields (actions, selectors, values, etc) are added with other plugins below.
+  const logic = {
+    _isKeaBuild: true,
+    key: undefined,
+    keyBuilder: undefined,
+    path: path,
+    pathString: path.join('.'),
+    props: { ...props },
+    lastProps: props ?? {},
+
+    // methods
+    wrapper,
+    extend: (input: LogicInput) => applyInputToLogic(logic, input),
+    mount: () => {
+      if (wrapperContext.isBuilding) {
+        throw new Error(`[KEA] Tried to mount logic "${logic.pathString}" before it finished building`)
+      }
+      mountLogic(logic)
+      let unmounted = false
+      return () => {
+        if (unmounted) {
+          throw new Error(`[KEA] Tried to unmount logic "${logic.pathString}" for a second time`)
+        }
+        unmountLogic(logic)
+        unmounted = true
+      }
+    },
+    unmount: () => unmountLogic(logic),
+    isMounted: () => {
+      const counter = getContext().mount.counter[logic.pathString]
+      return typeof counter === 'number' && counter > 0
+    },
+  } as any as BuiltLogic<L>
+
+  const { buildHeap } = getContext()
+  try {
+    buildHeap.push(logic)
+
+    // initialize defaults fields as requested by plugins, including core
+    for (const plugin of getContext().plugins.activated) {
+      if (plugin.defaults) {
+        const newLogicProperties = typeof plugin.defaults === 'function' ? plugin.defaults() : plugin.defaults
+        Object.assign(logic, newLogicProperties)
+      }
+    }
+
+    runPlugins('beforeBuild', logic, wrapper.inputs)
+
+    // apply all the inputs and builders
+    for (const input of wrapper.inputs) {
+      applyInputToLogic(logic, input)
+    }
+
+    // add a connection to ourselves in the end
+    logic.connections[logic.pathString] = logic
+
+    wrapperContext.keyBuilder = logic.keyBuilder
+    wrapperContext.builtLogics.set(logic.key, logic)
+
+    runPlugins('afterBuild', logic, wrapper.inputs)
+  } catch (e) {
+    throw e
+  } finally {
+    wrapperContext.isBuilding = false
+    buildHeap.pop()
+  }
+
+  // if we were building something when this got triggered, add this as a dependency for the previous logic
+  if (buildHeap.length > 0) {
+    if (!buildHeap[buildHeap.length - 1].connections[logic.pathString]) {
+      addConnection(buildHeap[buildHeap.length - 1], logic)
+    }
+  }
+
+  return logic
+}
+
+export function getCachedBuiltLogicByKey<L extends Logic = Logic>(
+  wrapper: LogicWrapper<L>,
+  key: KeyType | undefined,
+): BuiltLogic<L> | null {
+  const wrapperContext = getWrapperContext(wrapper)
+  const builtLogic = wrapperContext.builtLogics.get(key)
+  return builtLogic ?? null
+}
+
+export function getCachedBuiltLogicByProps<L extends Logic = Logic>(
+  wrapper: LogicWrapper<L>,
+  props: Props | undefined,
+): BuiltLogic<L> | null {
+  const wrapperContext = getWrapperContext(wrapper)
+  return getCachedBuiltLogicByKey<L>(wrapper, wrapperContext?.keyBuilder?.(props ?? {}))
+}
+
+export function getWrapperContext<L extends Logic = Logic>(wrapper: LogicWrapper<L>): WrapperContext<L> {
+  const { wrapperContexts } = getContext()
+  let wrapperContext = wrapperContexts.get(wrapper) as WrapperContext<L> | undefined
+  if (!wrapperContext) {
+    wrapperContext = { keyBuilder: undefined, builtLogics: new Map(), isBuilding: false }
+    wrapperContexts.set(wrapper, wrapperContext)
+  }
+  return wrapperContext
+}
+===== src/kea/mount.ts =====
+import { attachReducer, detachReducer } from './reducer'
+import { runPlugins } from './plugins'
+import { getContext } from './context'
+import { BuiltLogic } from '../types'
+
+export function mountLogic(logic: BuiltLogic, count = 1): void {
+  const {
+    mount: { counter, mounted },
+  } = getContext()
+
+  // mount this logic after all the dependencies
+  const pathStrings = Object.keys(logic.connections)
+    .filter((k) => k !== logic.pathString)
+    .concat([logic.pathString])
+
+  for (const pathString of pathStrings) {
+    counter[pathString] = (counter[pathString] || 0) + count
+    if (counter[pathString] === count) {
+      const connectedLogic = logic.connections[pathString]
+
+      if (typeof connectedLogic === 'undefined') {
+        throw new Error(
+          `[KEA] Can not find connected logic at "${pathString}". Got "undefined" instead of the logic when trying to mount "${logic.pathString}".`,
+        )
+      }
+
+      runPlugins('beforeMount', connectedLogic)
+      connectedLogic.events.beforeMount?.()
+
+      mounted[pathString] = connectedLogic
+
+      if (connectedLogic.reducer) {
+        attachReducer(connectedLogic)
+      }
+
+      runPlugins('afterMount', connectedLogic)
+      connectedLogic.events.afterMount?.()
+    }
+  }
+}
+
+export function unmountLogic(logic: BuiltLogic): void {
+  const {
+    mount: { counter, mounted },
+  } = getContext()
+
+  // unmount in reverse order
+  const pathStrings = Object.keys(logic.connections)
+    .filter((k) => k !== logic.pathString)
+    .concat([logic.pathString])
+    .reverse()
+
+  for (const pathString of pathStrings) {
+    counter[pathString] = (counter[pathString] || 0) - 1
+    if (counter[pathString] === 0) {
+      const connectedLogic = logic.connections[pathString]
+
+      runPlugins('beforeUnmount', connectedLogic)
+      connectedLogic.events.beforeUnmount?.()
+
+      delete mounted[pathString]
+      delete counter[pathString]
+
+      if (connectedLogic.reducer) {
+        detachReducer(connectedLogic)
+      }
+
+      runPlugins('afterUnmount', connectedLogic)
+      connectedLogic.events.afterUnmount?.()
+
+      // clear build cache
+      getContext().wrapperContexts.get(logic.wrapper)?.builtLogics.delete(logic.key)
+    }
+  }
+}
+===== src/kea/reducer.ts =====
+import { getContext } from './context'
+import { runPlugins } from './plugins'
+import { BuiltLogic, ReducerFunction } from '../types'
+import type { Reducer } from 'redux'
+
+export const ATTACH_REDUCER = '@KEA/ATTACH_REDUCER'
+export const DETACH_REDUCER = '@KEA/DETACH_REDUCER'
+
+const defaultState = {}
+
+export function initRootReducerTree(pathStart: string): void {
+  const {
+    reducers: { tree, whitelist },
+  } = getContext()
+  if (!tree[pathStart]) {
+    if (whitelist && !whitelist[pathStart]) {
+      throw new Error(`[KEA] Can not start reducer's path with "${pathStart}"! Please add it to the whitelist`)
+    }
+    tree[pathStart] = {}
+    regenerateRootReducer(pathStart)
+  }
+}
+
+export function keaReducer(pathStart = 'scenes'): ReducerFunction {
+  const {
+    reducers: { roots },
+  } = getContext()
+  initRootReducerTree(pathStart)
+
+  return (state = defaultState, action, fullState) => {
+    return roots[pathStart] ? roots[pathStart](state, action, fullState) : state
+  }
+}
+
+export function attachReducer(logic: BuiltLogic): void {
+  const { path, reducer } = logic
+  const {
+    reducers: { tree },
+    options: { attachStrategy },
+    store,
+  } = getContext()
+
+  const pathStart = path[0].toString()
+
+  initRootReducerTree(pathStart)
+
+  let pointer = tree
+
+  for (let i = 0; i < path.length; i++) {
+    const pathPart = path[i].toString()
+
+    // last part of the ̦path, so [..., pathPart] = path
+    if (i === path.length - 1) {
+      // there's already something here!
+      if (pointer[pathPart]) {
+        // if we're in the root level in the tree and it's an empty object
+        if (i === 0 && typeof pointer[pathPart] === 'object' && Object.keys(pointer[pathPart]).length === 0) {
+          // don't block here
+          // if it's a function, assume it's a reducer and replacing it is fine
+          // otherwise give an error
+        } else if (typeof pointer[pathPart] !== 'function') {
+          console.error(
+            `[KEA] Can not add reducer to "${path.join('.')}". There is something in the way:`,
+            pointer[pathPart],
+          )
+          return
+        }
+      }
+
+      pointer[pathPart] = reducer
+    } else {
+      if (!pointer[pathPart]) {
+        pointer[pathPart] = {}
+      }
+      pointer = pointer[pathPart]
+    }
+  }
+
+  regenerateRootReducer(pathStart)
+
+  if (attachStrategy === 'dispatch' || attachStrategy === 'replace') {
+    runPlugins('beforeAttach', logic)
+
+    if (attachStrategy === 'dispatch') {
+      store && store.dispatch({ type: ATTACH_REDUCER, payload: { path, reducer } })
+    } else if (attachStrategy === 'replace') {
+      store && store.replaceReducer(createReduxStoreReducer())
+    }
+
+    runPlugins('afterAttach', logic)
+  }
+}
+
+export function detachReducer(logic: BuiltLogic): void {
+  const { path } = logic
+
+  const {
+    reducers: { tree },
+    options: { detachStrategy },
+    store,
+  } = getContext()
+
+  const pathStart = path[0].toString()
+
+  if (detachStrategy === 'persist') {
+    return
+  }
+
+  let detached = false
+
+  // ['scenes', 'sceneName', 'page', 'key']
+  for (let i = path.length - 2; i >= 0; i--) {
+    let pointerToHere = tree
+    for (let j = 0; j <= i; j++) {
+      pointerToHere = (pointerToHere && pointerToHere[path[j].toString()]) || undefined
+    }
+
+    if (pointerToHere) {
+      if (Object.keys(pointerToHere).length === 0) {
+        // next
+      } else if (
+        Object.keys(pointerToHere).length >= 1 &&
+        i === path.length - 2 &&
+        typeof pointerToHere[path[i + 1].toString()] === 'function'
+      ) {
+        delete pointerToHere[path[i + 1].toString()]
+        detached = true
+      } else if (
+        detached &&
+        Object.keys(pointerToHere).length >= 1 &&
+        i < path.length - 2 &&
+        Object.keys(pointerToHere[path[i + 1].toString()]).length === 0
+      ) {
+        delete pointerToHere[path[i + 1].toString()]
+      } else {
+        break
+      }
+    }
+  }
+
+  regenerateRootReducer(pathStart)
+
+  if (detached) {
+    if (detachStrategy === 'dispatch' || detachStrategy === 'replace') {
+      runPlugins('beforeDetach', logic)
+
+      if (detachStrategy === 'dispatch') {
+        store && store.dispatch({ type: DETACH_REDUCER, payload: { path } })
+      } else if (detachStrategy === 'replace') {
+        store && store.replaceReducer(createReduxStoreReducer())
+      }
+
+      runPlugins('afterDetach', logic)
+    }
+  }
+}
+
+export function regenerateRootReducer(pathStart: string): void {
+  const {
+    reducers: { tree, roots, whitelist },
+  } = getContext()
+
+  if (
+    pathStart !== 'kea' &&
+    !whitelist &&
+    typeof tree[pathStart] === 'object' &&
+    Object.keys(tree[pathStart]).length === 0
+  ) {
+    delete roots[pathStart]
+  } else {
+    roots[pathStart] = recursiveCreateReducer(tree[pathStart])
+  }
+  regenerateCombinedReducer()
+}
+
+export function recursiveCreateReducer(treeNode: ReducerFunction | Record<string, any>): ReducerFunction {
+  if (typeof treeNode === 'function') {
+    return treeNode as ReducerFunction
+  }
+
+  const children: Record<string, any> = {}
+
+  Object.keys(treeNode).forEach((key) => {
+    if (typeof treeNode[key] !== 'undefined') {
+      children[key] = recursiveCreateReducer(treeNode[key])
+    }
+  })
+
+  if (Object.keys(children).length > 0) {
+    return combineKeaReducers(children)
+  } else {
+    const emptyObj = {}
+    return () => emptyObj
+  }
+}
+
+// We are using our own function for the tree nodes instead of redux's combineReducers beacause this way we will not
+// get the constant 'Unexpected key "1" found in previous state received by the reducer' warnings when unmounting.
+// Instead we'll simply discard the keys we don't need.
+// Please note that logic reducers are still built with redux's combineReducers.
+export function combineKeaReducers(reducers: Record<string, ReducerFunction>): ReducerFunction {
+  return function combination(state = {}, action, fullState) {
+    const reducerKeys = Object.keys(reducers)
+    let stateChanged = Object.keys(state).length !== reducerKeys.length
+    const nextState: Record<string, any> = {}
+
+    for (const key of reducerKeys) {
+      const reducer = reducers[key]
+      const previousKeyState = state[key]
+      const nextKeyState = reducer(previousKeyState, action, fullState || state)
+      if (typeof nextKeyState === 'undefined') {
+        throw new Error(`[KEA] Reducer "${key}" returned undefined for action "${action && action.type}"`)
+      }
+      nextState[key] = nextKeyState
+      stateChanged = stateChanged || nextKeyState !== previousKeyState
+    }
+
+    return stateChanged ? nextState : state
+  }
+}
+
+function regenerateCombinedReducer() {
+  const { redux, roots } = getContext().reducers
+  const reducers = { ...redux, ...roots }
+  getContext().reducers.combined = combineKeaReducers(reducers)
+}
+
+export function createReduxStoreReducer(): Reducer {
+  regenerateCombinedReducer()
+  return (state = defaultState, action) => getContext().reducers.combined?.(state, action, state)
+}
+===== src/kea/store.ts =====
+// The Redux maintainers have deprecated "createStore" to push everyone to use Redux Toolkit :/
+// so we must import `createStore` as `legacy_createStore`
+import { legacy_createStore as reduxCreateStore, applyMiddleware, compose } from 'redux'
+import type { Store, StoreEnhancer } from 'redux'
+
+import { createReduxStoreReducer, initRootReducerTree } from './reducer'
+import { runPlugins } from './plugins'
+import { getContext } from './context'
+import { CreateStoreOptions } from '../types'
+import { isPaused } from '../react/hooks'
+
+const reduxDevToolsCompose =
+  typeof window !== 'undefined' && (window as any)['__REDUX_DEVTOOLS_EXTENSION_COMPOSE__']
+    ? (window as any)['__REDUX_DEVTOOLS_EXTENSION_COMPOSE__']
+    : compose
+
+const createDefaultOptions = (): CreateStoreOptions => ({
+  paths: [],
+  reducers: {},
+  preloadedState: undefined,
+  middleware: [],
+  compose: reduxDevToolsCompose,
+  enhancers: [],
+  plugins: [],
+})
+
+export function createStore(opts = {}): Store | void {
+  const context = getContext()
+
+  if (!context) {
+    console.error('[KEA] Can not create a store without a Kea context.')
+    return
+  }
+
+  if (context['__store']) {
+    console.error('[KEA] Already attached to a store! Exiting. Please reset the kea context before creating a store.')
+    return
+  }
+
+  // clone options
+  const options = { ...createDefaultOptions(), ...opts }
+
+  // clone redux reducers
+  context.reducers.redux = { ...options.reducers }
+
+  // run pre-hooks
+  runPlugins('beforeReduxStore', options)
+
+  // combine middleware into the first enhancer
+  if (options.middleware.length > 0) {
+    options.enhancers = ([applyMiddleware(...options.middleware)] as StoreEnhancer[]).concat(options.enhancers)
+  }
+
+  // use a special compose function?
+  const composeEnhancer: typeof compose = options.compose || compose
+
+  // create the store creator
+  const finalCreateStore = composeEnhancer(
+    pauseListenersEnhancer,
+    ...options.enhancers,
+  )(reduxCreateStore) as typeof reduxCreateStore
+
+  // if we are whitelisting paths
+  if (options.paths && options.paths.length > 0) {
+    context.reducers.whitelist = {}
+    options.paths.forEach((pathStart) => {
+      ;(context.reducers.whitelist as Record<string, any>)[pathStart] = true
+      initRootReducerTree(pathStart)
+    })
+  } else {
+    initRootReducerTree('kea')
+  }
+
+  // create store
+  const store = finalCreateStore(createReduxStoreReducer(), { ...options.preloadedState })
+  context['__store'] = store
+
+  // run post-hooks
+  runPlugins('afterReduxStore', options, store)
+
+  return store
+}
+
+/** Pauses Redux listeners when a logic is mounting, to avoid early re-renders from React */
+export const pauseListenersEnhancer: StoreEnhancer = (createStore) => (reducer, initialState) => {
+  const store = createStore(reducer, initialState)
+  const storeSubscribe = store.subscribe
+  store.subscribe = (observer) => {
+    const pausedObserver = () => {
+      if (!isPaused()) {
+        observer()
+      }
+    }
+    return storeSubscribe(pausedObserver)
+  }
+  return store
+}
+===== src/kea/plugins.ts =====
+import { getContext } from './context'
+import { KeaPlugin, PluginEvents } from '../types'
+
+const reservedKeys = {
+  key: true,
+  path: true,
+  pathString: true,
+  props: true,
+  inputs: true,
+  wrapper: true,
+  wrap: true,
+  build: true,
+  mount: true,
+  unmount: true,
+  isMounted: true,
+  findMounted: true,
+  findAllMounted: true,
+  extend: true,
+}
+
+export function activatePlugin(pluginToActivate: KeaPlugin | (() => KeaPlugin)): void {
+  const plugin = typeof pluginToActivate === 'function' ? pluginToActivate() : pluginToActivate
+  const { plugins } = getContext()
+
+  if (!plugin.name) {
+    throw new Error('[KEA] Tried to activate a plugin without a name!')
+  }
+  if (plugins.activated.find((p) => p.name === plugin.name)) {
+    throw new Error(`[KEA] Tried to activate plugin "${plugin.name}", but it was already installed!`)
+  }
+
+  plugins.activated.push(plugin)
+
+  if (plugin.defaults) {
+    const fields = Object.keys(typeof plugin.defaults === 'function' ? plugin.defaults() : plugin.defaults)
+    for (const key of fields) {
+      if (plugins.logicFields[key] || (reservedKeys as any)[key]) {
+        console.error(
+          `[KEA] Plugin "${plugin.name}" redefines logic field "${key}". Previously defined by ${
+            plugins.logicFields[key] || 'core'
+          }`,
+        )
+      }
+      plugins.logicFields[key] = plugin.name
+    }
+  }
+
+  if (plugin.events) {
+    for (const key of Object.keys(plugin.events) as Array<keyof PluginEvents>) {
+      if (!plugins.events[key]) {
+        plugins.events[key] = []
+      }
+      plugins.events[key]!.push(plugin.events[key] as any)
+    }
+
+    plugin.events.afterPlugin && plugin.events.afterPlugin()
+  }
+}
+
+type PluginParameters<T> = T extends (...args: infer P) => any ? P : never
+
+// run plugins with this key with the rest of the arguments
+export function runPlugins<T extends keyof PluginEvents, E extends PluginParameters<PluginEvents[T]>>(
+  key: T,
+  ...args: E
+): void {
+  const {
+    plugins,
+    options: { debug },
+  } = getContext()
+  if (debug) {
+    console.log(`[KEA] Event: ${key}`, ...args)
+  }
+  if (plugins && plugins.events[key]) {
+    ;(plugins.events[key] as Array<(...args: E) => void>).forEach((pluginFunction) => {
+      pluginFunction(...args)
+    })
+  }
+}

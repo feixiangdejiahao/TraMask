@@ -1,0 +1,1 @@
+cd /app && git add libs/core/langchain_core/runnables/coalesce.py libs/core/langchain_core/runnables/__init__.py libs/core/langchain_core/runnables/base.py libs/core/tests/unit_tests/runnables/test_imports.py libs/core/tests/unit_tests/runnables/test_coalesce.py && git status

@@ -1,0 +1,1 @@
+cd /app/packages/prompts && npx vitest run test/path.test.ts 2>&1 | grep -B2 -A8 "Expected" | head -50

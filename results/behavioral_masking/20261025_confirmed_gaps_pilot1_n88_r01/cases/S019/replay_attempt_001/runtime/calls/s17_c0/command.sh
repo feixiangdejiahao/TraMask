@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/parse/utils.ts

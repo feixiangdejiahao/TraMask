@@ -1,0 +1,240 @@
+
+    def run_tests(self):
+        """Runs through all files in the scope
+
+        :return: -
+        """
+        # if we have problems with a file, we'll remove it from the files_list
+        # and add it to the skipped list instead
+        new_files_list = list(self.files_list)
+        if (
+            len(self.files_list) > PROGRESS_THRESHOLD
+            and LOG.getEffectiveLevel() <= logging.INFO
+        ):
+            files = progress.track(self.files_list)
+        else:
+            files = self.files_list
+
+        for count, fname in enumerate(files):
+            LOG.debug("working on file : %s", fname)
+
+            try:
+                if fname == "-":
+                    open_fd = os.fdopen(sys.stdin.fileno(), "rb", 0)
+                    fdata = io.BytesIO(open_fd.read())
+                    new_files_list = [
+                        "<stdin>" if x == "-" else x for x in new_files_list
+                    ]
+                    self._parse_file("<stdin>", fdata, new_files_list)
+                else:
+                    with open(fname, "rb") as fdata:
+                        self._parse_file(fname, fdata, new_files_list)
+            except OSError as e:
+                self.skipped.append((fname, e.strerror))
+                new_files_list.remove(fname)
+
+        # reflect any files which may have been skipped
+        self.files_list = new_files_list
+
+        # do final aggregation of metrics
+        self.metrics.aggregate()
+
+    def _parse_file(self, fname, fdata, new_files_list):
+        try:
+            # parse the current file
+            data = fdata.read()
+            lines = data.splitlines()
+            self.metrics.begin(fname)
+            self.metrics.count_locs(lines)
+            # nosec_lines is a dict of line number -> set of tests to ignore
+            #                                         for the line
+            nosec_lines = dict()
+            try:
+                fdata.seek(0)
+                tokens = tokenize.tokenize(fdata.readline)
+
+                if not self.ignore_nosec:
+                    for toktype, tokval, (lineno, _), _, _ in tokens:
+                        if toktype == tokenize.COMMENT:
+                            nosec_lines[lineno] = _parse_nosec_comment(tokval)
+
+            except tokenize.TokenError:
+                pass
+            score = self._execute_ast_visitor(fname, fdata, data, nosec_lines)
+            self.scores.append(score)
+            self.metrics.count_issues([score])
+        except KeyboardInterrupt:
+            sys.exit(2)
+        except SyntaxError:
+            self.skipped.append(
+                (fname, "syntax error while parsing AST from file")
+            )
+            new_files_list.remove(fname)
+        except Exception as e:
+            LOG.error(
+                "Exception occurred when executing tests against %s.", fname
+            )
+            if not LOG.isEnabledFor(logging.DEBUG):
+                LOG.error(
+                    'Run "bandit --debug %s" to see the full traceback.', fname
+                )
+
+            self.skipped.append((fname, "exception while scanning file"))
+            new_files_list.remove(fname)
+            LOG.debug("  Exception string: %s", e)
+            LOG.debug("  Exception traceback: %s", traceback.format_exc())
+
+    def _execute_ast_visitor(self, fname, fdata, data, nosec_lines):
+        """Execute AST parse on each file
+
+        :param fname: The name of the file being parsed
+        :param data: Original file contents
+        :param lines: The lines of code to process
+        :return: The accumulated test score
+        """
+        score = []
+        res = b_node_visitor.BanditNodeVisitor(
+            fname,
+            fdata,
+            self.b_ma,
+            self.b_ts,
+            self.debug,
+            nosec_lines,
+            self.metrics,
+        )
+
+        score = res.process(data)
+        self.results.extend(res.tester.results)
+        return score
+
+
+def _get_files_from_dir(
+    files_dir, included_globs=None, excluded_path_strings=None
+):
+    if not included_globs:
+        included_globs = ["*.py"]
+    if not excluded_path_strings:
+        excluded_path_strings = []
+
+    files_list = set()
+    excluded_files = set()
+
+    for root, _, files in os.walk(files_dir):
+        for filename in files:
+            path = os.path.join(root, filename)
+            if _is_file_included(path, included_globs, excluded_path_strings):
+                files_list.add(path)
+            else:
+                excluded_files.add(path)
+
+    return files_list, excluded_files
+
+
+def _is_file_included(
+    path, included_globs, excluded_path_strings, enforce_glob=True
+):
+    """Determine if a file should be included based on filename
+
+    This utility function determines if a file should be included based
+    on the file name, a list of parsed extensions, excluded paths, and a flag
+    specifying whether extensions should be enforced.
+
+    :param path: Full path of file to check
+    :param parsed_extensions: List of parsed extensions
+    :param excluded_paths: List of paths (globbing supported) from which we
+        should not include files
+    :param enforce_glob: Can set to false to bypass extension check
+    :return: Boolean indicating whether a file should be included
+    """
+    return_value = False
+
+    # if this is matches a glob of files we look at, and it isn't in an
+    # excluded path
+    if _matches_glob_list(path, included_globs) or not enforce_glob:
+        if not _matches_glob_list(path, excluded_path_strings) and not any(
+            x in path for x in excluded_path_strings
+        ):
+            return_value = True
+
+    return return_value
+
+
+def _matches_glob_list(filename, glob_list):
+    for glob in glob_list:
+        if fnmatch.fnmatch(filename, glob):
+            return True
+    return False
+
+
+def _compare_baseline_results(baseline, results):
+    """Compare a baseline list of issues to list of results
+
+    This function compares a baseline set of issues to a current set of issues
+    to find results that weren't present in the baseline.
+
+    :param baseline: Baseline list of issues
+    :param results: Current list of issues
+    :return: List of unmatched issues
+    """
+    return [a for a in results if a not in baseline]
+
+
+def _find_candidate_matches(unmatched_issues, results_list):
+    """Returns a dictionary with issue candidates
+
+    For example, let's say we find a new command injection issue in a file
+    which used to have two.  Bandit can't tell which of the command injection
+    issues in the file are new, so it will show all three.  The user should
+    be able to pick out the new one.
+
+    :param unmatched_issues: List of issues that weren't present before
+    :param results_list: main list of current Bandit findings
+    :return: A dictionary with a list of candidates for each issue
+    """
+
+    issue_candidates = collections.OrderedDict()
+
+    for unmatched in unmatched_issues:
+        issue_candidates[unmatched] = [
+            i for i in results_list if unmatched == i
+        ]
+
+    return issue_candidates
+
+
+def _find_test_id_from_nosec_string(extman, match):
+    test_id = extman.check_id(match)
+    if test_id:
+        return match
+    # Finding by short_id didn't work, let's check the test name
+    test_id = extman.get_test_id(match)
+    if not test_id:
+        # Name and short id didn't work:
+        LOG.warning(
+            "Test in comment: %s is not a test name or id, ignoring", match
+        )
+    return test_id  # We want to return None or the string here regardless
+
+
+def _parse_nosec_comment(comment):
+    found_no_sec_comment = NOSEC_COMMENT.search(comment)
+    if not found_no_sec_comment:
+        # there was no nosec comment
+        return None
+
+    matches = found_no_sec_comment.groupdict()
+    nosec_tests = matches.get("tests", set())
+
+    # empty set indicates that there was a nosec comment without specific
+    # test ids or names
+    test_ids = set()
+    if nosec_tests:
+        extman = extension_loader.MANAGER
+        # lookup tests by short code or name
+        for test in NOSEC_COMMENT_TESTS.finditer(nosec_tests):
+            test_match = test.group(1)
+            test_id = _find_test_id_from_nosec_string(extman, test_match)
+            if test_id:
+                test_ids.add(test_id)
+
+    return test_ids

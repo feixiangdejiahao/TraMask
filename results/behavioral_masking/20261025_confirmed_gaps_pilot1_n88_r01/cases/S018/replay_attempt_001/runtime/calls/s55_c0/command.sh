@@ -1,0 +1,1 @@
+cd /app && python -m pytest tests/test_rrule.py -q 2>&1 | tail -30

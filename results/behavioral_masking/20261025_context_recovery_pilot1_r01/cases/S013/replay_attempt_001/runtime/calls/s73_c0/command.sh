@@ -1,0 +1,1 @@
+cd /app && grep -n "initialize\|Initialize\|initializer" lib/container.d.ts | head -40; echo "---resolvers.d.ts---"; grep -n "initializer\|Initializer\|INITIALIZER" lib/resolvers.d.ts | head -40

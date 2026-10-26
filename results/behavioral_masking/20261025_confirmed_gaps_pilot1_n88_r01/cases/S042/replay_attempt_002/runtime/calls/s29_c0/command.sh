@@ -1,0 +1,1 @@
+cd /app && node --version && pnpm --version && pnpm -F @koota/core test run 2>&1 | tail -50

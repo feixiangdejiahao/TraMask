@@ -1,0 +1,1 @@
+grep -n "def \|class \|shutdown\|connected\|close\|recv\|send\b" pwnlib/tubes/tube.py | head -120

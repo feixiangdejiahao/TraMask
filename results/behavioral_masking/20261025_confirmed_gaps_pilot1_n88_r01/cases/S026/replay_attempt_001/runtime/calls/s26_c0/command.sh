@@ -1,0 +1,1 @@
+cd /app && sed -n '160,320p' checkers/internal/linttest/linttest.go

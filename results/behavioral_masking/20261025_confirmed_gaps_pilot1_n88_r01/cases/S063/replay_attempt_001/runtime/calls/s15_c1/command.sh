@@ -1,0 +1,1 @@
+cd /app && ls ~/.cache 2>/dev/null; find /root/.cache -iname '*pwn*' 2>/dev/null | head

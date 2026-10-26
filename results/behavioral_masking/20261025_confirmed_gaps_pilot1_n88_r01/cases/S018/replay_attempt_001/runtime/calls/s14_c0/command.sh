@@ -1,0 +1,1 @@
+ls tests/ changelog.d/ && grep -rn "to_ical\|from_str\|tzids\|VCALENDAR\|VTIMEZONE\|rdates\|exdates\|__repr__" tests/test_rrule.py | head -80

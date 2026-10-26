@@ -1,0 +1,1 @@
+python -c "import dateutil; print(dateutil.__version__, dateutil.__file__)" 2>&1; pip show python-dateutil 2>&1 | head -5; find / -name 'rrule.py' 2>/dev/null | grep -v /app | head

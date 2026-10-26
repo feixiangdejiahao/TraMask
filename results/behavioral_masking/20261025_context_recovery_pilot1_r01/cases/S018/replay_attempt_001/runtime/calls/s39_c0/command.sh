@@ -1,0 +1,1 @@
+cd /app && python -m bandit -f json /tmp/bandit_repro/test_nosec_directives.py 2>/dev/null | python -c "import json,sys; d=json.load(sys.stdin); [print(r['line_number'], r['test_id'], r['test_name']) for r in d['results']]"

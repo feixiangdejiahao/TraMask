@@ -1,0 +1,1 @@
+cd /app && sed -n '190,240p' src/index.test.ts && echo "=====" && sed -n '940,1120p' src/index.test.ts

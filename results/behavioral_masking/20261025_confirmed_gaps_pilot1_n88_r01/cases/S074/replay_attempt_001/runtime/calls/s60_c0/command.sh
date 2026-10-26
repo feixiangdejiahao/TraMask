@@ -1,0 +1,1 @@
+cd /app && grep -n "v.constants" vm.go

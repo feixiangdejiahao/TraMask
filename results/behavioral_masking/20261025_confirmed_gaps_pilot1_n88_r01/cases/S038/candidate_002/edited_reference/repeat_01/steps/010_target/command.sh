@@ -1,0 +1,1 @@
+./node_modules/.bin/jest --runTestsByPath test/jest/atomic-edge.js --runInBand --no-coverage --no-cache -t 'dependencies list only leaf paths, not parent nodes'

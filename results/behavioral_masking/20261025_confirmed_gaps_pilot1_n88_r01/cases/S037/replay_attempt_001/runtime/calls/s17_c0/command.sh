@@ -1,0 +1,1 @@
+cd /app && cat src/index.ts && echo '=== utils ===' && cat src/utils.ts && echo '=== tests selectors ===' && cat test/jest/selectors.js

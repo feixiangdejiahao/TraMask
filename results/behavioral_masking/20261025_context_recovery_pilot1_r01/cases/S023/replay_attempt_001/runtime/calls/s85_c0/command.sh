@@ -1,0 +1,1 @@
+cd /app && head -40 docs/validation.md

@@ -1,0 +1,1 @@
+cd /app && npm test 2>&1 | tail -30

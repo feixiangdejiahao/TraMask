@@ -1,0 +1,1 @@
+cd /workspace && pwd && ls -la && git status && git branch -a

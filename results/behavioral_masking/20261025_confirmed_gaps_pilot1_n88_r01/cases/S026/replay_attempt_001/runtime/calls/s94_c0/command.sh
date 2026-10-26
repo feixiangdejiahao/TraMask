@@ -1,0 +1,1 @@
+cd /app && grep -rn "deprecatedComment\|GetCheckersInfo\|stableList\|Total number" cmd/ checkers/rules/ rulestest/ 2>/dev/null | grep -v '_test' | head -20; echo "=== check_test ==="; grep -n "checker\|enableAll\|brokenDocLink" cmd/go-critic/check_test.go | head -30

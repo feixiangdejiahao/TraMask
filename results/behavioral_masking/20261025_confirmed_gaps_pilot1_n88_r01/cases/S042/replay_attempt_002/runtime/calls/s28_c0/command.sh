@@ -1,0 +1,1 @@
+cat packages/core/src/trait/types.ts && echo '---is-relation---' && cat packages/core/src/relation/utils/is-relation.ts && echo '---trait-instance---' && cat packages/core/src/trait/trait-instance.ts && echo '---universe---' && cat packages/core/src/universe/universe.ts

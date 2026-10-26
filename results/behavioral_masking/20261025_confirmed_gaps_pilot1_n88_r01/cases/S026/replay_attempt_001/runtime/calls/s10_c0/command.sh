@@ -1,0 +1,1 @@
+go doc go/doc/comment.DocLink 2>/dev/null; echo "====="; go doc go/doc/comment.Plain 2>/dev/null; echo "====="; grep -n "type DocLink\|type Plain\|type Italic\|func (p \*Parser) Parse\|func (d \*Doc)" "$(go env GOROOT)/src/go/doc/comment/parse.go" | head -40

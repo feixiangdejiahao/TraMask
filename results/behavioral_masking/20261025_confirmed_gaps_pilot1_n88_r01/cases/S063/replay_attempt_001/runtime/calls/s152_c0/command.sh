@@ -1,0 +1,1 @@
+cd /app && head -30 /tmp/mux_peer_exit2.py

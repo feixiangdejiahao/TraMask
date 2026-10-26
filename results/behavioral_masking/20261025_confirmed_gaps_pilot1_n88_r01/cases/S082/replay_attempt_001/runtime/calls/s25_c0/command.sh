@@ -1,0 +1,1 @@
+cd /app && sed -n '1,260p' lib/reporters/dot_reporter.js && echo '--- teamcity ---' && sed -n '1,360p' lib/reporters/teamcity_reporter.js && echo '--- xunit ---' && sed -n '1,420p' lib/reporters/xunit_reporter.js

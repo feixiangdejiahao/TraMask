@@ -1,0 +1,1 @@
+cd /app && timeout 25 npx mocha tests/server_tests.js 2>&1 | tail -25

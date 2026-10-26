@@ -1,0 +1,1 @@
+cd /app && awk 'length($0)>88 {print NR": "length($0)" "$0}' src/cattrs/partial.py src/cattrs/converters.py tests/test_partial.py | head -40

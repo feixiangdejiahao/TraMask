@@ -1,0 +1,1 @@
+cd /app && grep -n "export\|Export" compiler.go | head -40 && sed -n '110,220p' compiler.go

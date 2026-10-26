@@ -1,0 +1,1 @@
+cat aiomonitor/task.py; echo '=====EXC====='; cat aiomonitor/exceptions.py; echo '=====INIT====='; cat aiomonitor/__init__.py; echo '=====CONTEXT====='; cat aiomonitor/context.py; echo '=====CONFTEST====='; cat tests/conftest.py; echo '=====TESTS====='; cat tests/test_monitor.py

@@ -1,0 +1,1 @@
+cd /app && git diff src/dateutil/rrule.py | sed -n '520,700p'

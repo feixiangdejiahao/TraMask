@@ -1,0 +1,1 @@
+cd /app && cat packages/core/src/prompts/autocomplete.ts

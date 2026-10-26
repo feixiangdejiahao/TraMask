@@ -1,0 +1,1 @@
+cd /app && python -m flake8 bandit/core/nosec.py bandit/core/manager.py bandit/core/tester.py bandit/core/utils.py tests/unit/core/test_nosec.py tests/functional/test_functional.py 2>&1 | head -20

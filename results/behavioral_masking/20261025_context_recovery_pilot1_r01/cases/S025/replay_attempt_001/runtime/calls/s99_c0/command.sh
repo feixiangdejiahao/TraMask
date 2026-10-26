@@ -1,0 +1,1 @@
+cd /app/packages/core && npx vitest run test/prompts/autocomplete.test.ts -t "in-flight fetch is invalidated" 2>&1 | sed -n '1,80p'

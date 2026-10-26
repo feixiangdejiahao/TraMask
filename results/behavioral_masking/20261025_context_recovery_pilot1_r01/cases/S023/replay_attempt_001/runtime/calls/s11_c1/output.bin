@@ -1,0 +1,221 @@
+        """
+        dis_fn = self._get_dis_func(cl, use_literals=use_literals)
+        has_none = NoneType in cl.__args__
+
+        if has_none:
+
+            def structure_attrs_union(obj, _) -> cl:
+                if obj is None:
+                    return None
+                return self.structure(obj, dis_fn(obj))
+
+        else:
+
+            def structure_attrs_union(obj, _):
+                return self.structure(obj, dis_fn(obj))
+
+        return structure_attrs_union
+
+    @staticmethod
+    def _structure_call(obj: Any, cl: type[T]) -> Any:
+        """Just call ``cl`` with the given ``obj``.
+
+        This is just an optimization on the ``_structure_default`` case, when
+        we know we can skip the ``if`` s. Use for ``str``, ``bytes``, ``enum``,
+        etc.
+        """
+        return cl(obj)
+
+    @staticmethod
+    def _structure_simple_literal(val, type):
+        if val not in type.__args__:
+            raise Exception(f"{val} not in literal {type}")
+        return val
+
+    @staticmethod
+    def _structure_enum_literal(val, type):
+        vals = {(x.value if isinstance(x, Enum) else x): x for x in type.__args__}
+        try:
+            return vals[val]
+        except KeyError:
+            raise Exception(f"{val} not in literal {type}") from None
+
+    def _structure_newtype(self, val: UnstructuredValue, type) -> StructuredValue:
+        base = get_newtype_base(type)
+        return self.get_structure_hook(base)(val, base)
+
+    def _structure_final_factory(self, type):
+        base = get_final_base(type)
+        res = self.get_structure_hook(base)
+        return lambda v, _, __base=base: res(v, __base)
+
+    # Attrs classes.
+
+    def structure_attrs_fromtuple(self, obj: tuple[Any, ...], cl: type[T]) -> T:
+        """Load an attrs class from a sequence (tuple)."""
+        conv_obj = []  # A list of converter parameters.
+        for a, value in zip(fields(cl), obj):
+            # We detect the type by the metadata.
+            converted = self._structure_attribute(a, value)
+            conv_obj.append(converted)
+
+        return cl(*conv_obj)
+
+    def _structure_attribute(self, a: Attribute | Field, value: Any) -> Any:
+        """Handle an individual attrs attribute."""
+        type_ = a.type
+        attrib_converter = getattr(a, "converter", None)
+        if self._prefer_attrib_converters and attrib_converter:
+            # A attrib converter is defined on this attribute, and
+            # prefer_attrib_converters is set to give these priority over registered
+            # structure hooks. So, pass through the raw value, which attrs will flow
+            # into the converter
+            return value
+        if type_ is None:
+            # No type metadata.
+            return value
+
+        try:
+            return self._structure_func.dispatch(type_)(value, type_)
+        except StructureHandlerNotFoundError:
+            if attrib_converter:
+                # Return the original value and fallback to using an attrib converter.
+                return value
+            raise
+
+    def structure_attrs_fromdict(self, obj: Mapping[str, Any], cl: type[T]) -> T:
+        """Instantiate an attrs class from a mapping (dict)."""
+        # For public use.
+
+        conv_obj = {}  # Start with a fresh dict, to ignore extra keys.
+        for a in fields(cl):
+            try:
+                val = obj[a.name]
+            except KeyError:
+                continue
+
+            # try .alias and .name because this code also supports dataclasses!
+            conv_obj[getattr(a, "alias", a.name)] = self._structure_attribute(a, val)
+
+        return cl(**conv_obj)
+
+    def _structure_deque(self, obj: Iterable[T], cl: Any) -> deque[T]:
+        """Convert an iterable to a potentially generic deque."""
+        if is_bare(cl) or cl.__args__[0] in ANIES:
+            res = deque(obj)
+        else:
+            elem_type = cl.__args__[0]
+            handler = self._structure_func.dispatch(elem_type)
+            if self.detailed_validation:
+                errors = []
+                res = deque()
+                ix = 0  # Avoid `enumerate` for performance.
+                for e in obj:
+                    try:
+                        res.append(handler(e, elem_type))
+                    except Exception as e:
+                        msg = IterableValidationNote(
+                            f"Structuring {cl} @ index {ix}", ix, elem_type
+                        )
+                        e.__notes__ = [*getattr(e, "__notes__", []), msg]
+                        errors.append(e)
+                    finally:
+                        ix += 1
+                if errors:
+                    raise IterableValidationError(
+                        f"While structuring {cl!r}", errors, cl
+                    )
+            else:
+                res = deque(handler(e, elem_type) for e in obj)
+        return res
+
+    def _structure_set(
+        self, obj: Iterable[T], cl: Any, structure_to: type = set
+    ) -> Set[T]:
+        """Convert an iterable into a potentially generic set."""
+        if is_bare(cl) or cl.__args__[0] in ANIES:
+            return structure_to(obj)
+        elem_type = cl.__args__[0]
+        handler = self._structure_func.dispatch(elem_type)
+        if self.detailed_validation:
+            errors = []
+            res = set()
+            ix = 0
+            for e in obj:
+                try:
+                    res.add(handler(e, elem_type))
+                except Exception as exc:
+                    msg = IterableValidationNote(
+                        f"Structuring {structure_to.__name__} @ element {e!r}",
+                        ix,
+                        elem_type,
+                    )
+                    exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
+                    errors.append(exc)
+                finally:
+                    ix += 1
+            if errors:
+                raise IterableValidationError(f"While structuring {cl!r}", errors, cl)
+            return res if structure_to is set else structure_to(res)
+        if structure_to is set:
+            return {handler(e, elem_type) for e in obj}
+        return structure_to([handler(e, elem_type) for e in obj])
+
+    def _structure_frozenset(
+        self, obj: Iterable[T], cl: Any
+    ) -> FrozenSetSubscriptable[T]:
+        """Convert an iterable into a potentially generic frozenset."""
+        return self._structure_set(obj, cl, structure_to=frozenset)
+
+    def _structure_dict(self, obj: Mapping[T, V], cl: Any) -> dict[T, V]:
+        """Convert a mapping into a potentially generic dict."""
+        if is_bare(cl) or cl.__args__ == (Any, Any):
+            return dict(obj)
+        key_type, val_type = cl.__args__
+
+        if self.detailed_validation:
+            key_handler = self._structure_func.dispatch(key_type)
+            val_handler = self._structure_func.dispatch(val_type)
+            errors = []
+            res = {}
+
+            for k, v in obj.items():
+                try:
+                    value = val_handler(v, val_type)
+                except Exception as exc:
+                    msg = IterableValidationNote(
+                        f"Structuring mapping value @ key {k!r}", k, val_type
+                    )
+                    exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
+                    errors.append(exc)
+                    continue
+
+                try:
+                    key = key_handler(k, key_type)
+                    res[key] = value
+                except Exception as exc:
+                    msg = IterableValidationNote(
+                        f"Structuring mapping key @ key {k!r}", k, key_type
+                    )
+                    exc.__notes__ = [*getattr(exc, "__notes__", []), msg]
+                    errors.append(exc)
+
+            if errors:
+                raise IterableValidationError(f"While structuring {cl!r}", errors, cl)
+            return res
+
+        if key_type in ANIES:
+            val_conv = self._structure_func.dispatch(val_type)
+            return {k: val_conv(v, val_type) for k, v in obj.items()}
+        if val_type in ANIES:
+            key_conv = self._structure_func.dispatch(key_type)
+            return {key_conv(k, key_type): v for k, v in obj.items()}
+        key_conv = self._structure_func.dispatch(key_type)
+        val_conv = self._structure_func.dispatch(val_type)
+        return {key_conv(k, key_type): val_conv(v, val_type) for k, v in obj.items()}
+
+    def _structure_optional(self, obj, union):
+        if obj is None:
+            return None
+        union_params = union.__args__
+        other = union_params[0] if union_params[1] is NoneType else union_params[1]

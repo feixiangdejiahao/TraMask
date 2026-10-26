@@ -1,0 +1,1 @@
+cd /app && sed -i 's/out = make()/out := make()/' zz_repro_test.go && go test -run TestClosureGlobalRepro -v . 2>&1 | tail -30

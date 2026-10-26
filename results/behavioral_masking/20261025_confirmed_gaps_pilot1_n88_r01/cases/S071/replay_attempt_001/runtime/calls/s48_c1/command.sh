@@ -1,0 +1,1 @@
+cd /app && tail -80 src/transformer.ts

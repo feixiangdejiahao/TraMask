@@ -1,0 +1,1 @@
+cd /app && grep -n "type Environment struct" backend/internal/models/environment.go && sed -n '1,120p' backend/internal/models/environment.go

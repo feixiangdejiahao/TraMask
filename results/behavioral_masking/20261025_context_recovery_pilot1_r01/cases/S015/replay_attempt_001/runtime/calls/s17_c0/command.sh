@@ -1,0 +1,1 @@
+sed -n '1,120p' bandit/core/node_visitor.py && grep -n "def process" -A 40 bandit/core/node_visitor.py && grep -n "class BanditNodeVisitor" -A 30 bandit/core/node_visitor.py

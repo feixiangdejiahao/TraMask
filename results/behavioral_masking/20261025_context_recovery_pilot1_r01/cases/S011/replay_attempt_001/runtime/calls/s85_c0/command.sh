@@ -1,0 +1,1 @@
+cd /app && grep -n "disposer\|dispose\|asClass\|asFunction" README.md | head -30

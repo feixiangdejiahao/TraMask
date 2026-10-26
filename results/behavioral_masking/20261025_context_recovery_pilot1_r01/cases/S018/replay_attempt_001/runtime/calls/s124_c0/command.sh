@@ -1,0 +1,1 @@
+cd /app && grep -rn 'nosec_lines\|get_nosec\|_get_nosecs_from_contexts' bandit --include='*.py' | grep -v __pycache__

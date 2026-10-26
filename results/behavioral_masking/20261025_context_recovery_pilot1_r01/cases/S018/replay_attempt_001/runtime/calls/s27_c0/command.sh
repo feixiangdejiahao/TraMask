@@ -1,0 +1,1 @@
+cd /app && sed -n '1,100p' tests/functional/test_functional.py

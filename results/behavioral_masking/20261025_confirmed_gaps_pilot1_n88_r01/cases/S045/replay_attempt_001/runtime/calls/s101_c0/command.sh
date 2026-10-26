@@ -1,0 +1,1 @@
+cd /app/libs/core && python -m py_compile langchain_core/runnables/coalesce.py langchain_core/runnables/base.py langchain_core/runnables/__init__.py && echo "compile OK" && awk 'length($0) > 100 {print FILENAME":"NR": "length($0)}' langchain_core/runnables/coalesce.py | head -30

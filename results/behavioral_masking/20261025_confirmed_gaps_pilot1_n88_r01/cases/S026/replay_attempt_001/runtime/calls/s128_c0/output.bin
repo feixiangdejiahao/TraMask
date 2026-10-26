@@ -1,0 +1,173 @@
+package astwalk
+
+import (
+	"go/ast"
+)
+
+type docLinkWalker struct {
+	visitor DocLinkVisitor
+}
+
+func (w *docLinkWalker) WalkFile(f *ast.File) {
+	if !w.visitor.EnterFile(f) {
+		return
+	}
+
+	for _, decl := range f.Decls {
+		switch decl := decl.(type) {
+		case *ast.FuncDecl:
+			if decl.Doc != nil {
+				w.visitor.VisitDocLink(decl, decl.Doc)
+			}
+		case *ast.GenDecl:
+			if decl.Doc != nil {
+				w.visitor.VisitDocLink(decl, decl.Doc)
+			}
+			for _, spec := range decl.Specs {
+				switch spec := spec.(type) {
+				case *ast.ImportSpec:
+					if spec.Doc != nil {
+						w.visitor.VisitDocLink(spec, spec.Doc)
+					}
+				case *ast.ValueSpec:
+					if spec.Doc != nil {
+						w.visitor.VisitDocLink(spec, spec.Doc)
+					}
+				case *ast.TypeSpec:
+					if spec.Doc != nil {
+						w.visitor.VisitDocLink(spec, spec.Doc)
+					}
+					ast.Inspect(spec.Type, func(n ast.Node) bool {
+						if n, ok := n.(*ast.Field); ok {
+							if n.Doc != nil {
+								w.visitor.VisitDocLink(n, n.Doc)
+							}
+						}
+						return true
+					})
+				}
+			}
+		}
+	}
+}
+===== checker head =====
+package checkers
+
+import (
+	"go/ast"
+	"go/doc/comment"
+	"go/token"
+	"go/types"
+	"strconv"
+	"strings"
+	"unicode"
+
+	"github.com/go-critic/go-critic/checkers/internal/astwalk"
+	"github.com/go-critic/go-critic/linter"
+)
+
+func init() {
+	var info linter.CheckerInfo
+	info.Name = "brokenDocLink"
+	info.Tags = []string{linter.DiagnosticTag, linter.ExperimentalTag}
+	info.Summary = "Detects broken doc comment links"
+	info.Before = `
+// Foo is a sample function.
+// It is documented by [Bar] which does not exist.
+func Foo() int`
+	info.After = `
+// Foo is a sample function.
+// It is documented by [Foo] which is defined in this package.
+func Foo() int`
+
+	collection.AddChecker(&info, func(ctx *linter.CheckerContext) (linter.FileWalker, error) {
+		return astwalk.WalkerForDocLink(&brokenDocLinkChecker{ctx: ctx}), nil
+	})
+}
+
+type brokenDocLinkChecker struct {
+	astwalk.WalkHandler
+	ctx *linter.CheckerContext
+
+	file       *ast.File
+	imports    map[string]*types.Package
+	dotImports []*types.Package
+}
+
+func (c *brokenDocLinkChecker) EnterFile(f *ast.File) bool {
+	c.file = f
+	c.imports = make(map[string]*types.Package)
+	c.dotImports = c.dotImports[:0]
+	for _, spec := range f.Imports {
+		pkg := importedPackage(c.ctx, spec)
+		if pkg == nil {
+			continue
+		}
+		if spec.Name != nil && spec.Name.Name == "." {
+			c.dotImports = append(c.dotImports, pkg)
+			continue
+		}
+		c.imports[localPackageName(c.ctx, spec)] = pkg
+	}
+	return true
+}
+
+func (c *brokenDocLinkChecker) VisitDocLink(decl ast.Node, doc *ast.CommentGroup) {
+	parser := &comment.Parser{
+		LookupPackage: func(name string) (string, bool) { return name, true },
+		LookupSym:     func(_, _ string) bool { return true },
+	}
+	parsed := parser.Parse(doc.Text())
+	for _, block := range parsed.Content {
+		c.visitBlock(decl, block)
+	}
+}
+
+func (c *brokenDocLinkChecker) visitBlock(decl ast.Node, block comment.Block) {
+	switch block := block.(type) {
+	case *comment.Paragraph:
+		c.visitTexts(decl, block.Text)
+	case *comment.Heading:
+		c.visitTexts(decl, block.Text)
+	case *comment.List:
+		for _, item := range block.Items {
+			for _, content := range item.Content {
+				c.visitBlock(decl, content)
+			}
+		}
+	case *comment.Code:
+		// Code blocks do not contain documentation links.
+	}
+}
+
+func (c *brokenDocLinkChecker) visitTexts(decl ast.Node, texts []comment.Text) {
+	for _, text := range texts {
+		link, ok := text.(*comment.DocLink)
+		if !ok {
+			continue
+		}
+		c.checkDocLink(decl, link)
+	}
+}
+
+func (c *brokenDocLinkChecker) checkDocLink(decl ast.Node, link *comment.DocLink) {
+	ref := docLinkText(link)
+	if !validDocLinkText(ref) {
+		return
+	}
+
+	switch {
+	case link.ImportPath == "" && link.Recv == "":
+		// [Name] local symbol.
+		c.checkLocalSymbol(decl, ref, link.Name)
+	case link.ImportPath == "" && link.Recv != "":
+		// [Recv.Name] local method or field.
+		if !validIdentifier(link.Recv) || !validIdentifier(link.Name) {
+			return
+		}
+		c.checkLocalMember(decl, ref, link.Recv, link.Name)
+	case link.ImportPath != "" && link.Recv == "" && link.Name == "":
+		// [pkg] package reference.
+		if !validPackageRef(link.ImportPath) {
+			return
+		}

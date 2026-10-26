@@ -1,0 +1,1 @@
+ps -o pid,etime,pcpu,pmem,stat,cmd -p 9157; ls -la /tmp/checkers_test.log; wc -l /tmp/checkers_test.log

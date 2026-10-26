@@ -1,0 +1,1 @@
+cd /app && sed -n '1,60p' src/kea/store.ts

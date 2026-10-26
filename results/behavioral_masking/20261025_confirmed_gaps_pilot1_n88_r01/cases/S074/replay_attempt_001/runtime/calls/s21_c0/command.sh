@@ -1,0 +1,1 @@
+cd /app && grep -rn "Export" parser/ | head -20 && grep -n "OpReturn" compiler.go | head -30

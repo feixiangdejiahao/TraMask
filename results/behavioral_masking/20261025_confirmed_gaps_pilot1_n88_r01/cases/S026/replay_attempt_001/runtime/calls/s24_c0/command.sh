@@ -1,0 +1,1 @@
+cd /app && cat checkers/checkers_test.go && echo "===== linttest.go =====" && cat checkers/internal/linttest/linttest.go

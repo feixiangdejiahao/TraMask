@@ -1,0 +1,1 @@
+find packages -maxdepth 3 -type d | head -50 && echo "---" && cat package.json && echo "---" && cat pnpm-workspace.yaml

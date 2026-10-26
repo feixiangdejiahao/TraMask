@@ -1,0 +1,1 @@
+pnpm exec vitest run test/prompts/autocomplete.test.ts -t 'only latest fetch result is applied and previous signal is aborted'

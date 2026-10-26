@@ -1,0 +1,1 @@
+cd /app && wc -l compiled_function_call_test.go && rm -f compiled_function_call_test.go && git status --short

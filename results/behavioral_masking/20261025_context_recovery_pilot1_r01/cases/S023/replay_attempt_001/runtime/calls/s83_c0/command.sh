@@ -1,0 +1,10 @@
+cd /app && python - <<'EOF'
+from typing import TypedDict
+from cattrs import BaseConverter
+class TD(TypedDict):
+    a: int
+    b: str
+bc = BaseConverter()
+r = bc.partial_structure({"a": 1}, TD)
+print(r.value, r.structured_fields, r.failed_fields)
+EOF

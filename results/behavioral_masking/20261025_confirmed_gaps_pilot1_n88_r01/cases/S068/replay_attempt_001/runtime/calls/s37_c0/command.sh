@@ -1,0 +1,1 @@
+cd /app && sed -n '1,50p' sqlite_utils/db.py && sed -n '185,260p' sqlite_utils/db.py

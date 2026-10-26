@@ -1,0 +1,1 @@
+cd /app && cat src/schema/utils/errors.ts && echo "===checkSchemaProps test===" && cat src/schema/utils/checkSchemaProps.unit.test.ts | head -80

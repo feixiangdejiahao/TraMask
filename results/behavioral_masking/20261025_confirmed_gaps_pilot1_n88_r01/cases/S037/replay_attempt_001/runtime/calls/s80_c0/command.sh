@@ -1,0 +1,1 @@
+cd /app && NODE_ENV=development BABEL_ENV=test npx jest 2>&1 | tail -8 && echo "--- tsc ---" && npx tsc --noEmit 2>&1 | head -10 && echo "--- git status ---" && git status --short

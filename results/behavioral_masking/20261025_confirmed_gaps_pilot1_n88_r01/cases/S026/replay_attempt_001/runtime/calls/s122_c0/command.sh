@@ -1,0 +1,1 @@
+cd /app && find checkers/testdata/_integration -name '*.go' -o -name '*.txt' | xargs grep -l '\[[A-Za-z]' 2>/dev/null; echo "--- check for [Foo] style in source ---"; grep -rn '\[[A-Za-z_][A-Za-z0-9_.]*\]' checkers/testdata/_integration --include='*.go' | head -30

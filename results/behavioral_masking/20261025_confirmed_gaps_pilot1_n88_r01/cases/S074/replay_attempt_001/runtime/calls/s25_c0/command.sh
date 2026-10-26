@@ -1,0 +1,1 @@
+cd /app && grep -n "OpClosure\|OpConstant\|FuncLit\|func(" compiler.go | head -40 && sed -n '760,880p' compiler.go

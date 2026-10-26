@@ -1,0 +1,1 @@
+cd /app && git diff aiomonitor/webui/app.py | head -330

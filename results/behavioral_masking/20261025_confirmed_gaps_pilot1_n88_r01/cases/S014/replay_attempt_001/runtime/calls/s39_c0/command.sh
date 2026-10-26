@@ -1,0 +1,1 @@
+cd /app && grep -n "Render options with selection" -A 8 packages/prompts/src/autocomplete.ts | cat -A | head -20

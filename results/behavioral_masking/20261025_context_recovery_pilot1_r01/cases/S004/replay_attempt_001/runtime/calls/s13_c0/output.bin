@@ -1,0 +1,360 @@
+     1	from __future__ import annotations
+     2	
+     3	import asyncio
+     4	import functools
+     5	import logging
+     6	import os
+     7	import shlex
+     8	import signal
+     9	import sys
+    10	import textwrap
+    11	import traceback
+    12	from contextvars import copy_context
+    13	from typing import TYPE_CHECKING, List, TextIO, Tuple
+    14	
+    15	import click
+    16	from prompt_toolkit import PromptSession
+    17	from prompt_toolkit.application.current import get_app_session
+    18	from prompt_toolkit.contrib.telnet.server import TelnetConnection
+    19	from prompt_toolkit.formatted_text import FormattedText
+    20	from prompt_toolkit.shortcuts import print_formatted_text
+    21	from terminaltables import AsciiTable
+    22	
+    23	from .. import console
+    24	from ..context import command_done, current_monitor, current_stdout
+    25	from ..exceptions import MissingTask
+    26	from .completion import (
+    27	    ClickCompleter,
+    28	    complete_signal_names,
+    29	    complete_task_id,
+    30	    complete_trace_id,
+    31	)
+    32	
+    33	if TYPE_CHECKING:
+    34	    from ..monitor import Monitor
+    35	
+    36	log = logging.getLogger(__name__)
+    37	
+    38	__all__ = (
+    39	    "interact",
+    40	    "monitor_cli",
+    41	    "auto_command_done",
+    42	    "auto_async_command_done",
+    43	    "custom_help_option",
+    44	)
+    45	
+    46	
+    47	def _get_current_stdout() -> TextIO:
+    48	    stdout = current_stdout.get(None)
+    49	    if stdout is None:
+    50	        return sys.stdout
+    51	    else:
+    52	        return stdout
+    53	
+    54	
+    55	def _get_current_stderr() -> TextIO:
+    56	    stdout = current_stdout.get(None)
+    57	    if stdout is None:
+    58	        return sys.stderr
+    59	    else:
+    60	        return stdout
+    61	
+    62	
+    63	click.utils._default_text_stdout = _get_current_stdout
+    64	click.utils._default_text_stderr = _get_current_stderr
+    65	
+    66	
+    67	def print_ok(msg: str) -> None:
+    68	    print_formatted_text(
+    69	        FormattedText([
+    70	            ("ansibrightgreen", "✓ "),
+    71	            ("", msg),
+    72	        ])
+    73	    )
+    74	
+    75	
+    76	def print_fail(msg: str) -> None:
+    77	    print_formatted_text(
+    78	        FormattedText([
+    79	            ("ansibrightred", "✗ "),
+    80	            ("", msg),
+    81	        ])
+    82	    )
+    83	
+    84	
+    85	async def interact(self: Monitor, connection: TelnetConnection) -> None:
+    86	    """
+    87	    The interactive loop for each telnet client connection.
+    88	    """
+    89	    await asyncio.sleep(0.3)  # wait until telnet negotiation is done
+    90	    tasknum = len(asyncio.all_tasks(loop=self._monitored_loop))  # TODO: refactor
+    91	    s = "" if tasknum == 1 else "s"
+    92	    intro = (
+    93	        f"\nAsyncio Monitor: {tasknum} task{s} running\n"
+    94	        f"Type help for available commands\n"
+    95	    )
+    96	    print(intro, file=connection.stdout)
+    97	
+    98	    # Override the Click's stdout/stderr reference cache functions
+    99	    # to let them use the correct stdout handler.
+   100	    current_monitor_token = current_monitor.set(self)
+   101	    current_stdout_token = current_stdout.set(connection.stdout)
+   102	    # NOTE: prompt_toolkit's all internal console output automatically uses
+   103	    #       an internal contextvar to keep the stdout consistent with the
+   104	    #       current telnet connection.
+   105	    prompt_session: PromptSession[str] = PromptSession(
+   106	        completer=ClickCompleter(monitor_cli),
+   107	        complete_while_typing=False,
+   108	    )
+   109	    lastcmd = "noop"
+   110	    style_prompt = "#5fd7ff bold"
+   111	    try:
+   112	        while True:
+   113	            try:
+   114	                user_input = (
+   115	                    await prompt_session.prompt_async(
+   116	                        FormattedText([
+   117	                            (style_prompt, self.prompt),
+   118	                        ])
+   119	                    )
+   120	                ).strip()
+   121	            except KeyboardInterrupt:
+   122	                print_fail("To terminate, press Ctrl+D or type 'exit'.")
+   123	            except (EOFError, asyncio.CancelledError):
+   124	                return
+   125	            except Exception:
+   126	                print_fail(traceback.format_exc())
+   127	            else:
+   128	                command_done_event = asyncio.Event()
+   129	                command_done_token = command_done.set(command_done_event)
+   130	                try:
+   131	                    if not user_input and lastcmd is not None:
+   132	                        user_input = lastcmd
+   133	                    args = shlex.split(user_input)
+   134	                    term_size = prompt_session.output.get_size()
+   135	                    ctx = copy_context()
+   136	                    ctx.run(
+   137	                        monitor_cli.main,
+   138	                        args,
+   139	                        prog_name="",
+   140	                        obj=self,
+   141	                        standalone_mode=False,  # type: ignore
+   142	                        max_content_width=term_size.columns,
+   143	                    )
+   144	                    await command_done_event.wait()
+   145	                    if args[0] == "console":
+   146	                        lastcmd = "noop"
+   147	                    else:
+   148	                        lastcmd = user_input
+   149	                except (click.BadParameter, click.UsageError) as e:
+   150	                    print_fail(str(e))
+   151	                except asyncio.CancelledError:
+   152	                    return
+   153	                except Exception:
+   154	                    print_fail(traceback.format_exc())
+   155	                finally:
+   156	                    command_done.reset(command_done_token)
+   157	    finally:
+   158	        current_stdout.reset(current_stdout_token)
+   159	        current_monitor.reset(current_monitor_token)
+   160	
+   161	
+   162	class AliasGroupMixin(click.Group):
+   163	    def __init__(self, *args, **kwargs):
+   164	        super().__init__(*args, **kwargs)
+   165	        self._commands = {}
+   166	        self._aliases = {}
+   167	
+   168	    def command(self, *args, **kwargs):
+   169	        aliases = kwargs.pop("aliases", [])
+   170	        decorator = super().command(*args, **kwargs)
+   171	
+   172	        def _decorator(f):
+   173	            cmd = decorator(click.pass_context(f))
+   174	            if aliases:
+   175	                self._commands[cmd.name] = aliases
+   176	                for alias in aliases:
+   177	                    self._aliases[alias] = cmd.name
+   178	            return cmd
+   179	
+   180	        return _decorator
+   181	
+   182	    def group(self, *args, **kwargs):
+   183	        aliases = kwargs.pop("aliases", [])
+   184	        # keep the same class type
+   185	        kwargs["cls"] = type(self)
+   186	        decorator = super().group(*args, **kwargs)
+   187	        if not aliases:
+   188	            return decorator
+   189	
+   190	        def _decorator(f):
+   191	            cmd = decorator(f)
+   192	            if aliases:
+   193	                self._commands[cmd.name] = aliases
+   194	                for alias in aliases:
+   195	                    self._aliases[alias] = cmd.name
+   196	            return cmd
+   197	
+   198	        return _decorator
+   199	
+   200	    def get_command(self, ctx, cmd_name):
+   201	        if cmd_name in self._aliases:
+   202	            cmd_name = self._aliases[cmd_name]
+   203	        command = super().get_command(ctx, cmd_name)
+   204	        if command:
+   205	            return command
+   206	
+   207	    def format_commands(self, ctx, formatter):
+   208	        commands = []
+   209	        for subcommand in self.list_commands(ctx):
+   210	            cmd = self.get_command(ctx, subcommand)
+   211	            # What is this, the tool lied about a command. Ignore it
+   212	            if cmd is None:
+   213	                continue
+   214	            if cmd.hidden:
+   215	                continue
+   216	            if subcommand in self._commands:
+   217	                aliases = ",".join(sorted(self._commands[subcommand]))
+   218	                subcommand = "{0} ({1})".format(subcommand, aliases)
+   219	            commands.append((subcommand, cmd))
+   220	
+   221	        # allow for 3 times the default spacing
+   222	        if len(commands):
+   223	            limit = formatter.width - 6 - max(len(cmd[0]) for cmd in commands)
+   224	            rows = []
+   225	            for subcommand, cmd in commands:
+   226	                help = cmd.get_short_help_str(limit)
+   227	                rows.append((subcommand, help))
+   228	            if rows:
+   229	                with formatter.section("Commands"):
+   230	                    formatter.write_dl(rows)
+   231	
+   232	
+   233	@click.group(cls=AliasGroupMixin, add_help_option=False)
+   234	def monitor_cli():
+   235	    """
+   236	    To see the usage of each command, run them with "--help" option.
+   237	    """
+   238	    pass
+   239	
+   240	
+   241	def auto_command_done(cmdfunc):
+   242	    @functools.wraps(cmdfunc)
+   243	    def _inner(ctx: click.Context, *args, **kwargs):
+   244	        command_done_event = command_done.get()
+   245	        try:
+   246	            return cmdfunc(ctx, *args, **kwargs)
+   247	        finally:
+   248	            command_done_event.set()
+   249	
+   250	    return _inner
+   251	
+   252	
+   253	def auto_async_command_done(cmdfunc):
+   254	    @functools.wraps(cmdfunc)
+   255	    async def _inner(ctx: click.Context, *args, **kwargs):
+   256	        command_done_event = command_done.get()
+   257	        command_done_event.clear()
+   258	        try:
+   259	            return await cmdfunc(ctx, *args, **kwargs)
+   260	        finally:
+   261	            command_done_event.set()
+   262	
+   263	    return _inner
+   264	
+   265	
+   266	def custom_help_option(cmdfunc):
+   267	    """
+   268	    A custom help option to ensure setting `command_done_event`.
+   269	    """
+   270	
+   271	    @auto_command_done
+   272	    def show_help(ctx: click.Context, param: click.Parameter, value: bool) -> None:
+   273	        if not value:
+   274	            return
+   275	        click.echo(ctx.get_help(), color=ctx.color)
+   276	        ctx.exit()
+   277	
+   278	    return click.option(
+   279	        "--help",
+   280	        is_flag=True,
+   281	        expose_value=False,
+   282	        is_eager=True,
+   283	        callback=show_help,
+   284	        help="Show the help message",
+   285	    )(cmdfunc)
+   286	
+   287	
+   288	@monitor_cli.command(name="noop", hidden=True)
+   289	@auto_command_done
+   290	def do_noop(ctx: click.Context) -> None:
+   291	    pass
+   292	
+   293	
+   294	@monitor_cli.command(name="help", aliases=["?", "h"])
+   295	@custom_help_option
+   296	@auto_command_done
+   297	def do_help(ctx: click.Context) -> None:
+   298	    """Show the list of commands"""
+   299	    click.echo(monitor_cli.get_help(ctx))
+   300	
+   301	
+   302	@monitor_cli.command(name="signal")
+   303	@click.argument("signame", type=str, shell_complete=complete_signal_names)
+   304	@custom_help_option
+   305	@auto_command_done
+   306	def do_signal(ctx: click.Context, signame: str) -> None:
+   307	    """Send a Unix signal"""
+   308	    if hasattr(signal, signame):
+   309	        os.kill(os.getpid(), getattr(signal, signame))
+   310	        print_ok(f"Sent signal to {signame} PID {os.getpid()}")
+   311	    else:
+   312	        print_fail(f"Unknown signal {signame}")
+   313	
+   314	
+   315	@monitor_cli.command(name="stacktrace", aliases=["st", "stack"])
+   316	@custom_help_option
+   317	@auto_command_done
+   318	def do_stacktrace(ctx: click.Context) -> None:
+   319	    """Print a stack trace from the event loop thread"""
+   320	    self: Monitor = ctx.obj
+   321	    stdout = _get_current_stdout()
+   322	    tid = self._event_loop_thread_id
+   323	    assert tid is not None
+   324	    frame = sys._current_frames()[tid]
+   325	    traceback.print_stack(frame, file=stdout)
+   326	
+   327	
+   328	@monitor_cli.command(name="cancel", aliases=["ca"])
+   329	@click.argument("taskid", shell_complete=complete_task_id)
+   330	@custom_help_option
+   331	def do_cancel(ctx: click.Context, taskid: str) -> None:
+   332	    """Cancel an indicated task"""
+   333	    self: Monitor = ctx.obj
+   334	
+   335	    @auto_async_command_done
+   336	    async def _do_cancel(ctx: click.Context) -> None:
+   337	        try:
+   338	            await self.cancel_monitored_task(taskid)
+   339	            print_ok(f"Cancelled task {taskid}")
+   340	        except ValueError as e:
+   341	            print_fail(repr(e))
+   342	
+   343	    task = self._ui_loop.create_task(_do_cancel(ctx))
+   344	    self._termui_tasks.add(task)
+   345	
+   346	
+   347	@monitor_cli.command(name="exit", aliases=["q", "quit"])
+   348	@custom_help_option
+   349	@auto_command_done
+   350	def do_exit(ctx: click.Context) -> None:
+   351	    """Leave the monitor client session"""
+   352	    raise asyncio.CancelledError("exit by user")
+   353	
+   354	
+   355	@monitor_cli.command(name="console")
+   356	@custom_help_option
+   357	def do_console(ctx: click.Context) -> None:
+   358	    """Switch to async Python REPL"""
+   359	    self: Monitor = ctx.obj
+   360	    if not self._console_enabled:

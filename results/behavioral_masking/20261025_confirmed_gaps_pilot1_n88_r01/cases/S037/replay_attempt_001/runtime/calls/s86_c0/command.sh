@@ -1,0 +1,1 @@
+cd /app && cp test/tsd/*.test-d.ts lib/ 2>/dev/null; npx tsd 2>&1 | tail -40

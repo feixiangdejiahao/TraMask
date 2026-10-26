@@ -1,0 +1,1 @@
+cd /app && timeout 300 python -m pytest tests/functional -q 2>&1 | tail -30

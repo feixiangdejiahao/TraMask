@@ -1,0 +1,1 @@
+cd /app && git status --short && echo "---" && git show --stat HEAD | tail -10 && echo "---" && go test -count=1 ./... 2>&1 | tail -12

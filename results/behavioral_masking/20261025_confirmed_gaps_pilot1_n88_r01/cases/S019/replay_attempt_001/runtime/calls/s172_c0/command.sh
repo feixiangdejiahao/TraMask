@@ -1,0 +1,1 @@
+cd /app && sed -i 's/token = `#c_${state.nameCursor}`/token = `#r_${state.nameCursor}`/' src/entity/actions/update/updateItemParams/requiredIfConditions.ts && npx prettier --write src/entity/actions/update/updateItemParams/requiredIfConditions.ts && npx tsc --noEmit 2>&1 | head -10

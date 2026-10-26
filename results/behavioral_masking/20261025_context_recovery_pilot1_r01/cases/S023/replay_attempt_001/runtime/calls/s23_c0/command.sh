@@ -1,0 +1,60 @@
+cd /app && cat > /tmp/repro.py <<'EOF'
+from __future__ import annotations
+from attrs import define, field
+from dataclasses import dataclass
+from typing import List, Dict, Optional, TypedDict
+from cattrs import Converter
+
+@define
+class Inner:
+    x: int
+    y: str = "hello"
+
+@define
+class Outer:
+    inner: Inner
+    z: int = 5
+    items: List[int] = field(factory=list)
+
+c = Converter()
+
+# Basic: one absent field with default
+r = c.partial_structure({"inner": {"x": 1}}, Outer)
+print("basic value:", r.value)
+print("basic is_complete:", r.is_complete)
+print("basic structured:", r.structured_fields)
+print("basic failed:", r.failed_fields)
+print("basic errors:", r.errors)
+
+# required missing -> value None
+@define
+class Req:
+    a: int
+    b: str
+r2 = c.partial_structure({"a": 1}, Req)
+print("req value:", r2.value)
+print("req failed:", r2.failed_fields)
+
+# nested partial -> parent field failed but value used
+@define
+class Inner2:
+    x: int
+    y: str = "default"
+@define
+class Outer2:
+    inner: Inner2
+    z: int
+r3 = c.partial_structure({"inner": {"x": 1}, "z": 5}, Outer2)
+print("nested value:", r3.value)
+print("nested structured:", r3.structured_fields)
+print("nested failed:", r3.failed_fields)
+print("nested errors:", r3.errors)
+
+# refine
+r4 = r3.refine({"inner": {"y": "world"}})
+print("refined value:", r4.value)
+print("refined structured:", r4.structured_fields)
+print("refined failed:", r4.failed_fields)
+print("refined complete:", r4.is_complete)
+EOF
+python /tmp/repro.py

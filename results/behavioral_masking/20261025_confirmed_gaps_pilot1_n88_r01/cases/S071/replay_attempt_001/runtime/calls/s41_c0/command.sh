@@ -1,0 +1,2 @@
+cd /app && sed -i 's/const errorStackUntransform = (v: any, superJson: SuperJSON) => {/const errorStackUntransform = (v: any, _superJson: SuperJSON) => {/' src/transformer.ts
+npx tsc --noEmit 2>&1 | head -20 && echo "TSC OK" && npx vitest run 2>&1 | tail -20

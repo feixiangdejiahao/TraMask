@@ -1,0 +1,1 @@
+cd /app && ls -la && cd backend && git status && git branch -a && git log --oneline -5

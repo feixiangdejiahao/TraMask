@@ -1,0 +1,1 @@
+grep -n "def structure_attrs\|def _structure_attrs\|def gen_structure\|def _gen_structure\|def structure_typeddict\|def gen_structure_typeddict" src/cattrs/converters.py

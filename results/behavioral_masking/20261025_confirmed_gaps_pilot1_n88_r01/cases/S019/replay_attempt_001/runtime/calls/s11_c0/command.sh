@@ -1,0 +1,1 @@
+cd /app && cat src/entity/utils/entityAttributes.ts && grep -rn "entityAttributes" src --include="*.ts" | grep -v ".unit.test.ts" | grep -v ".type.test.ts" | head -50

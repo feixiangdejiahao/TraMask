@@ -1,0 +1,1 @@
+cd /app && sed -n '375,435p' test/jest/atomic-selectors.js

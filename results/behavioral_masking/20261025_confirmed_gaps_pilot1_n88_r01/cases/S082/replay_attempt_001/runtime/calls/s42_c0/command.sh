@@ -1,0 +1,1 @@
+cd /app && sed -n '1,240p' lib/utils/displayutils.js && echo '--- isa ---' && cat lib/utils/isa.js

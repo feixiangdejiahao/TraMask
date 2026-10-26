@@ -1,0 +1,1 @@
+cd /app && for f in checkers/internal/astwalk/visitor.go checkers/internal/astwalk/doc_comment_walker.go checkers/internal/astwalk/comment_walker.go checkers/internal/astwalk/walk_handler.go checkers/internal/astwalk/walker.go; do echo "===== $f ====="; cat "$f"; done

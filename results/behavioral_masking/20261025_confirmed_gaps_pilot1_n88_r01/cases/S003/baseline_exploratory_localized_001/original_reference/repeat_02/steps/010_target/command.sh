@@ -1,0 +1,1 @@
+go test -tags 'compliance exclude_frontend' ./internal/bootstrap -run '^TestComplianceRoutes$' -count=1 -v

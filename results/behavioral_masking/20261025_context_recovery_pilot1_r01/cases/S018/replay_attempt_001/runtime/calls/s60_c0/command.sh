@@ -1,0 +1,1 @@
+cd /app && python -m testtools.run tests.functional.test_baseline tests.functional.test_runtime tests.unit.formatters 2>&1 | tail -20

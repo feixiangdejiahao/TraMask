@@ -1,0 +1,1 @@
+cd /app && find src -name "*.unit.test.ts" | sed 's|/.*||' | sort | uniq -c && echo "---" && find src -name "*.unit.test.ts" | grep -vE "src/(schema|entity|table|utils|options|database|transformers)/" | head

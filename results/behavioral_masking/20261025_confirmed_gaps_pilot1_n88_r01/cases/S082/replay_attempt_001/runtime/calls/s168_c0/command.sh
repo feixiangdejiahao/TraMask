@@ -1,0 +1,1 @@
+cd /app && git stash && timeout 25 npx mocha tests/ci/ci_tests.js --grep "timeout does not wait for idling launchers" 2>&1 | tail -20; git stash pop

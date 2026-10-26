@@ -1,0 +1,1 @@
+cd /app && cat backend/resources/embed.go && echo "=====DATABASE MIGRATION=====" && grep -rn "041\|migrations/sqlite\|migrations/postgres\|embed" backend/internal/database/*.go backend/resources/*.go | head -40

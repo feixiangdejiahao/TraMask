@@ -1,0 +1,1 @@
+cd /app && sed -n '60,120p' lib/app.js

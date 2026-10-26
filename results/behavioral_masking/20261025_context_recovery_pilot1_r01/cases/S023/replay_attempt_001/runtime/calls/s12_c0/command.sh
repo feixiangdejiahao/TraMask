@@ -1,0 +1,1 @@
+git log --all --oneline | head -50; git count-objects -v; ls .git/refs/ -R; cat .git/packed-refs 2>/dev/null | head

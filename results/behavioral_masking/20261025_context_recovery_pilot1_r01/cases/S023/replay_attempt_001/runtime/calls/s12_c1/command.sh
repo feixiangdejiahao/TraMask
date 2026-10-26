@@ -1,0 +1,1 @@
+find / -name "partial*.py" 2>/dev/null | grep -v proc | head -30; find / -path "*cattrs*" -name "*.py" 2>/dev/null | head -30

@@ -1,0 +1,1 @@
+cd /app && grep -n "AutocompleteResolver\|debounceMs\|cacheResults\|clearCache" packages/core/dist/index.d.mts | head -20 && echo "=====PROMPTS=====" && grep -n "debounceMs\|noResultsMessage\|loadingMessage\|staleWhileRevalidate" packages/prompts/dist/index.d.mts | head -20

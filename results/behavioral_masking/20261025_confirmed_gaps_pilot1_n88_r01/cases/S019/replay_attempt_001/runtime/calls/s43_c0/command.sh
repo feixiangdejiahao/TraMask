@@ -1,0 +1,1 @@
+cd /app && nl -ba src/schema/actions/parse/item.ts && echo "===MAP===" && nl -ba src/schema/actions/parse/map.ts

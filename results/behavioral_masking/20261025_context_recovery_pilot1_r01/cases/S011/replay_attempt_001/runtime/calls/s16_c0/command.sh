@@ -1,0 +1,1 @@
+ls node_modules/.bin | grep -E 'ts-node|tsx|jest|tsc'

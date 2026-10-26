@@ -1,0 +1,1 @@
+cd /app && ls /root/go/pkg/mod/github.com/moby/ && find /root/go/pkg/mod/github.com/moby -maxdepth 2 -name 'go.mod' | head

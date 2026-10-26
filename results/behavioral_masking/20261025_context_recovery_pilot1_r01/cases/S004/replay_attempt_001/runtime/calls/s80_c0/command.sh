@@ -1,0 +1,1 @@
+cd /app && sed -n '540,580p' aiomonitor/monitor.py && echo '---' && sed -n '680,700p' aiomonitor/monitor.py

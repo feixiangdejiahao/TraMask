@@ -1,0 +1,1 @@
+cd /app && git diff src/container.ts | sed -n '300,520p'

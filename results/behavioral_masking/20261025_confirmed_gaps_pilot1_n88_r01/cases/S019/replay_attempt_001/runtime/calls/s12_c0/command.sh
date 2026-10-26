@@ -1,0 +1,1 @@
+cd /app && grep -rn "requiredAttributeNames" src --include="*.ts" | grep -v "schema/item/schema.ts" | grep -v "schema/map/schema.ts" | grep -v "entityAttributes" | head -50 && echo "---" && grep -rn "\.required\b" src/entity/actions/put src/entity/actions/update src/entity/actions/parse --include="*.ts" | grep -v test | head -50

@@ -1,0 +1,196 @@
+diff --git a/script.go b/script.go
+index d2023c4..9211949 100644
+--- a/script.go
++++ b/script.go
+@@ -133,12 +133,26 @@ func (s *Script) Compile() (*Compiled, error) {
+ 			return nil, fmt.Errorf("exceeding constant objects limit: %d", cnt)
+ 		}
+ 	}
+-	return &Compiled{
++	compiled := &Compiled{
+ 		globalIndexes: globalIndexes,
+ 		bytecode:      bytecode,
+ 		globals:       globals,
+ 		maxAllocs:     s.maxAllocs,
+-	}, nil
++	}
++	compiled.ctx = &functionContext{
++		bytecode:  bytecode,
++		globals:   globals,
++		maxAllocs: s.maxAllocs,
++	}
++
++	// bind any callable values provided by the user to this compiled
++	// instance so they execute against this instance's globals.
++	for idx, g := range globals {
++		if g != nil {
++			globals[idx] = bindObject(g, compiled.ctx)
++		}
++	}
++	return compiled, nil
+ }
+ 
+ // Run compiles and runs the scripts. Use returned compiled object to access
+@@ -199,6 +213,7 @@ type Compiled struct {
+ 	bytecode      *Bytecode
+ 	globals       []Object
+ 	maxAllocs     int64
++	ctx           *functionContext
+ 	lock          sync.RWMutex
+ }
+ 
+@@ -265,10 +280,19 @@ func (c *Compiled) Clone() *Compiled {
+ 		globals:       make([]Object, len(c.globals)),
+ 		maxAllocs:     c.maxAllocs,
+ 	}
+-	// copy global objects
++	clone.ctx = &functionContext{
++		bytecode:  c.bytecode,
++		globals:   clone.globals,
++		maxAllocs: c.maxAllocs,
++	}
++	// copy global objects and rebind any callable values to the clone's
++	// execution context. Captured free variables are snapshotted at clone
++	// time so the clone is fully isolated from the source instance.
+ 	for idx, g := range c.globals {
+ 		if g != nil {
+-			clone.globals[idx] = g.Copy()
++			if cp := g.Copy(); cp != nil {
++				clone.globals[idx] = bindObject(cp, clone.ctx)
++			}
+ 		}
+ 	}
+ 	return clone
+@@ -342,6 +366,10 @@ func (c *Compiled) Set(name string, value interface{}) error {
+ 	if !ok {
+ 		return fmt.Errorf("'%s' is not defined", name)
+ 	}
+-	c.globals[idx] = obj
++	// bind the value (and any callable values reachable inside arrays/maps)
++	// to this compiled instance. Callables are rebound to this instance's
++	// globals while their captured free variables are snapshotted, isolating
++	// this instance from the value's source instance.
++	c.globals[idx] = bindObject(obj, c.ctx)
+ 	return nil
+ }
+=== objects.go diff (tail) ===
++	seen[o] = bound
++	free := make([]*ObjectPtr, len(o.Free))
++	for i, p := range o.Free {
++		if p != nil && p.Value != nil {
++			val := bindObjectRec(*p.Value, ctx, seen)
++			free[i] = &ObjectPtr{Value: &val}
++		}
++	}
++	bound.Free = free
++	return bound
+ }
+ 
+ // Equals returns true if the value of the type is equal to the value of
+@@ -626,6 +703,106 @@ func (o *CompiledFunction) CanCall() bool {
+ 	return true
+ }
+ 
++// Call invokes the compiled function from Go code. The function executes with
++// the same globals, imports, closure captures, variadic behavior and error
++// formatting as it would inside the VM.
++func (o *CompiledFunction) Call(args ...Object) (Object, error) {
++	if o.ctx == nil {
++		return nil, fmt.Errorf("not callable: %s", o.TypeName())
++	}
++
++	if o.VarArgs {
++		realArgs := o.NumParameters - 1
++		if len(args) < realArgs {
++			return nil, fmt.Errorf(
++				"wrong number of arguments: want>=%d, got=%d",
++				realArgs, len(args))
++		}
++		varArgs := make([]Object, len(args)-realArgs)
++		copy(varArgs, args[realArgs:])
++		args = append(args[:realArgs], &Array{Value: varArgs})
++	} else if len(args) != o.NumParameters {
++		return nil, fmt.Errorf(
++			"wrong number of arguments: want=%d, got=%d",
++			o.NumParameters, len(args))
++	}
++
++	v := NewVM(o.ctx.bytecode, o.ctx.globals, o.ctx.maxAllocs)
++	ret, err := v.runFunction(o, args)
++	if err != nil {
++		return nil, err
++	}
++
++	// bind the result (and any callable values reachable from it) to the
++	// same execution context so it remains callable from Go.
++	return bindObject(ret, o.ctx), nil
++}
++
++// bindObject recursively rebinds callable values to ctx. Composite values are
++// deep-copied so that the resulting object is isolated from the original.
++func bindObject(o Object, ctx *functionContext) Object {
++	return bindObjectRec(o, ctx, make(map[Object]Object))
++}
++
++func bindObjectRec(
++	o Object,
++	ctx *functionContext,
++	seen map[Object]Object,
++) Object {
++	if o == nil {
++		return nil
++	}
++	switch o := o.(type) {
++	case *CompiledFunction:
++		return o.bindContextRec(ctx, seen)
++	case *Array:
++		if bound, ok := seen[o]; ok {
++			return bound
++		}
++		arr := &Array{Value: make([]Object, len(o.Value))}
++		seen[o] = arr
++		for i, e := range o.Value {
++			arr.Value[i] = bindObjectRec(e, ctx, seen)
++		}
++		return arr
++	case *ImmutableArray:
++		if bound, ok := seen[o]; ok {
++			return bound
++		}
++		arr := &ImmutableArray{Value: make([]Object, len(o.Value))}
++		seen[o] = arr
++		for i, e := range o.Value {
++			arr.Value[i] = bindObjectRec(e, ctx, seen)
++		}
++		return arr
++	case *Map:
++		if bound, ok := seen[o]; ok {
++			return bound
++		}
++		m := &Map{Value: make(map[string]Object, len(o.Value))}
++		seen[o] = m
++		for k, e := range o.Value {
++			m.Value[k] = bindObjectRec(e, ctx, seen)
++		}
++		return m
++	case *ImmutableMap:
++		if bound, ok := seen[o]; ok {
++			return bound
++		}
++		m := &ImmutableMap{Value: make(map[string]Object, len(o.Value))}
++		seen[o] = m
++		for k, e := range o.Value {
++			m.Value[k] = bindObjectRec(e, ctx, seen)
++		}
++		return m
++	case *Error:
++		val := bindObjectRec(o.Value, ctx, seen)
++		return &Error{Value: val}
++	default:
++		return o
++	}
++}
++
+ // Error represents an error value.
+ type Error struct {
+ 	ObjectImpl

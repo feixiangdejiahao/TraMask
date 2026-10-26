@@ -1,0 +1,1 @@
+cd /app && pnpm test 2>&1 | grep -E "Test Files|Tests |failed|FAIL" | tail -20

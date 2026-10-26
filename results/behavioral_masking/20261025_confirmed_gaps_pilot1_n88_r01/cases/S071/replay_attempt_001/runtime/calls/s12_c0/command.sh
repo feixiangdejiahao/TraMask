@@ -1,0 +1,1 @@
+cd /app && timeout 15 curl -sSL -w "HTTP %{http_code}\n" https://raw.githubusercontent.com/blitz-js/superjson/master/src/error-options.ts 2>&1 | tail -50

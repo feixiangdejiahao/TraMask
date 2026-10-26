@@ -1,0 +1,1 @@
+sleep 5; cat /tmp/build.log; ps aux | grep '[g]o build' | head

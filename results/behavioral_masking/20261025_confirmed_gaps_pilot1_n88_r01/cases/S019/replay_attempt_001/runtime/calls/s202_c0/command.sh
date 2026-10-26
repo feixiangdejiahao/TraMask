@@ -1,0 +1,1 @@
+cd /app && git status --short && git log --oneline -1 && echo "Branch: $(git branch --show-current)"

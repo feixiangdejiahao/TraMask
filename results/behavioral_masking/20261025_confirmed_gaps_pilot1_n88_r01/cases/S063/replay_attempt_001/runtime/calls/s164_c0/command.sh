@@ -1,0 +1,1 @@
+cd /app && timeout 15 python -c "import pwnlib.tubes.tube; print('ok')"

@@ -1,0 +1,37 @@
+package git
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/format/index"
+)
+
+func TestMergeDeleteModifyReverse(t *testing.T) {
+	r, w := mergeTestRepo(t, map[string]string{"file.txt": "base\n"})
+	require.NoError(t, w.Filesystem.MkdirAll(".git", 0o755))
+	require.NoError(t, w.Checkout(&CheckoutOptions{Branch: plumbing.NewBranchReferenceName("feature"), Create: true}))
+	require.NoError(t, w.Filesystem.Remove("file.txt"))
+	_, err := w.Remove("file.txt")
+	require.NoError(t, err)
+	_, err = w.Commit("delete", &CommitOptions{Author: mergeTestSignature()})
+	require.NoError(t, err)
+	require.NoError(t, w.Checkout(&CheckoutOptions{Branch: plumbing.Master}))
+	mergeWriteCommit(t, w, map[string]string{"file.txt": "modified\n"}, "modify")
+	featureRef, err := r.Reference(plumbing.NewBranchReferenceName("feature"), true)
+	require.NoError(t, err)
+	err = w.Merge(featureRef.Hash(), &MergeOptions{})
+	require.ErrorIs(t, err, ErrMergeConflicts)
+	idx, err := r.Storer.Index()
+	require.NoError(t, err)
+	var stages []index.Stage
+	for _, e := range idx.Entries {
+		if e.Name == "file.txt" {
+			stages = append(stages, e.Stage)
+		}
+	}
+	assert.ElementsMatch(t, []index.Stage{1, 2}, stages)
+}

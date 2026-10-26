@@ -1,0 +1,1 @@
+sleep 20; echo "=== vet ==="; cat /tmp/vet.log; echo "=== settings ==="; cat /tmp/test_settings.log | tail -20

@@ -1,0 +1,1 @@
+grep -rn "initializer\|initialize" src README.md examples package.json 2>/dev/null | head -50; echo '---'; ls src/__tests__; echo '---'; sed -n '140,350p' src/resolvers.ts

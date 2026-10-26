@@ -1,0 +1,1 @@
+which autopep8 black yapf 2>/dev/null; pip list 2>/dev/null | grep -iE "autopep8|black|yapf"

@@ -1,0 +1,1 @@
+cd /app/backend && timeout 28 go build -tags exclude_frontend ./internal/services/ ./internal/huma/handlers/ ./pkg/scheduler/ ./internal/bootstrap/ 2>&1 | head -20; echo "build exit: $?"

@@ -1,0 +1,1 @@
+cd /app && grep -n "recv_raw\|_fillbuffer\|\.buffer" pwnlib/tubes/tube.py | grep -v "def \|recv_raw(" | head -60

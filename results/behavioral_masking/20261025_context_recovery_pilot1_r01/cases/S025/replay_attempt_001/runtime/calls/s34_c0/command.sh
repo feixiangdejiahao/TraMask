@@ -1,0 +1,1 @@
+cd /app && sed -n '230,250p' packages/prompts/src/autocomplete.ts | cat -A | head -30

@@ -1,0 +1,1 @@
+cd /app && python -m pyflakes bandit/core/cache.py bandit/core/manager.py bandit/cli/main.py bandit/formatters/json.py bandit/formatters/text.py bandit/core/metrics.py 2>&1 | head -20 || echo "pyflakes not available"

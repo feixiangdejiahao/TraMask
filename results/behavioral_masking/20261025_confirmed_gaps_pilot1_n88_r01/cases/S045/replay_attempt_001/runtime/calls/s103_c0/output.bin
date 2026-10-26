@@ -1,0 +1,120 @@
+     1	"""``Runnable`` that coalesces concurrent calls with identical inputs."""
+     2	
+     3	from __future__ import annotations
+     4	
+     5	import asyncio
+     6	import threading
+     7	from abc import ABC, abstractmethod
+     8	from collections.abc import AsyncIterator, Iterator, Sequence
+     9	from concurrent.futures import FIRST_COMPLETED, wait
+    10	from dataclasses import dataclass
+    11	from typing import TYPE_CHECKING, Any, Literal, cast, overload
+    12	
+    13	from typing_extensions import override
+    14	
+    15	from langchain_core.runnables.base import RunnableBindingBase
+    16	from langchain_core.runnables.config import (
+    17	    RunnableConfig,
+    18	    ensure_config,
+    19	    get_config_list,
+    20	    get_executor_for_config,
+    21	)
+    22	from langchain_core.runnables.utils import (
+    23	    Input,
+    24	    Output,
+    25	    gather_with_concurrency,
+    26	    gated_coro,
+    27	)
+    28	
+    29	if TYPE_CHECKING:
+    30	    from langchain_core.callbacks.manager import (
+    31	        AsyncCallbackManagerForChainRun,
+    32	        CallbackManagerForChainRun,
+    33	    )
+    34	
+    35	__all__ = ["CoalesceBackend", "CoalesceStats", "InMemoryCoalesceBackend"]
+    36	
+    37	
+    38	@dataclass(frozen=True)
+    39	class CoalesceStats:
+    40	    """Statistics about a coalescing backend."""
+    41	
+    42	    active: int
+    43	    """Number of in-flight (not yet completed) unique executions."""
+    44	
+    45	    coalesced: int
+    46	    """Cumulative number of calls that joined an in-flight execution."""
+    47	
+    48	    total: int
+    49	    """Cumulative number of calls registered with the backend."""
+    50	
+    51	
+    52	def _canonical_key(key: Any) -> Any:
+    53	    """Produce a hashable key that is insensitive to dictionary key ordering.
+    54	
+    55	    The coalescing key is based only on the input value. Dictionaries are
+    56	    canonicalized by sorting their items so that two dictionaries containing the
+    57	    same key/value pairs in different orders map to the same key.
+    58	    """
+    59	    if isinstance(key, dict):
+    60	        items = [(_canonical_key(k), _canonical_key(v)) for k, v in key.items()]
+    61	        items.sort(key=repr)
+    62	        return tuple(items)
+    63	    if isinstance(key, (list, tuple)):
+    64	        return tuple(_canonical_key(item) for item in key)
+    65	    if isinstance(key, (set, frozenset)):
+    66	        return frozenset(_canonical_key(item) for item in key)
+    67	    try:
+    68	        hash(key)
+    69	    except TypeError:
+    70	        # Fallback for unhashable custom objects. Using repr is deterministic for
+    71	        # immutable values; dicts/lists/tuples/sets are handled above.
+    72	        return ("__repr__", repr(key))
+    73	    return key
+    74	
+    75	
+    76	async def _aiter_single(value: Any) -> AsyncIterator[Any]:
+    77	    """Return an async iterator that yields a single value."""
+    78	    yield value
+    79	
+    80	
+    81	class _SyncWaiter:
+    82	    __slots__ = ("event", "result", "error", "cancelled")
+    83	
+    84	    def __init__(self) -> None:
+    85	        self.event = threading.Event()
+    86	        self.result: Any = None
+    87	        self.error: BaseException | None = None
+    88	        self.cancelled = False
+    89	
+    90	
+    91	class _AsyncWaiter:
+    92	    __slots__ = ("loop", "event", "result", "error", "cancelled")
+    93	
+    94	    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    95	        self.loop = loop
+    96	        self.event = asyncio.Event()
+    97	        self.result: Any = None
+    98	        self.error: BaseException | None = None
+    99	        self.cancelled = False
+   100	
+   101	
+   102	class _Execution:
+   103	    __slots__ = (
+   104	        "completed",
+   105	        "cancelled",
+   106	        "result",
+   107	        "error",
+   108	        "sync_waiters",
+   109	        "async_waiters",
+   110	    )
+   111	
+   112	    def __init__(self) -> None:
+   113	        self.completed = False
+   114	        self.cancelled = False
+   115	        self.result: Any = None
+   116	        self.error: BaseException | None = None
+   117	        self.sync_waiters: list[_SyncWaiter] = []
+   118	        self.async_waiters: list[_AsyncWaiter] = []
+   119	
+   120	

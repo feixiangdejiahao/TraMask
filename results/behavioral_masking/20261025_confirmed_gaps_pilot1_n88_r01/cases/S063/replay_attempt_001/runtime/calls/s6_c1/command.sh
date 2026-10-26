@@ -1,0 +1,1 @@
+cd /app && find . -iname '*mux*' -o -iname '*channel*' | head -20; echo '---'; ls pwnlib/tubes/tests 2>/dev/null; find . -path '*/tests/*' -name '*.py' | head -30

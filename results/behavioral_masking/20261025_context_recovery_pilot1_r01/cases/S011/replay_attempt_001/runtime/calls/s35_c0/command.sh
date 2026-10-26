@@ -1,0 +1,1 @@
+cd /app && npx jest src/__tests__/initialize.test.ts --no-coverage 2>&1 | head -120

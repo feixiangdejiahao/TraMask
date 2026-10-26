@@ -1,0 +1,1 @@
+cd /app && npx prettier --write src/container.ts src/__tests__/container.initialize.test.ts && npm test 2>&1 | tail -25

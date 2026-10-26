@@ -1,0 +1,1 @@
+cd /app && cat src/entity/actions/parse/entityParser.ts && echo "===PARSER FILES===" && ls src/schema/actions/parse 2>/dev/null; find src -path "*parse*" -name "*.ts" | grep -v test | head -50

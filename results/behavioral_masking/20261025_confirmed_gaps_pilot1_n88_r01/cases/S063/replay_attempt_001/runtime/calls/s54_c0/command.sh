@@ -1,0 +1,1 @@
+cd /app && sed -i '51d' /tmp/test_halfclose.py && nl -ba /tmp/test_halfclose.py | sed -n '48,58p' && timeout 30 python /tmp/test_halfclose.py

@@ -1,0 +1,1 @@
+cd /app && cat backend/internal/models/base.go && echo "=====VULN MODEL=====" && cat backend/internal/models/vulnerability_scan.go

@@ -1,0 +1,1 @@
+cd /app && head -30 checkers/testdata/typeDefFirst/positive_tests.go | cat -A | head -30; echo "===== whyNoLint ====="; head -40 checkers/testdata/whyNoLint/positive_tests.go | cat -A | head -40

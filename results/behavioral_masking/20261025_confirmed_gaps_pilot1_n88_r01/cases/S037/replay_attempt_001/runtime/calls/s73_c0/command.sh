@@ -1,0 +1,1 @@
+cd /app && npx tsc --noEmit 2>&1 | head -20 && echo "--- rollup ---" && npx rollup -c 2>&1 | tail -30

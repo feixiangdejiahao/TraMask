@@ -1,0 +1,1 @@
+cd /app && timeout 400 python -m pytest tests -q 2>&1 | tail -5 && git status --short

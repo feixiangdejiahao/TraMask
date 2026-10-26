@@ -1,0 +1,1 @@
+cd /app && git describe --tags --always && git log --oneline v3.0.0 -5 && git diff --stat master v3.0.0 | tail -30

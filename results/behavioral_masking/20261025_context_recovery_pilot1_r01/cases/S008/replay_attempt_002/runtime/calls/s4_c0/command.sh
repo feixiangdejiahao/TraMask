@@ -1,0 +1,1 @@
+find / -maxdepth 4 -name go.mod 2>/dev/null | head -20

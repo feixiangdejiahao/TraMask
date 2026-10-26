@@ -1,0 +1,1 @@
+cd /app && grep -n "No matches found" packages/prompts/src/autocomplete.ts && nl -ba packages/prompts/src/autocomplete.ts | sed -n '380,420p'

@@ -1,0 +1,1 @@
+ps -o pid,etime,pcpu,stat,cmd -p 25293; ps aux | grep -E 'go build|compile' | grep -v grep | head -5

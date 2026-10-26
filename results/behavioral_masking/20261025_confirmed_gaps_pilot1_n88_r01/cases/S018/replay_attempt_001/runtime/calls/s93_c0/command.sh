@@ -1,0 +1,1 @@
+cd /app && grep -n "^class \|^@pytest.mark" tests/test_rrule.py | head -40

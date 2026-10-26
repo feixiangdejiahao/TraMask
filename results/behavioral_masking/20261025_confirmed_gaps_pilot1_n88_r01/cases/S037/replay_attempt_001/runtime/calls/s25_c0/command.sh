@@ -1,0 +1,1 @@
+cd /app && sed -n '1,115p' src/types.ts && echo '--- context type ---' && sed -n '630,675p' src/types.ts

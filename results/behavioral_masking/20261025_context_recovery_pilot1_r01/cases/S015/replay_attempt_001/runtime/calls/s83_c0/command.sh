@@ -1,0 +1,2 @@
+cd /app && rm -rf /tmp/frtest && mkdir -p /tmp/frtest && printf 'import os\nos.system("ls")\n' > /tmp/frtest/a.py
+python -m bandit /tmp/frtest/a.py --incremental --force-rescan --cache-dir /tmp/frtest/.cache -f json --exit-zero 2>/dev/null >/tmp/frjson; python -c "import json; print(json.load(open('/tmp/frjson'))['cache_info'])"; python -m bandit --cache-summary --cache-dir /tmp/frtest/.cache 2>/dev/null

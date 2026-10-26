@@ -1,0 +1,1 @@
+sed -n '1049,1511p' sqlite_utils/db.py

@@ -1,0 +1,1 @@
+cd /app && sed -n '527,640p' backend/internal/services/settings_service.go

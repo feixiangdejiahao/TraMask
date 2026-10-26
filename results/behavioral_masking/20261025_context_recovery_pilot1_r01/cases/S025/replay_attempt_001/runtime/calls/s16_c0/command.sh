@@ -1,0 +1,1 @@
+ls -la packages/prompts/node_modules/@clack packages/core/node_modules/@clack 2>/dev/null; echo "---"; readlink -f node_modules/@clack/core 2>/dev/null || true; echo "---"; cat pnpm-workspace.yaml; echo "---"; ls node_modules/.pnpm 2>/dev/null | head

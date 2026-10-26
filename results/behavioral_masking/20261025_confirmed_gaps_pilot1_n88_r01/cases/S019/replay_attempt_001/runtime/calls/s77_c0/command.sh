@@ -1,0 +1,1 @@
+cd /app && sed -n '10,22p' src/schema/any/schema_.ts

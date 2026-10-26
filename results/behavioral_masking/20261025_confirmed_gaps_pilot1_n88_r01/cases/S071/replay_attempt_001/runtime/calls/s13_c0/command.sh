@@ -1,0 +1,1 @@
+find / -path /proc -prune -o -type f \( -name "error-stack*" -o -name "error-options*" -o -name "error-sanitizer*" -o -name "error-class-registry*" \) -print 2>/dev/null | head -20

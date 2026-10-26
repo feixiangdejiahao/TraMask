@@ -1,0 +1,1 @@
+cd /app && timeout 25 npx prettier --check 'src/**/*.(js|ts)' 2>&1 | tail -5; echo "EXIT"

@@ -1,0 +1,1 @@
+cd /app && git tag | tail -30

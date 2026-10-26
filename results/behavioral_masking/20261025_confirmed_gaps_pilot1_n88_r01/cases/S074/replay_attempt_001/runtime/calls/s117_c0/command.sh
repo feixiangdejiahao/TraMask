@@ -1,0 +1,1 @@
+cd /app && git status --short && ls zz_* 2>/dev/null; echo "---diff stat---" && git diff --stat

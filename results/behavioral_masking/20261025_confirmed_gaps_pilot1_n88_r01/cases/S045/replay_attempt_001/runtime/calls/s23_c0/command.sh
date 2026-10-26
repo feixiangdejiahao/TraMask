@@ -1,0 +1,1 @@
+timeout 5 curl -sSI https://pypi.org 2>&1 | head -5 || echo "no network"

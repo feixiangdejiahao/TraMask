@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/dto/getSchemaDTO/primitive.ts && echo "===LIST get===" && cat src/schema/actions/dto/getSchemaDTO/list.ts

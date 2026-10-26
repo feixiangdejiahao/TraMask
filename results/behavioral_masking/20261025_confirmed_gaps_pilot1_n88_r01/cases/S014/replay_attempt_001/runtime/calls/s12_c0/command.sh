@@ -1,0 +1,1 @@
+git log --oneline -20 && echo "=====" && cat packages/core/package.json && echo "=====" && cat packages/prompts/package.json

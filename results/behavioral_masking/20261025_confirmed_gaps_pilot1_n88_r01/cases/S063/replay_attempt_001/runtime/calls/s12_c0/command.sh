@@ -1,0 +1,1 @@
+cd /app && find . -name '*.py' | xargs grep -ln "class EOFError" 2>/dev/null; python -c "import pwnlib.exceptions as e; print(e.__file__)" 2>/dev/null; find / -name "exceptions.py" -path "*pwnlib*" 2>/dev/null | head

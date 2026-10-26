@@ -1,0 +1,1 @@
+cd /app && grep -n "OpSuspend\|OpHalt" vm.go && sed -n '220,300p' vm.go

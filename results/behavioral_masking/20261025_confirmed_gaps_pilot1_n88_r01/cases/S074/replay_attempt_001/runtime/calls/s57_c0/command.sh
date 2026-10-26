@@ -1,0 +1,1 @@
+cd /app && grep -n "VarArgs\|\.\.\." parser/*.go | head -20

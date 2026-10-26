@@ -1,0 +1,1 @@
+cat packages/prompts/src/autocomplete.ts && echo "=====COMMON=====" && cat packages/prompts/src/common.ts

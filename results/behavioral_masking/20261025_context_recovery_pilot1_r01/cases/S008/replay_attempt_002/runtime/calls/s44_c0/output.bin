@@ -1,0 +1,180 @@
+package middleware
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"path"
+	"strings"
+	"time"
+
+	"github.com/getarcaneapp/arcane/backend/pkg/libarcane/edge"
+	wsutil "github.com/getarcaneapp/arcane/backend/pkg/libarcane/ws"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+)
+
+const (
+	apiEnvironmentsPrefix  = "/api/environments/"
+	environmentsPathMarker = "/environments/"
+
+	errEnvironmentNotFound      = "Environment not found"
+	errEnvironmentDisabled      = "Environment is disabled"
+	errFailedCreateProxyRequest = "Failed to create proxy request"
+	errProxyRequestFailedPrefix = "Proxy request failed:"
+	errUnauthorized             = "Authentication required to access remote environments"
+
+	// proxyTimeout is intentionally generous because some proxied operations
+	// (e.g., image pulls with progress streaming) can take multiple minutes.
+	proxyTimeout = 30 * time.Minute
+)
+
+// managementEndpointSet contains paths handled locally and never proxied to remote environments.
+var managementEndpointSet = map[string]struct{}{
+	"/test":            {},
+	"/heartbeat":       {},
+	"/sync-registries": {},
+	"/sync":            {},
+	"/deployment":      {},
+	"/agent/pair":      {},
+	"/version":         {},
+	"/settings":        {},
+	"/job-schedules":   {},
+	"/jobs":            {},
+}
+
+// EnvResolver resolves an environment ID to its connection details.
+// Returns: apiURL, accessToken, enabled, error
+type EnvResolver func(ctx context.Context, id string) (string, *string, bool, error)
+
+// AuthValidator validates authentication for a request.
+// Returns true if the request is authenticated, false otherwise.
+type AuthValidator func(ctx context.Context, c *gin.Context) bool
+
+// EnvironmentMiddleware proxies requests for remote environments to their respective agents.
+type EnvironmentMiddleware struct {
+	localID       string
+	paramName     string
+	resolver      EnvResolver
+	authValidator AuthValidator
+	httpClient    *http.Client
+	registry      *edge.TunnelRegistry
+}
+
+// NewEnvProxyMiddlewareWithParam creates middleware that proxies requests to remote environments.
+// - localID: the ID representing the local environment (requests to this ID are not proxied)
+// - paramName: the URL parameter name containing the environment ID (e.g., "id")
+// - resolver: function to resolve environment ID to connection details
+// - envService: environment service for additional lookups
+// - authValidator: function to validate authentication before proxying (required for security)
+func NewEnvProxyMiddlewareWithParam(localID, paramName string, resolver EnvResolver, authValidator AuthValidator) gin.HandlerFunc {
+	return NewEnvProxyMiddlewareWithParamAndRegistry(localID, paramName, resolver, authValidator, edge.GetRegistry())
+}
+
+// NewEnvProxyMiddlewareWithParamAndRegistry creates middleware with an injected tunnel registry.
+func NewEnvProxyMiddlewareWithParamAndRegistry(
+	localID,
+	paramName string,
+	resolver EnvResolver,
+	authValidator AuthValidator,
+	registry *edge.TunnelRegistry,
+) gin.HandlerFunc {
+	if registry == nil {
+		registry = edge.NewTunnelRegistry()
+	}
+
+	m := &EnvironmentMiddleware{
+		localID:       localID,
+		paramName:     paramName,
+		resolver:      resolver,
+		authValidator: authValidator,
+		httpClient:    &http.Client{Timeout: proxyTimeout},
+		registry:      registry,
+	}
+	return m.Handle
+}
+
+// Handle is the main middleware handler.
+func (m *EnvironmentMiddleware) Handle(c *gin.Context) {
+	envID := m.extractEnvironmentID(c)
+
+	// Local environment or no environment - continue to next handler
+	if envID == "" || envID == m.localID {
+		c.Next()
+		return
+	}
+
+	// Only proxy requests with additional path segments after the environment ID
+	// Examples: /api/environments/{id}/containers, /api/environments/{id}/projects
+	// Not proxied: /api/environments/{id} (management operations)
+	if !m.hasResourcePath(c, envID) {
+		c.Next()
+		return
+	}
+
+	// SECURITY: Validate authentication BEFORE proxying to remote environments.
+	// The proxy attaches the agent token to forwarded requests, which grants full access
+	// on the remote agent. Without this check, unauthenticated users could access
+	// remote environment resources.
+	if m.authValidator != nil && !m.authValidator(c.Request.Context(), c) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"data":    gin.H{"error": errUnauthorized},
+		})
+		c.Abort()
+		return
+	}
+
+	// Resolve remote environment
+	apiURL, accessToken, enabled, err := m.resolver(c.Request.Context(), envID)
+	if err != nil || apiURL == "" {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"data":    gin.H{"error": errEnvironmentNotFound},
+		})
+		c.Abort()
+		return
+	}
+
+	if !enabled {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"data":    gin.H{"error": errEnvironmentDisabled},
+		})
+		c.Abort()
+		return
+	}
+
+	isEdgeEnvironment := isEdgeEnvironmentURLInternal(apiURL)
+
+	if m.proxyActiveEdgeTunnelInternal(c, envID, accessToken) {
+		return
+	}
+
+	if isEdgeEnvironment {
+		if m.proxyRecoveredEdgeTunnelInternal(c, envID, accessToken) {
+			return
+		}
+
+		slog.WarnContext(c.Request.Context(), "No active edge tunnel for environment", "environment_id", envID)
+		m.abortEdgeTunnelUnavailable(c)
+		return
+	}
+
+	target := m.buildTargetURL(c, envID, apiURL)
+
+	if m.isWebSocketUpgrade(c) {
+		m.proxyWebSocket(c, target, accessToken, envID)
+	} else {
+		m.proxyHTTP(c, target, accessToken)
+	}
+}
+
+func (m *EnvironmentMiddleware) proxyActiveEdgeTunnelInternal(c *gin.Context, envID string, accessToken *string) bool {
+	tunnel, ok := m.getActiveEdgeTunnelInternal(envID)
+	if !ok {
+		return false
+	}

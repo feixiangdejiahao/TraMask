@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary 9d2d84bb1564e9513287998c56ccf16c01c19008 -- .

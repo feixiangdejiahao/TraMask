@@ -1,0 +1,2 @@
+cd /app/backend && nohup go vet -tags exclude_frontend ./internal/models/ ./internal/services/ ./internal/huma/handlers/ ./pkg/scheduler/ ./internal/bootstrap/ > /tmp/vet.log 2>&1 &
+echo "vet started pid $!"

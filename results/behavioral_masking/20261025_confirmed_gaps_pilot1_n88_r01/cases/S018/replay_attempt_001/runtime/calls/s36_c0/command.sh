@@ -1,0 +1,1 @@
+cd /app && grep -rn "to_ical\|from_str\|TZID\|VCALENDAR\|VTIMEZONE\|rruleset\|__repr__\|count()" docs/rrule.rst docs/*.rst 2>/dev/null | head -50

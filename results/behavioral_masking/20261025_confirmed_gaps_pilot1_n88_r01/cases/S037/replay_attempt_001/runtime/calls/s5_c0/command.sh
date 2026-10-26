@@ -1,0 +1,1 @@
+cd /app && for f in src/kea/context.ts src/kea/kea.ts src/kea/build.ts src/kea/mount.ts src/kea/reducer.ts src/kea/store.ts src/kea/plugins.ts; do echo "===== $f ====="; cat "$f"; done

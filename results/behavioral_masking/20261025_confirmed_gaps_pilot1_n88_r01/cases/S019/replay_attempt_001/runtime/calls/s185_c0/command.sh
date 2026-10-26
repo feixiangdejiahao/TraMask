@@ -1,0 +1,1 @@
+cd /app && sed -n '1,100p' src/schema/types/inputValue.type.test.ts

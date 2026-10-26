@@ -1,0 +1,1 @@
+cd /app && find checkers/testdata/_importable -type f | head -20 && echo "---" && cat checkers/testdata/_importable/*/go.mod 2>/dev/null | head; find checkers/testdata/_importable -name '*.go' | head -10 | xargs -I{} sh -c 'echo "=== {} ==="; head -20 {}'

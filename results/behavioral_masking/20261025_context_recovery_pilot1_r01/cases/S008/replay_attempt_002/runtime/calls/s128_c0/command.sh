@@ -1,0 +1,1 @@
+cd /app && grep -n "types" backend/go.mod | head -10 && grep -n "replace" backend/go.mod | head

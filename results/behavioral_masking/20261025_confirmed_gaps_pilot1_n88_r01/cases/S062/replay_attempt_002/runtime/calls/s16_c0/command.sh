@@ -1,0 +1,664 @@
+cd /app && cat > pwnlib/tubes/mux.py <<'PYEOF'
+"""
+Tube multiplexer
+================
+
+Implements a multiplexer which allows multiple independent, bidirectional
+logical channels over a single underlying tube.
+"""
+
+import atexit
+import collections
+import queue
+import struct
+import threading
+import time
+
+from pwnlib.context import context
+from pwnlib.log import getLogger
+from pwnlib.tubes.buffer import Buffer
+from pwnlib.tubes.tube import tube
+
+log = getLogger(__name__)
+
+# Frame types
+_OPEN   = 1
+_ACK    = 2
+_NAK    = 3
+_DATA   = 4
+_CLOSE  = 5
+_EOF    = 6   # half-close: sender's outgoing direction is closed
+_PAUSE  = 7
+_RESUME = 8
+
+_HEADER = struct.Struct('>IBH')  # length, type, channel_id
+
+
+def _is_channel_id(value):
+    """Return True if value is an integer channel id (and not a bool)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+class TubeMultiplexer(object):
+    """
+    Multiplexes multiple logical channels over a single underlying tube.
+
+    A :class:`TubeMultiplexer` is created around an existing :class:`~pwnlib.tubes.tube.tube`
+    instance.  The remote end of the underlying tube is expected to be another
+    :class:`TubeMultiplexer` (or a compatible implementation) speaking the same
+    simple frame protocol.
+
+    Channels are created with :meth:`open_channel` and received from the remote
+    end with :meth:`accept_channel`.
+
+    Arguments:
+        underlying(tube): The tube to multiplex over.
+        max_channels(int): Maximum number of simultaneously open channels.
+            Must be in the range ``[1, 65535]``.
+        high_water_mark(int): Number of bytes buffered per channel at which
+            the remote sender is paused.
+        low_water_mark(int): Number of bytes buffered per channel at which
+            the remote sender is resumed.
+    """
+
+    def __init__(self, underlying, max_channels=256,
+                 high_water_mark=1048576, low_water_mark=262144):
+        if not isinstance(underlying, tube):
+            raise TypeError('underlying must be a tube, got %r' % type(underlying).__name__)
+
+        if not isinstance(max_channels, int) or isinstance(max_channels, bool) or \
+           not 1 <= max_channels <= 65535:
+            raise ValueError('max_channels must be an integer in [1, 65535]')
+
+        if low_water_mark > high_water_mark:
+            raise ValueError('low_water_mark cannot be greater than high_water_mark')
+
+        self._underlying = underlying
+        self._max_channels = max_channels
+        self._high_water_mark = high_water_mark
+        self._low_water_mark = low_water_mark
+
+        # channel_id -> MuxChannel currently known locally
+        self.channels = {}
+
+        self._closed = False
+        self._lock = threading.RLock()
+        self._send_lock = threading.Lock()
+
+        # Channels opened by the remote end and waiting for accept_channel()
+        self._pending_accept = collections.deque()
+        self._accept_cond = threading.Condition(self._lock)
+
+        # channel_id -> queue.Queue used to wait for OPEN acknowledgements
+        self._open_results = {}
+
+        # IDs which have been closed locally but are awaiting confirmation
+        # from the remote end before they may be reused.
+        self._closing_ids = set()
+
+        self._reader_thread = context.Thread(target=self._read_loop, name='mux-reader')
+        self._reader_thread.daemon = True
+        self._reader_thread.start()
+
+        atexit.register(self.close)
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+    @property
+    def max_channels(self):
+        return self._max_channels
+
+    @property
+    def high_water_mark(self):
+        return self._high_water_mark
+
+    @high_water_mark.setter
+    def high_water_mark(self, value):
+        if self._low_water_mark is not None and value is not None and self._low_water_mark > value:
+            raise ValueError('low_water_mark cannot be greater than high_water_mark')
+        self._high_water_mark = value
+        for ch in list(self.channels.values()):
+            ch._recv_buffer.set_watermarks(high=value)
+
+    @property
+    def low_water_mark(self):
+        return self._low_water_mark
+
+    @low_water_mark.setter
+    def low_water_mark(self, value):
+        if value is not None and self._high_water_mark is not None and value > self._high_water_mark:
+            raise ValueError('low_water_mark cannot be greater than high_water_mark')
+        self._low_water_mark = value
+        for ch in list(self.channels.values()):
+            ch._recv_buffer.set_watermarks(low=value)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def open_channel(self, channel_id=None, timeout=None):
+        """
+        Opens a new channel and waits for the remote end to acknowledge it.
+
+        Arguments:
+            channel_id(int): The channel id to use.  When ``None``, a unique
+                id in ``[1, max_channels]`` is automatically allocated.
+            timeout(float): Maximum time in seconds to wait for the remote
+                acknowledgement.
+
+        Returns:
+            MuxChannel: The newly opened channel.
+
+        Raises:
+            TypeError: If ``channel_id`` is not an integer.
+            ValueError: If ``channel_id`` is out of range, a duplicate, or
+                exceeds the multiplexer capacity.
+            TimeoutError: If the remote end does not acknowledge in time.
+            EOFError: If the multiplexer is closed.
+        """
+        with self._lock:
+            if self._closed:
+                raise EOFError('multiplexer is closed')
+
+            auto = False
+            if channel_id is None:
+                channel_id = self._allocate_id()
+                auto = True
+            else:
+                self._validate_channel_id(channel_id)
+
+            if channel_id in self.channels or channel_id in self._closing_ids:
+                raise ValueError('channel id %d is already in use' % channel_id)
+            if len(self.channels) >= self._max_channels:
+                raise ValueError('multiplexer has reached its maximum of %d channels' % self._max_channels)
+
+            ch = MuxChannel(self, channel_id)
+            self.channels[channel_id] = ch
+            ack_queue = queue.Queue(maxsize=1)
+            self._open_results[channel_id] = ack_queue
+
+        try:
+            self._write_frame(_OPEN, channel_id)
+        except EOFError:
+            self._discard_open(channel_id, ch)
+            raise EOFError('multiplexer is closed')
+
+        try:
+            result = ack_queue.get(timeout=timeout)
+        except queue.Empty:
+            self._discard_open(channel_id, ch)
+            raise TimeoutError('timed out waiting for acknowledgement of channel %d' % channel_id)
+
+        if result is False:
+            self._discard_open(channel_id, ch)
+            if auto:
+                # The remote rejected our auto-allocated id (likely a
+                # simultaneous allocation).  Retry with a fresh id.
+                return self.open_channel(None, timeout=timeout)
+            raise ValueError('remote end rejected channel id %d' % channel_id)
+
+        if result == 'closed':
+            self._discard_open(channel_id, ch)
+            raise EOFError('multiplexer is closed')
+
+        return ch
+
+    def accept_channel(self, timeout=None):
+        """
+        Waits for the remote end to open a channel.
+
+        Arguments:
+            timeout(float): Maximum time in seconds to wait.
+
+        Returns:
+            MuxChannel: The accepted channel, or ``None`` on timeout.
+
+        Raises:
+            EOFError: If the multiplexer is closed.
+        """
+        deadline = None
+        if timeout is not None:
+            deadline = time.monotonic() + timeout
+
+        with self._accept_cond:
+            while not self._pending_accept and not self._closed:
+                if deadline is None:
+                    self._accept_cond.wait()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None
+                    self._accept_cond.wait(remaining)
+
+            if self._closed:
+                raise EOFError('multiplexer is closed')
+
+            if not self._pending_accept:
+                return None
+
+            return self._pending_accept.popleft()
+
+    def close(self):
+        """Closes all channels and the underlying tube.  Idempotent."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+
+        # Unblock any thread waiting in accept_channel()
+        with self._accept_cond:
+            self._accept_cond.notify_all()
+
+        # Signal EOF to every local channel
+        for ch in list(self.channels.values()):
+            with ch._cond:
+                ch._closed = True
+                ch._send_eof = True
+                ch._recv_eof = True
+                ch._cond.notify_all()
+
+        # Wake any threads waiting for an OPEN acknowledgement
+        with self._lock:
+            for ack_queue in self._open_results.values():
+                try:
+                    ack_queue.put_nowait('closed')
+                except queue.Full:
+                    pass
+            self._open_results.clear()
+
+        try:
+            self._underlying.close()
+        except Exception:
+            pass
+
+        # Give the reader thread a moment to notice the EOF, but do not block
+        # forever if it is stuck.
+        if self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=1.0)
+
+    # ------------------------------------------------------------------
+    # Channel registration helpers
+    # ------------------------------------------------------------------
+    def _validate_channel_id(self, channel_id):
+        if not _is_channel_id(channel_id):
+            raise TypeError('channel id must be an integer, got %r' % type(channel_id).__name__)
+        if not 1 <= channel_id <= 65535:
+            raise ValueError('channel id must be in [1, 65535]')
+        if channel_id > self._max_channels:
+            raise ValueError('channel id %d exceeds max_channels %d' % (channel_id, self._max_channels))
+
+    def _allocate_id(self):
+        for cid in range(1, self._max_channels + 1):
+            if cid not in self.channels and cid not in self._closing_ids:
+                return cid
+        raise ValueError('multiplexer has reached its maximum of %d channels' % self._max_channels)
+
+    def _discard_open(self, channel_id, ch):
+        with self._lock:
+            self._open_results.pop(channel_id, None)
+            if self.channels.get(channel_id) is ch:
+                del self.channels[channel_id]
+        try:
+            self._write_frame(_CLOSE, channel_id)
+        except EOFError:
+            pass
+
+    def _channel_closed(self, ch):
+        """Called when the local user closes a channel."""
+        with self._lock:
+            if self.channels.get(ch.channel_id) is ch:
+                del self.channels[ch.channel_id]
+            self._closing_ids.add(ch.channel_id)
+        try:
+            self._write_frame(_CLOSE, ch.channel_id)
+        except EOFError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Frame protocol
+    # ------------------------------------------------------------------
+    def _write_frame(self, ftype, channel_id, payload=b''):
+        with self._lock:
+            if self._closed:
+                raise EOFError('multiplexer is closed')
+        data = _HEADER.pack(2 + len(payload), ftype, channel_id) + payload
+        with self._send_lock:
+            if self._closed:
+                raise EOFError('multiplexer is closed')
+            try:
+                self._underlying.send(data)
+            except EOFError:
+                self.close()
+                raise
+
+    def _read_frame(self):
+        header = self._underlying.recvn(_HEADER.size, timeout=None)
+        if len(header) < _HEADER.size:
+            raise EOFError('underlying tube closed')
+        length, ftype, channel_id = _HEADER.unpack(header)
+        payload_len = length - 2
+        if payload_len < 0:
+            raise EOFError('invalid frame')
+        payload = b''
+        if payload_len:
+            payload = self._underlying.recvn(payload_len, timeout=None)
+            if len(payload) < payload_len:
+                raise EOFError('underlying tube closed')
+        return ftype, channel_id, payload
+
+    def _read_loop(self):
+        try:
+            while True:
+                ftype, channel_id, payload = self._read_frame()
+                self._handle_frame(ftype, channel_id, payload)
+        except EOFError:
+            pass
+        except Exception as e:
+            log.debug('multiplexer reader error: %r', e)
+        finally:
+            # The underlying tube has died; propagate EOF to all channels.
+            self.close()
+
+    def _handle_frame(self, ftype, channel_id, payload):
+        if ftype == _OPEN:
+            self._handle_open(channel_id)
+        elif ftype == _ACK:
+            self._handle_ack(channel_id)
+        elif ftype == _NAK:
+            self._handle_nak(channel_id)
+        elif ftype == _DATA:
+            self._handle_data(channel_id, payload)
+        elif ftype == _CLOSE:
+            self._handle_close(channel_id)
+        elif ftype == _EOF:
+            self._handle_eof(channel_id)
+        elif ftype == _PAUSE:
+            self._handle_pause(channel_id)
+        elif ftype == _RESUME:
+            self._handle_resume(channel_id)
+
+    def _handle_open(self, channel_id):
+        with self._lock:
+            if self._closed:
+                return
+            if channel_id in self.channels or channel_id in self._closing_ids:
+                self._write_frame(_NAK, channel_id)
+                return
+            if len(self.channels) >= self._max_channels:
+                self._write_frame(_NAK, channel_id)
+                return
+
+            ch = MuxChannel(self, channel_id)
+            self.channels[channel_id] = ch
+            self._pending_accept.append(ch)
+
+            with self._accept_cond:
+                self._accept_cond.notify_all()
+
+        try:
+            self._write_frame(_ACK, channel_id)
+        except EOFError:
+            pass
+
+    def _handle_ack(self, channel_id):
+        with self._lock:
+            ack_queue = self._open_results.pop(channel_id, None)
+            if ack_queue is not None:
+                try:
+                    ack_queue.put_nowait(True)
+                except queue.Full:
+                    pass
+
+    def _handle_nak(self, channel_id):
+        with self._lock:
+            ack_queue = self._open_results.pop(channel_id, None)
+            if ack_queue is not None:
+                try:
+                    ack_queue.put_nowait(False)
+                except queue.Full:
+                    pass
+
+    def _handle_data(self, channel_id, payload):
+        ch = self._get_channel(channel_id)
+        if ch is None:
+            return
+        send_pause = False
+        with ch._cond:
+            ch._recv_buffer.add(payload)
+            ch._stats['bytes_received'] += len(payload)
+            ch._stats['frames_received'] += 1
+            if ch._recv_buffer.over_high_water and not ch._flow_paused_notified:
+                ch._flow_paused_notified = True
+                send_pause = True
+            ch._cond.notify_all()
+        if send_pause:
+            try:
+                self._write_frame(_PAUSE, channel_id)
+            except EOFError:
+                pass
+
+    def _handle_close(self, channel_id):
+        with self._lock:
+            ch = self.channels.get(channel_id)
+            if ch is not None:
+                del self.channels[channel_id]
+            if channel_id in self._closing_ids:
+                self._closing_ids.discard(channel_id)
+                confirm = False
+            else:
+                confirm = True
+
+        if ch is not None:
+            with ch._cond:
+                ch._closed = True
+                ch._send_eof = True
+                ch._recv_eof = True
+                ch._cond.notify_all()
+
+        if confirm and ch is not None:
+            try:
+                self._write_frame(_CLOSE, channel_id)
+            except EOFError:
+                pass
+
+    def _handle_eof(self, channel_id):
+        ch = self._get_channel(channel_id)
+        if ch is None:
+            return
+        with ch._cond:
+            ch._recv_eof = True
+            ch._cond.notify_all()
+
+    def _handle_pause(self, channel_id):
+        ch = self._get_channel(channel_id)
+        if ch is None:
+            return
+        with ch._cond:
+            ch._flow_paused = True
+
+    def _handle_resume(self, channel_id):
+        ch = self._get_channel(channel_id)
+        if ch is None:
+            return
+        with ch._cond:
+            ch._flow_paused = False
+            ch._cond.notify_all()
+
+    def _get_channel(self, channel_id):
+        with self._lock:
+            return self.channels.get(channel_id)
+
+
+class MuxChannel(tube):
+    """
+    A single logical channel within a :class:`TubeMultiplexer`.
+
+    Behaves like a normal :class:`~pwnlib.tubes.tube.tube`, but all data is
+    multiplexed over the underlying tube of the :class:`TubeMultiplexer`.
+    """
+
+    def __init__(self, mux, channel_id, *args, **kwargs):
+        self._mux = mux
+        self._channel_id = channel_id
+
+        self._recv_buffer = Buffer()
+        self._recv_buffer.set_watermarks(high=mux.high_water_mark, low=mux.low_water_mark)
+
+        self._send_eof = False
+        self._recv_eof = False
+        self._closed = False
+        self._flow_paused = False
+        self._flow_paused_notified = False
+
+        self._stats = {
+            'bytes_sent': 0,
+            'bytes_received': 0,
+            'frames_sent': 0,
+            'frames_received': 0,
+        }
+
+        self._cond = threading.Condition()
+
+        super(MuxChannel, self).__init__(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    @property
+    def channel_id(self):
+        return self._channel_id
+
+    @property
+    def stats(self):
+        return self._stats
+
+    def close(self):
+        """Closes the channel, signalling EOF to the remote peer."""
+        with self._cond:
+            if self._closed:
+                return
+            self._closed = True
+            self._send_eof = True
+            self._recv_eof = True
+            self._cond.notify_all()
+
+        self._mux._channel_closed(self)
+
+    def shutdown_raw(self, direction):
+        with self._cond:
+            if direction == 'send':
+                if not self._send_eof:
+                    self._send_eof = True
+                    send_eof = True
+                else:
+                    send_eof = False
+                self._cond.notify_all()
+            elif direction == 'recv':
+                self._recv_eof = True
+                self._cond.notify_all()
+                send_eof = False
+            else:
+                raise ValueError('direction must be "send" or "recv"')
+
+        if send_eof:
+            try:
+                self._mux._write_frame(_EOF, self._channel_id)
+            except EOFError:
+                pass
+
+    def connected_raw(self, direction):
+        with self._cond:
+            if direction == 'send':
+                return not self._closed and not self._send_eof
+            if direction == 'recv':
+                return not self._closed and not self._recv_eof
+            if direction == 'any':
+                return not self._closed and (not self._send_eof or not self._recv_eof)
+        raise ValueError('direction must be "send", "recv" or "any"')
+
+    def can_recv_raw(self, timeout=0):
+        deadline = None
+        if timeout is not None and timeout != 0:
+            deadline = time.monotonic() + timeout
+        with self._cond:
+            while not self._recv_buffer and not self._recv_eof and not self._closed:
+                if deadline is None or timeout == 0:
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return bool(self._recv_buffer) or self._recv_eof
+
+    def settimeout_raw(self, timeout):
+        pass
+
+    # ------------------------------------------------------------------
+    # Raw tube interface
+    # ------------------------------------------------------------------
+    def recv_raw(self, numb, *a):
+        deadline = None
+        with self._cond:
+            while not self._recv_buffer and not self._recv_eof and not self._closed:
+                timeout = self.timeout
+                if timeout == 0:
+                    return None
+                if timeout >= self.maximum:
+                    self._cond.wait()
+                else:
+                    if deadline is None:
+                        deadline = time.monotonic() + timeout
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None
+                    self._cond.wait(remaining)
+
+            if not self._recv_buffer:
+                raise EOFError('channel closed')
+
+            data = self._recv_buffer.get(numb)
+
+            should_resume = False
+            if self._flow_paused_notified and self._recv_buffer.under_low_water:
+                self._flow_paused_notified = False
+                should_resume = True
+
+        if should_resume:
+            try:
+                self._mux._write_frame(_RESUME, self._channel_id)
+            except EOFError:
+                pass
+
+        return data
+
+    def send_raw(self, data):
+        deadline = None
+        with self._cond:
+            while self._flow_paused:
+                if self._closed or self._send_eof:
+                    raise EOFError('channel closed')
+                timeout = self.timeout
+                if timeout == 0:
+                    raise TimeoutError('timed out waiting for flow control')
+                if timeout >= self.maximum:
+                    self._cond.wait()
+                else:
+                    if deadline is None:
+                        deadline = time.monotonic() + timeout
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('timed out waiting for flow control')
+                    self._cond.wait(remaining)
+
+            if self._closed or self._send_eof:
+                raise EOFError('channel closed')
+
+        self._mux._write_frame(_DATA, self._channel_id, data)
+        self._stats['bytes_sent'] += len(data)
+        self._stats['frames_sent'] += 1
+
+    # The reader thread of the multiplexer is responsible for receiving.
+    def recv_raw_loop(self):
+        raise NotImplementedError()
+PYEOF
+python -m py_compile pwnlib/tubes/mux.py && echo OK

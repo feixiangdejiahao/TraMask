@@ -1,0 +1,2 @@
+cd /app && timeout 60 python -m doctest pwnlib/tubes/buffer.py >/dev/null 2>&1 && echo "buffer doctest ok"
+timeout 15 python -c "import pwn; import pwnlib.tubes.mux; from pwnlib.tubes import TubeMultiplexer, MuxChannel; print('imports ok')"

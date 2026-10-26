@@ -1,0 +1,1 @@
+cat /app/packages/core/src/entity/utils/pack-entity.ts

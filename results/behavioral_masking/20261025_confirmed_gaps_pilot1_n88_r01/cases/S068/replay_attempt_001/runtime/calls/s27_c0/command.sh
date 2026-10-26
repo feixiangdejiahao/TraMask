@@ -1,0 +1,1 @@
+grep -n "^.. _cli_" docs/cli.rst | head -80 && echo "=== python-api headings ===" && grep -n "^.. _python_api\|^Safe\|safe\|Invariant\|checkpoint" docs/python-api.rst | head -40

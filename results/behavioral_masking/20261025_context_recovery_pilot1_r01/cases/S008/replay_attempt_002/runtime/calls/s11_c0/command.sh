@@ -1,0 +1,1 @@
+cd /app && grep -n "func (s \*SettingsService)" backend/internal/services/settings_service.go | head -50 && echo "=====" && grep -n "SettingsKey\|Default\|drift\|vulnerability" backend/internal/services/settings_service.go | head -50

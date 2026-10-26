@@ -1,0 +1,1 @@
+cd /app && head -60 CHANGELOG.md

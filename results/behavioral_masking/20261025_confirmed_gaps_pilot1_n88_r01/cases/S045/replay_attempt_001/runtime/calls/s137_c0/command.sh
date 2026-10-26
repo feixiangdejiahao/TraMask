@@ -1,0 +1,1 @@
+cd /app && git show --stat HEAD | tail -20 && echo "---" && sed -n '520,769p' libs/core/langchain_core/runnables/coalesce.py

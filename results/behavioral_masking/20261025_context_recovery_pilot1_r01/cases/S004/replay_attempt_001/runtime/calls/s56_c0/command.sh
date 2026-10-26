@@ -1,0 +1,1 @@
+cd /app && python /tmp/snap_test.py

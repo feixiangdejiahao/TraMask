@@ -1,0 +1,1 @@
+cd /app && ls backend/pkg/scheduler/*_test.go && head -80 backend/pkg/scheduler/auto_heal_job_test.go

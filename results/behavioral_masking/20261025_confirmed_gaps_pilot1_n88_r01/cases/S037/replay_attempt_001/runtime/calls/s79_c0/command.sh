@@ -1,0 +1,1 @@
+cd /app && sed -n '25,45p' src/core/selectors.ts && echo '--- atomic builder ---' && sed -n '100,190p' src/core/selectors.ts

@@ -1,0 +1,1 @@
+./node_modules/.bin/mocha tests/bail_on_test_failure_tests.js --grep "^(ProcessTestRunner|TapProcessTestRunner) abort functionality abort method is idempotent"

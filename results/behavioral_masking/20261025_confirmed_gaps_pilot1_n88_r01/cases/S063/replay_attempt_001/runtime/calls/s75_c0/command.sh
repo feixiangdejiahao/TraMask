@@ -1,0 +1,1 @@
+cd /app && timeout 60 python -m doctest pwnlib/tubes/buffer.py -v 2>&1 | tail -10

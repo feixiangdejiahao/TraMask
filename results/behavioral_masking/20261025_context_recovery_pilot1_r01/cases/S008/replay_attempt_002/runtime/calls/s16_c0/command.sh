@@ -1,0 +1,1 @@
+cd /app && cat backend/internal/bootstrap/services_bootstrap.go && echo "=====ROUTER=====" && cat backend/internal/bootstrap/router_bootstrap.go

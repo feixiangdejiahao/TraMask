@@ -1,0 +1,1 @@
+cd /app && git remote -v && curl -s --max-time 10 https://raw.githubusercontent.com/PyCQA/bandit/main/bandit/core/nosec.py | head -100 || echo "NETWORK FAIL"

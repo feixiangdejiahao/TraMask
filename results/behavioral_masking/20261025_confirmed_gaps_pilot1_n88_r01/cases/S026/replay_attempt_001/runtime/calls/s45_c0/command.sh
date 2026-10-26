@@ -1,0 +1,1 @@
+cd /app && sed -n '1,20p' checkers/testdata/deprecatedComment/positive_tests.go | cat -A | head -20

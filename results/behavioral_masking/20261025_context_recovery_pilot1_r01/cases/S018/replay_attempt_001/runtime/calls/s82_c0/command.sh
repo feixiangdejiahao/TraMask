@@ -1,0 +1,1 @@
+cd /app && sed -i 's/help="do not skip lines with # nosec comments"/help="do not skip lines with # nosec comments or directives"/' bandit/cli/main.py && grep -n 'ignore-nosec' bandit/cli/main.py | head

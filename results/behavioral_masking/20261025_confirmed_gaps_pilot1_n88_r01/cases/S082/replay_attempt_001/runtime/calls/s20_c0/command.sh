@@ -1,0 +1,1 @@
+cd /app && sed -n '300,500p' public/testem/testem_client.js && echo '--- connection ---' && sed -n '1,320p' public/testem/testem_connection.js

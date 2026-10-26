@@ -1,0 +1,1 @@
+cd /app && tail -40 tests/utils/reporter_tests.js && echo '===SERVER===' && tail -30 tests/server_tests.js

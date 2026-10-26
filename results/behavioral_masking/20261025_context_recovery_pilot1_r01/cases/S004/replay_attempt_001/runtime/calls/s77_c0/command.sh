@@ -1,0 +1,1 @@
+cd /app && for f in changes/410.fix changes/422.misc changes/452.fix changes/454.enhancement; do echo "== $f =="; cat "$f"; done

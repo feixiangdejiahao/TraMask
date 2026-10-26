@@ -1,0 +1,1 @@
+sleep 20; echo "=== build4 ==="; cat /tmp/build4.log; echo "=== test ==="; cat /tmp/test_drift.log 2>/dev/null | tail -80

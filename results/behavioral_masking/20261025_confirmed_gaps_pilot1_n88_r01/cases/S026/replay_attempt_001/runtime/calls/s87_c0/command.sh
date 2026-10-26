@@ -1,0 +1,1 @@
+cd /app && nohup go test ./... -count=1 > /tmp/all_test.log 2>&1 & echo "started pid $!"

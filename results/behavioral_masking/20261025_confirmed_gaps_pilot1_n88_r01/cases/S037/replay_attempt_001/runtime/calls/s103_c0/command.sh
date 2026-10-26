@@ -1,0 +1,1 @@
+cd /app && npx rollup -c 2>&1 | tail -8

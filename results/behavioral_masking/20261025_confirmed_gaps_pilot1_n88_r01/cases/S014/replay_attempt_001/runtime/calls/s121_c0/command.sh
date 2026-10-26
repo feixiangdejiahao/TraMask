@@ -1,0 +1,1 @@
+cd /app && npx biome check --write packages/core/test/prompts/async-autocomplete.test.ts 2>&1 | tail -4 && npx tsc --noEmit 2>&1 | grep -v "npm warn" | head

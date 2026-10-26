@@ -1,0 +1,1 @@
+cd /app && npx vitest run src/table src/database src/options --reporter=dot 2>&1 | tail -15

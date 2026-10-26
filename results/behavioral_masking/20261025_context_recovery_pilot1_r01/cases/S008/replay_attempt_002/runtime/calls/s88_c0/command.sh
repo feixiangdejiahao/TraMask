@@ -1,0 +1,1 @@
+ps aux | grep '[g]o build' | head; cat /tmp/build_all.log 2>/dev/null | head -30

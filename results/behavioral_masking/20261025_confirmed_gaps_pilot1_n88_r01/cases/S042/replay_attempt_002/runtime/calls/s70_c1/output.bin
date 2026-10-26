@@ -1,0 +1,231 @@
+   330	export function createQueryInstance<T extends QueryParameter[]>(
+   331	    world: World,
+   332	    parameters: T
+   333	): QueryInstance {
+   334	    const query: QueryInstance = {
+   335	        version: 0,
+   336	        world,
+   337	        parameters,
+   338	        hash: '',
+   339	        traits: [],
+   340	        traitInstances: {
+   341	            required: [],
+   342	            forbidden: [],
+   343	            or: [],
+   344	            all: [],
+   345	        },
+   346	        staticBitmasks: [],
+   347	        trackingGroups: [],
+   348	        generations: [],
+   349	        entities: new SparseSet(),
+   350	        isTracking: false,
+   351	        hasChangedModifiers: false,
+   352	        changedTraits: new Set<Trait>(),
+   353	        toRemove: new SparseSet(),
+   354	        addSubscriptions: new Set<QuerySubscriber>(),
+   355	        removeSubscriptions: new Set<QuerySubscriber>(),
+   356	        relationFilters: [],
+   357	
+   358	        run: (world: World, params: QueryParameter[]) => runQuery(world, query, params),
+   359	        add: (entity: Entity) => addEntityToQuery(query, entity),
+   360	        remove: (world: World, entity: Entity) => removeEntityFromQuery(world, query, entity),
+   361	        check: (world: World, entity: Entity) => checkQuery(world, query, entity),
+   362	        checkTracking: (
+   363	            world: World,
+   364	            entity: Entity,
+   365	            eventType: EventType,
+   366	            generationId: number,
+   367	            bitflag: number,
+   368	            target?: Entity
+   369	        ) => checkQueryTracking(world, query, entity, eventType, generationId, bitflag, target),
+   370	        resetTrackingBitmasks: (eid: number) => resetQueryTrackingBitmasks(query, eid),
+   371	    };
+   372	
+   373	    const ctx = world[$internal];
+   374	
+   375	    // Map for grouping tracking modifiers by (type, id, logic)
+   376	    const trackingGroupsMap = new Map<string, TrackingGroup>();
+   377	
+   378	    // Process all parameters
+   379	    for (let i = 0; i < parameters.length; i++) {
+   380	        const parameter = parameters[i];
+   381	
+   382	        // Handle relation pairs
+   383	        if (isRelationPair(parameter)) {
+   384	            const pairCtx = parameter[$internal];
+   385	            const relation = pairCtx.relation;
+   386	
+   387	            query.relationFilters!.push(parameter);
+   388	
+   389	            const baseTrait = (relation as Relation<Trait>)[$internal].trait;
+   390	            if (!hasTraitInstance(ctx.traitInstances, baseTrait)) registerTrait(world, baseTrait);
+   391	            query.traitInstances.required.push(getTraitInstance(ctx.traitInstances, baseTrait)!);
+   392	            query.traits.push(baseTrait);
+   393	
+   394	            continue;
+   395	        }
+   396	
+   397	        if (isModifier(parameter)) {
+   398	            const traits = parameter.traits;
+   399	
+   400	            // Register traits
+   401	            for (let j = 0; j < traits.length; j++) {
+   402	                const t = traits[j];
+   403	                if (!hasTraitInstance(ctx.traitInstances, t)) registerTrait(world, t);
+   404	            }
+   405	
+   406	            if (parameter.type === 'not') {
+   407	                query.traitInstances.forbidden.push(
+   408	                    ...traits.map((t) => getTraitInstance(ctx.traitInstances, t)!)
+   409	                );
+   410	            } else if (parameter.type === 'or') {
+   411	                // Handle regular traits in Or
+   412	                query.traitInstances.or.push(
+   413	                    ...traits.map((t) => getTraitInstance(ctx.traitInstances, t)!)
+   414	                );
+   415	
+   416	                // Handle nested tracking modifiers in Or
+   417	                if (isOrWithModifiers(parameter)) {
+   418	                    for (const nestedModifier of parameter.modifiers) {
+   419	                        if (isTrackingModifier(nestedModifier)) {
+   420	                            processTrackingModifier(world, query, nestedModifier, 'or', ctx, trackingGroupsMap);
+   421	                        }
+   422	                    }
+   423	                }
+   424	            } else if (isTrackingModifier(parameter)) {
+   425	                // Top-level tracking modifiers use AND logic
+   426	                processTrackingModifier(world, query, parameter, 'and', ctx, trackingGroupsMap);
+   427	            }
+   428	        } else {
+   429	            // Regular trait
+   430	            const t = parameter as Trait;
+   431	            if (!hasTraitInstance(ctx.traitInstances, t)) registerTrait(world, t);
+   432	            query.traitInstances.required.push(getTraitInstance(ctx.traitInstances, t)!);
+   433	            query.traits.push(t);
+   434	        }
+   435	    }
+   436	
+   437	    // Add IsExcluded to the forbidden list
+   438	    query.traitInstances.forbidden.push(getTraitInstance(ctx.traitInstances, IsExcluded)!);
+   439	
+   440	    // Build traitInstances.all from static instances (tracking instances already added by processTrackingModifier)
+   441	    query.traitInstances.all = [
+   442	        ...query.traitInstances.all, // Tracking instances added by processTrackingModifier
+   443	        ...query.traitInstances.required,
+   444	        ...query.traitInstances.forbidden,
+   445	        ...query.traitInstances.or,
+   446	    ];
+   447	
+   448	    // Create an array of all trait generations
+   449	    query.generations = query.traitInstances.all
+   450	        .map((c) => c.generationId)
+   451	        .reduce((a: number[], v) => {
+   452	            if (a.includes(v)) return a;
+   453	            a.push(v);
+   454	            return a;
+   455	        }, []);
+   456	
+   457	    // Create static bitmasks (required/forbidden/or only - tracking is in trackingGroups)
+   458	    query.staticBitmasks = query.generations.map((generationId) => {
+   459	        const required = query.traitInstances.required
+   460	            .filter((c) => c.generationId === generationId)
+   461	            .reduce((a, c) => a | c.bitflag, 0);
+   462	
+   463	        const forbidden = query.traitInstances.forbidden
+   464	            .filter((c) => c.generationId === generationId)
+   465	            .reduce((a, c) => a | c.bitflag, 0);
+   466	
+   467	        const or = query.traitInstances.or
+   468	            .filter((c) => c.generationId === generationId)
+   469	            .reduce((a, c) => a | c.bitflag, 0);
+   470	
+   471	        return { required, forbidden, or };
+   472	    });
+   473	
+   474	    // Create hash
+   475	    query.hash = createQueryHash(parameters);
+   476	
+   477	    // Add to world
+   478	    ctx.queriesHashMap.set(query.hash, query);
+   479	
+   480	    // Register query with trait instances
+   481	    if (query.isTracking) {
+   482	        query.traitInstances.all.forEach((instance) => {
+   483	            instance.trackingQueries.add(query);
+   484	        });
+   485	    } else {
+   486	        query.traitInstances.all.forEach((instance) => {
+   487	            instance.queries.add(query);
+   488	        });
+   489	    }
+   490	
+   491	    // Add to notQueries if has forbidden traits
+   492	    if (query.traitInstances.forbidden.length > 0) ctx.notQueries.add(query);
+   493	
+   494	    // Index queries with relation filters
+   495	    const hasRelationFilters = query.relationFilters && query.relationFilters.length > 0;
+   496	
+   497	    if (hasRelationFilters) {
+   498	        for (const pair of query.relationFilters!) {
+   499	            const relationTrait = pair[$internal].relation[$internal].trait;
+   500	            const relationTraitInstance = getTraitInstance(ctx.traitInstances, relationTrait);
+   501	            if (relationTraitInstance) {
+   502	                relationTraitInstance.relationQueries.add(query);
+   503	            }
+   504	        }
+   505	    }
+   506	
+   507	    // Populate query with initial matching entities
+   508	    if (query.trackingGroups.length > 0) {
+   509	        // For tracking queries, evaluate all tracking groups together so that
+   510	        // AND groups are only satisfied when every group matches.
+   511	        for (const entity of ctx.entityIndex.dense) {
+   512	            if (!checkQueryTrackingAtCreation(world, query, entity)) continue;
+   513	
+   514	            if (hasRelationFilters) {
+   515	                let relationMatch = true;
+   516	                for (const pair of query.relationFilters!) {
+   517	                    if (!hasRelationPair(world, entity, pair)) {
+   518	                        relationMatch = false;
+   519	                        break;
+   520	                    }
+   521	                }
+   522	                if (relationMatch) query.add(entity);
+   523	            } else {
+   524	                query.add(entity);
+   525	            }
+   526	        }
+   527	    } else {
+   528	        // Non-tracking query: populate immediately
+   529	        const entities = ctx.entityIndex.dense;
+   530	        for (let i = 0; i < entities.length; i++) {
+   531	            const entity = entities[i];
+   532	            const match = hasRelationFilters
+   533	                ? checkQueryWithRelations(world, query, entity)
+   534	                : query.check(world, entity);
+   535	            if (match) query.add(entity);
+   536	        }
+   537	    }
+   538	
+   539	    return query;
+   540	}
+   541	
+   542	let queryId = 0;
+   543	
+   544	export function createQuery<T extends QueryParameter[]>(...parameters: T): Query<T> {
+   545	    const hash = createQueryHash(parameters);
+   546	
+   547	    // Check if this query was already cached
+   548	    const existing = universe.cachedQueries.get(hash);
+   549	    if (existing) return existing as Query<T>;
+   550	
+   551	    // Create new query ref with ID
+   552	    const id = queryId++;
+   553	    const queryRef = Object.freeze({
+   554	        [$queryRef]: true,
+   555	        id,
+   556	        hash,
+   557	        parameters,
+   558	    }) as Query<T>;
+   559	
+   560	    // Cache the ref for deduplication and stable IDs

@@ -1,0 +1,1 @@
+cd /app && tail -40 tests/runners/process_test_runner_tests.js && echo '===TAP===' && tail -40 tests/runners/tap_process_test_runner_tests.js

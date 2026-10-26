@@ -1,0 +1,1 @@
+cd /app && sed -n '52,60p' zz_repro3_test.go && grep -n "c2 := runScript" zz_repro3_test.go

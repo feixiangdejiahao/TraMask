@@ -1,0 +1,1 @@
+cd /app/libs/core && timeout 25 python /tmp/test_coalesce.py 2>&1 | head -80

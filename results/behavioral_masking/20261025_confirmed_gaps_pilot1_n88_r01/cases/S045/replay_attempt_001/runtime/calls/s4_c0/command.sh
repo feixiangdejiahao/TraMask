@@ -1,0 +1,1 @@
+pwd && ls -la && find / -maxdepth 3 -name "langchain-core" -type d 2>/dev/null | head

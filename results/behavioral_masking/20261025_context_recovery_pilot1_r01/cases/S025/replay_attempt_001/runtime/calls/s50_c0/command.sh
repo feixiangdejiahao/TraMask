@@ -1,0 +1,1 @@
+cd /app && sed -i 's/\\u258a/\\u2588/' packages/core/src/prompts/autocomplete.ts && grep -n 'u258' packages/core/src/prompts/autocomplete.ts && cd packages/core && pnpm build 2>&1 | tail -3

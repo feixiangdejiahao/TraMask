@@ -1,0 +1,2 @@
+cd /app && sed -i "s/import SuperJSON, { registerErrorStackProcessor, ErrorStackOptions } from '\/app\/dist\/index.js';/import SuperJSON, { registerErrorStackProcessor } from '\/app\/dist\/index.js';/" /tmp/e2e.mjs
+node /tmp/e2e.mjs

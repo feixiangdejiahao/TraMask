@@ -1,0 +1,1 @@
+cd /app && sed -n '95,140p' src/core/reducers.ts

@@ -1,0 +1,1 @@
+cd /app && (python -m flake8 src/dateutil/rrule.py 2>&1 | head -20 || echo "flake8 not available"); python -m pyflakes src/dateutil/rrule.py 2>&1 | head -20 || true

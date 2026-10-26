@@ -1,0 +1,1 @@
+cd /tmp/cptest && sed -i 's/"go\/parser"/"go\/ast"\n\t"go\/parser"/' main.go && go run . 2>&1 | head

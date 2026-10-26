@@ -1,0 +1,1 @@
+find bandit -maxdepth 2 -type f | sort && echo "---TESTS---" && find tests -maxdepth 2 -type f | sort | head -50

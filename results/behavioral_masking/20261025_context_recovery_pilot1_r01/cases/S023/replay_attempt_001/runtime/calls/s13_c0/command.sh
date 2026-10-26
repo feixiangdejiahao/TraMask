@@ -1,0 +1,1 @@
+grep -n "def has\b\|def has(\|def fields\|def is_typeddict\|class.*Dataclass\|def is_dataclass\|init" src/cattrs/_compat.py | head -80

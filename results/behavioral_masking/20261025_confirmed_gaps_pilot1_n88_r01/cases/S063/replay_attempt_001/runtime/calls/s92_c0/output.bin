@@ -1,0 +1,161 @@
+    # ------------------------------------------------------------------
+    # Receive path
+    # ------------------------------------------------------------------
+    def _recv_data(self, data):
+        """Called by the multiplexer reader thread when DATA arrives."""
+        with self._recv_cond:
+            self._recv_queue.append(data)
+            self._recv_size += len(data)
+            self._recv_cond.notify_all()
+
+        with self._stats_lock:
+            self._stats["bytes_received"] += len(data)
+            self._stats["frames_received"] += 1
+
+        self._mux._maybe_pause(self)
+
+    def _recv_data_chunk(self, timeout=tube.default):
+        """Block until a chunk is available or the timeout elapses."""
+        timeout = self._get_timeout_seconds(timeout)
+        deadline = None if timeout >= self.maximum else time.time() + timeout
+
+        with self._recv_cond:
+            while not self._recv_queue and not self._recv_eof:
+                if deadline is None:
+                    self._recv_cond.wait()
+                else:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        return None
+                    self._recv_cond.wait(remaining)
+
+            if self._recv_eof and not self._recv_queue:
+                raise EOFError("channel is closed")
+
+            if not self._recv_queue:
+                return None
+
+            data = self._recv_queue.popleft()
+            self._recv_size -= len(data)
+            return data
+
+    def _fillbuffer(self, timeout=tube.default):
+        data = self._recv_data_chunk(timeout)
+        if data:
+            self.buffer.add(data)
+            self._mux._maybe_resume(self)
+        return data
+
+    def _recv(self, numb=None, timeout=tube.default):
+        numb = self.buffer.get_fill_size(numb)
+
+        if not self.buffer and not self._fillbuffer(timeout):
+            return b""
+
+        result = self.buffer.get(numb)
+        self._mux._maybe_resume(self)
+        return result
+
+    def recv_raw(self, numb):
+        data = self._recv_data_chunk(self.timeout)
+        if data is None:
+            return None
+        return data
+
+    def can_recv_raw(self, timeout):
+        with self._recv_cond:
+            if self._recv_queue:
+                return True
+            if self._recv_eof:
+                return False
+            if timeout:
+                self._recv_cond.wait(timeout)
+            return bool(self._recv_queue)
+
+    # ------------------------------------------------------------------
+    # Send path
+    # ------------------------------------------------------------------
+    def send_raw(self, data):
+        self._mux._send_channel_data(self, data)
+
+    # ------------------------------------------------------------------
+    # Remote control messages
+    # ------------------------------------------------------------------
+    def _remote_pause(self):
+        with self._send_cond:
+            self._peer_paused = True
+
+    def _remote_resume(self):
+        with self._send_cond:
+            self._peer_paused = False
+            self._send_cond.notify_all()
+
+    def _remote_fin(self):
+        with self._recv_cond:
+            self._recv_eof = True
+            self._recv_cond.notify_all()
+
+    def _remote_closed(self):
+        with self._recv_cond:
+            self._recv_eof = True
+            self._recv_cond.notify_all()
+        with self._send_cond:
+            self._send_eof = True
+            self._send_cond.notify_all()
+
+    def _mux_closed(self):
+        with self._recv_cond:
+            self._recv_eof = True
+            self._recv_cond.notify_all()
+        with self._send_cond:
+            self._send_eof = True
+            self._send_cond.notify_all()
+
+    # ------------------------------------------------------------------
+    # tube interface
+    # ------------------------------------------------------------------
+    def settimeout_raw(self, timeout):
+        pass
+
+    def connected_raw(self, direction):
+        if self._mux.closed:
+            return False
+
+        if direction == "recv":
+            return not self._recv_eof
+        if direction == "send":
+            return not self._send_eof
+        if direction == "any":
+            return not (self._recv_eof and self._send_eof)
+        return False
+
+    def shutdown_raw(self, direction):
+        if direction == "send":
+            with self._send_cond:
+                if self._send_eof:
+                    return
+                self._send_eof = True
+                self._send_cond.notify_all()
+            try:
+                self._mux._send_frame(self._channel_id, _MSG_FIN)
+            except EOFError:
+                pass
+
+        elif direction == "recv":
+            with self._recv_cond:
+                if self._recv_eof:
+                    return
+                self._recv_eof = True
+                self._recv_cond.notify_all()
+
+    def close(self):
+        """Close this channel and signal EOF to the remote peer."""
+        with self._recv_cond:
+            recv_already = self._recv_eof
+            self._recv_eof = True
+            self._recv_cond.notify_all()
+        with self._send_cond:
+            send_already = self._send_eof
+            self._send_eof = True
+            self._send_cond.notify_all()
+

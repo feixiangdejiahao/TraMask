@@ -1,0 +1,1 @@
+cd /app && cat src/schema/anyOf/schema.ts | sed -n '1,120p'

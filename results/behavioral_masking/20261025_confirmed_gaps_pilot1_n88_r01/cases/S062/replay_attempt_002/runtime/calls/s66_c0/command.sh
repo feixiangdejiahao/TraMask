@@ -1,0 +1,1 @@
+cd /app && python /tmp/test_mux.py && echo "=====" && python /tmp/test_mux_full.py 2>&1 | tail -8 && echo "=====" && python /tmp/test_flow.py 2>&1 | tail -8 && echo "=====" && python /tmp/test_concurrency.py 2>&1 | tail -3

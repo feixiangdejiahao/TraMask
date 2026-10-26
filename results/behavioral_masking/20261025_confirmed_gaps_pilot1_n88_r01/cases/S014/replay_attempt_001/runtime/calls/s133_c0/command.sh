@@ -1,0 +1,1 @@
+cd /app && git diff packages/core/src/prompts/autocomplete.ts | sed -n '460,520p'

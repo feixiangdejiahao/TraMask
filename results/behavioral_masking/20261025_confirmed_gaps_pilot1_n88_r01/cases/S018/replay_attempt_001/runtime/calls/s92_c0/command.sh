@@ -1,0 +1,1 @@
+cd /app && git diff tests/test_rrule.py && git status --short

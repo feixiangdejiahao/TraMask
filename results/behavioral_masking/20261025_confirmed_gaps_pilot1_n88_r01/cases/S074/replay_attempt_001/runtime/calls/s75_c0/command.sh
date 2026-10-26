@@ -1,0 +1,1 @@
+cd /app && go test -run 'TestGoCall' -v . 2>&1 | tail -60

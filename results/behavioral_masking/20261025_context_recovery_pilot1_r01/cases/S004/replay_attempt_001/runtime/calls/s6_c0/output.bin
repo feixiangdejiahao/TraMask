@@ -1,0 +1,671 @@
+     1	from __future__ import annotations
+     2	
+     3	import asyncio
+     4	import contextlib
+     5	import contextvars
+     6	import functools
+     7	import logging
+     8	import sys
+     9	import textwrap
+    10	import threading
+    11	import time
+    12	import traceback
+    13	import weakref
+    14	from asyncio.coroutines import _format_coroutine  # type: ignore
+    15	from datetime import timedelta
+    16	from types import TracebackType
+    17	from typing import (
+    18	    Any,
+    19	    Awaitable,
+    20	    Coroutine,
+    21	    Dict,
+    22	    Final,
+    23	    Generator,
+    24	    List,
+    25	    Optional,
+    26	    Sequence,
+    27	    Type,
+    28	    TypeVar,
+    29	    cast,
+    30	)
+    31	
+    32	import janus
+    33	from aiohttp import web
+    34	from prompt_toolkit.contrib.telnet.server import TelnetServer
+    35	
+    36	from .exceptions import MissingTask
+    37	from .task import TracedTask, persistent_coro
+    38	from .termui.commands import interact
+    39	from .types import (
+    40	    CancellationChain,
+    41	    FormatItemTypes,
+    42	    FormattedLiveTaskInfo,
+    43	    FormattedStackItem,
+    44	    FormattedTerminatedTaskInfo,
+    45	    TerminatedTaskInfo,
+    46	)
+    47	from .utils import (
+    48	    _extract_stack_from_exception,
+    49	    _extract_stack_from_frame,
+    50	    _extract_stack_from_task,
+    51	    _filter_stack,
+    52	    _format_filename,
+    53	    _format_task,
+    54	    _format_terminated_task,
+    55	    _format_timedelta,
+    56	    get_default_args,
+    57	)
+    58	from .webui.app import init_webui
+    59	
+    60	__all__ = (
+    61	    "Monitor",
+    62	    "start_monitor",
+    63	)
+    64	
+    65	log = logging.getLogger(__name__)
+    66	
+    67	MONITOR_HOST: Final = "127.0.0.1"
+    68	MONITOR_TERMUI_PORT: Final = 20101
+    69	MONITOR_WEBUI_PORT: Final = 20102
+    70	CONSOLE_PORT: Final = 20103
+    71	
+    72	T = TypeVar("T")
+    73	T_co = TypeVar("T_co", covariant=True)
+    74	
+    75	
+    76	def task_by_id(
+    77	    taskid: int, loop: asyncio.AbstractEventLoop
+    78	) -> "Optional[asyncio.Task[Any]]":
+    79	    tasks = asyncio.all_tasks(loop=loop)
+    80	    return next(filter(lambda t: id(t) == taskid, tasks), None)
+    81	
+    82	
+    83	async def cancel_task(task: "asyncio.Task[Any]") -> None:
+    84	    with contextlib.suppress(asyncio.CancelledError):
+    85	        task.cancel()
+    86	        await task
+    87	
+    88	
+    89	class Monitor:
+    90	    prompt: str
+    91	    """
+    92	    The string that prompts you to enter a command, defaults to ``"monitor >>> "``
+    93	    """
+    94	
+    95	    _event_loop_thread_id: Optional[int] = None
+    96	
+    97	    console_locals: Dict[str, Any]
+    98	    _termui_tasks: weakref.WeakSet[asyncio.Task[Any]]
+    99	
+   100	    _created_traceback_chains: weakref.WeakKeyDictionary[
+   101	        asyncio.Task[Any],
+   102	        weakref.ReferenceType[asyncio.Task[Any]],
+   103	    ]
+   104	    _created_tracebacks: weakref.WeakKeyDictionary[
+   105	        asyncio.Task[Any], List[traceback.FrameSummary]
+   106	    ]
+   107	    _terminated_tasks: Dict[str, TerminatedTaskInfo]
+   108	    _terminated_history: List[str]
+   109	    _termination_info_queue: janus.Queue[TerminatedTaskInfo]
+   110	    _canceller_chain: Dict[str, str]
+   111	    _canceller_stacks: Dict[str, List[traceback.FrameSummary] | None]
+   112	    _cancellation_chain_queue: janus.Queue[CancellationChain]
+   113	
+   114	    def __init__(
+   115	        self,
+   116	        loop: asyncio.AbstractEventLoop,
+   117	        *,
+   118	        host: str = MONITOR_HOST,
+   119	        termui_port: int = MONITOR_TERMUI_PORT,
+   120	        webui_port: int = MONITOR_WEBUI_PORT,
+   121	        console_port: int = CONSOLE_PORT,
+   122	        console_enabled: bool = True,
+   123	        hook_task_factory: bool = False,
+   124	        max_termination_history: int = 1000,
+   125	        locals: Optional[Dict[str, Any]] = None,
+   126	    ) -> None:
+   127	        self._monitored_loop = loop or asyncio.get_running_loop()
+   128	        self._host = host
+   129	        self._termui_port = termui_port
+   130	        self._webui_port = webui_port
+   131	        self._console_port = console_port
+   132	        self._console_enabled = console_enabled
+   133	        if locals is None:
+   134	            self.console_locals = {"__name__": "__console__", "__doc__": None}
+   135	        else:
+   136	            self.console_locals = locals
+   137	
+   138	        self.prompt = "monitor >>> "
+   139	        log.info(
+   140	            "Starting aiomonitor at telnet://%(host)s:%(tport)d and http://%(host)s:%(wport)d",
+   141	            {
+   142	                "host": host,
+   143	                "tport": termui_port,
+   144	                "wport": webui_port,
+   145	            },
+   146	        )
+   147	
+   148	        self._closed = False
+   149	        self._started = False
+   150	        self._termui_tasks = weakref.WeakSet()
+   151	
+   152	        self._hook_task_factory = hook_task_factory
+   153	        self._created_traceback_chains = weakref.WeakKeyDictionary()
+   154	        self._created_tracebacks = weakref.WeakKeyDictionary()
+   155	        self._terminated_tasks = {}
+   156	        self._canceller_chain = {}
+   157	        self._canceller_stacks = {}
+   158	        self._terminated_history = []
+   159	        self._max_termination_history = max_termination_history
+   160	
+   161	        self._ui_started = threading.Event()
+   162	        self._ui_thread = threading.Thread(target=self._ui_main, args=(), daemon=True)
+   163	
+   164	    @property
+   165	    def host(self) -> str:
+   166	        """
+   167	        The current hostname to bind the monitor server.
+   168	        """
+   169	        return self._host
+   170	
+   171	    @property
+   172	    def port(self) -> int:
+   173	        """
+   174	        The port number to bind the monitor server.
+   175	        """
+   176	        return self._termui_port
+   177	
+   178	    def __repr__(self) -> str:
+   179	        name = self.__class__.__name__
+   180	        return "<{name}: {host}:{port}>".format(
+   181	            name=name, host=self._host, port=self._termui_port
+   182	        )
+   183	
+   184	    def start(self) -> None:
+   185	        """
+   186	        Starts monitoring thread, where telnet server is executed.
+   187	        """
+   188	        assert not self._closed
+   189	        assert not self._started
+   190	        self._started = True
+   191	        self._original_task_factory = self._monitored_loop.get_task_factory()
+   192	        if self._hook_task_factory:
+   193	            self._monitored_loop.set_task_factory(self._create_task)
+   194	        self._event_loop_thread_id = threading.get_ident()
+   195	        self._ui_thread.start()
+   196	        self._ui_started.wait()
+   197	
+   198	    @property
+   199	    def closed(self) -> bool:
+   200	        """
+   201	        A flag indicates if monitor was closed, currntly instance of
+   202	        :class:`Monitor` can not be reused. For new monitor, new instance
+   203	        should be created.
+   204	        """
+   205	        return self._closed
+   206	
+   207	    def __enter__(self) -> Monitor:
+   208	        if not self._started:
+   209	            self.start()
+   210	        return self
+   211	
+   212	    # exc_type should be Optional[Type[BaseException]], but
+   213	    # this runs into https://github.com/python/typing/issues/266
+   214	    # on Python 3.5.
+   215	    def __exit__(
+   216	        self,
+   217	        exc_type: Any,
+   218	        exc_value: Optional[BaseException],
+   219	        traceback: Optional[TracebackType],
+   220	    ) -> None:
+   221	        self.close()
+   222	
+   223	    def close(self) -> None:
+   224	        """
+   225	        Joins background thread, and cleans up resources.
+   226	        """
+   227	        assert self._started, "The monitor must have been started to close it."
+   228	        if not self._closed:
+   229	            self._ui_loop.call_soon_threadsafe(
+   230	                self._ui_forever_future.cancel,
+   231	            )
+   232	            self._monitored_loop.set_task_factory(self._original_task_factory)
+   233	            self._ui_thread.join()
+   234	            self._closed = True
+   235	
+   236	    def format_running_task_list(
+   237	        self, filter_: str, persistent: bool
+   238	    ) -> Sequence[FormattedLiveTaskInfo]:
+   239	        all_running_tasks = asyncio.all_tasks(loop=self._monitored_loop)
+   240	        tasks = []
+   241	        for task in sorted(all_running_tasks, key=id):
+   242	            taskid = str(id(task))
+   243	            if isinstance(task, TracedTask):
+   244	                coro_repr = _format_coroutine(task._orig_coro).partition(" ")[0]
+   245	                if persistent and task._orig_coro not in persistent_coro:
+   246	                    continue
+   247	            else:
+   248	                coro_repr = _format_coroutine(task.get_coro()).partition(" ")[0]
+   249	                if persistent:
+   250	                    # untracked tasks should be skipped when showing persistent ones only
+   251	                    continue
+   252	            if filter_ and (
+   253	                filter_ not in coro_repr and filter_ not in task.get_name()
+   254	            ):
+   255	                continue
+   256	            creation_stack = self._created_tracebacks.get(task)
+   257	            # Some values are masked as "-" when they are unavailable
+   258	            # if it's the root task/coro or if the task factory is not applied.
+   259	            if not creation_stack:
+   260	                created_location = "-"
+   261	            else:
+   262	                creation_stack = _filter_stack(creation_stack)
+   263	                fn = _format_filename(creation_stack[-1].filename)
+   264	                lineno = creation_stack[-1].lineno
+   265	                created_location = f"{fn}:{lineno}"
+   266	            if isinstance(task, TracedTask):
+   267	                running_since = _format_timedelta(
+   268	                    timedelta(
+   269	                        seconds=(time.perf_counter() - task._started_at),
+   270	                    )
+   271	                )
+   272	            else:
+   273	                running_since = "-"
+   274	            tasks.append(
+   275	                FormattedLiveTaskInfo(
+   276	                    taskid,
+   277	                    task._state,
+   278	                    task.get_name(),
+   279	                    coro_repr,
+   280	                    created_location,
+   281	                    running_since,
+   282	                )
+   283	            )
+   284	        return tasks
+   285	
+   286	    def format_terminated_task_list(
+   287	        self, filter_: str, persistent: bool
+   288	    ) -> Sequence[FormattedTerminatedTaskInfo]:
+   289	        terminated_tasks = self._terminated_tasks.values()
+   290	        tasks = []
+   291	        for item in sorted(
+   292	            terminated_tasks,
+   293	            key=lambda info: info.terminated_at,
+   294	            reverse=True,
+   295	        ):
+   296	            if persistent and not item.persistent:
+   297	                continue
+   298	            if filter_ and (filter_ not in item.coro and filter_ not in item.name):
+   299	                continue
+   300	            started_since = _format_timedelta(
+   301	                timedelta(seconds=time.perf_counter() - item.started_at)
+   302	            )
+   303	            terminated_since = _format_timedelta(
+   304	                timedelta(seconds=time.perf_counter() - item.terminated_at)
+   305	            )
+   306	            tasks.append(
+   307	                FormattedTerminatedTaskInfo(
+   308	                    str(item.id),
+   309	                    item.name,
+   310	                    item.coro,
+   311	                    started_since,
+   312	                    terminated_since,
+   313	                )
+   314	            )
+   315	        return tasks
+   316	
+   317	    async def cancel_monitored_task(self, task_id: str | int) -> str:
+   318	        task_id_ = int(task_id)
+   319	        task = task_by_id(task_id_, self._monitored_loop)
+   320	        if task is not None:
+   321	            if self._monitored_loop == asyncio.get_running_loop():
+   322	                await cancel_task(task)
+   323	            else:
+   324	                fut = asyncio.wrap_future(
+   325	                    asyncio.run_coroutine_threadsafe(
+   326	                        cancel_task(task), loop=self._monitored_loop
+   327	                    )
+   328	                )
+   329	                await fut
+   330	            if isinstance(task, TracedTask):
+   331	                coro_repr = _format_coroutine(task._orig_coro).partition(" ")[0]
+   332	            else:
+   333	                coro_repr = _format_coroutine(task.get_coro()).partition(" ")[0]
+   334	            return coro_repr
+   335	        else:
+   336	            raise ValueError("Invalid or non-existent task ID", task_id)
+   337	
+   338	    def format_running_task_stack(
+   339	        self,
+   340	        task_id: str | int,
+   341	    ) -> Sequence[FormattedStackItem]:
+   342	        depth = 0
+   343	        task_id_ = int(task_id)
+   344	        task = task_by_id(task_id_, self._monitored_loop)
+   345	        if task is None:
+   346	            raise MissingTask(task_id_)
+   347	        task_chain: List[asyncio.Task[Any]] = []
+   348	        while task is not None:
+   349	            task_chain.append(task)
+   350	            task_ref = self._created_traceback_chains.get(task)
+   351	            task = task_ref() if task_ref is not None else None
+   352	        prev_task = None
+   353	        formatted_stack_list = []
+   354	        for task in reversed(task_chain):
+   355	            if depth == 0:
+   356	                formatted_stack_list.append(
+   357	                    FormattedStackItem(
+   358	                        FormatItemTypes.HEADER,
+   359	                        (
+   360	                            "Stack of the root task or coroutine scheduled "
+   361	                            "in the event loop (most recent call last)"
+   362	                        ),
+   363	                    )
+   364	                )
+   365	            elif depth > 0:
+   366	                assert prev_task is not None
+   367	                formatted_stack_list.append(
+   368	                    FormattedStackItem(
+   369	                        FormatItemTypes.HEADER,
+   370	                        (
+   371	                            "Stack of %s when creating the next task "
+   372	                            "(most recent call last)" % _format_task(prev_task)
+   373	                        ),
+   374	                    )
+   375	                )
+   376	            stack = self._created_tracebacks.get(task)
+   377	            if stack is None:
+   378	                formatted_stack_list.append(
+   379	                    FormattedStackItem(
+   380	                        FormatItemTypes.CONTENT,
+   381	                        (
+   382	                            "No stack available (maybe it is a native code, "
+   383	                            "a synchronous callback function, "
+   384	                            "or the event loop itself)"
+   385	                        ),
+   386	                    )
+   387	                )
+   388	            else:
+   389	                stack = _filter_stack(stack)
+   390	                formatted_stack_list.append(
+   391	                    FormattedStackItem(
+   392	                        FormatItemTypes.CONTENT,
+   393	                        textwrap.dedent("".join(traceback.format_list(stack))),
+   394	                    )
+   395	                )
+   396	            prev_task = task
+   397	            depth += 1
+   398	        task = task_chain[0]
+   399	        formatted_stack_list.append(
+   400	            FormattedStackItem(
+   401	                FormatItemTypes.HEADER,
+   402	                "Stack of %s (most recent call last)" % _format_task(task),
+   403	            )
+   404	        )
+   405	        stack = _extract_stack_from_task(task)
+   406	        if not stack:
+   407	            formatted_stack_list.append(
+   408	                FormattedStackItem(
+   409	                    FormatItemTypes.CONTENT,
+   410	                    "No stack available for %s" % _format_task(task),
+   411	                )
+   412	            )
+   413	        else:
+   414	            formatted_stack_list.append(
+   415	                FormattedStackItem(
+   416	                    FormatItemTypes.CONTENT,
+   417	                    textwrap.dedent("".join(traceback.format_list(stack))),
+   418	                )
+   419	            )
+   420	        return formatted_stack_list
+   421	
+   422	    def format_terminated_task_stack(
+   423	        self,
+   424	        trace_id: str,
+   425	    ) -> Sequence[FormattedStackItem]:
+   426	        depth = 0
+   427	        tinfo_chain: List[TerminatedTaskInfo] = []
+   428	        while trace_id is not None:
+   429	            tinfo_chain.append(self._terminated_tasks[trace_id])
+   430	            trace_id = self._canceller_chain.get(trace_id)  # type: ignore
+   431	        prev_tinfo = None
+   432	        formatted_stack_list = []
+   433	        for tinfo in reversed(tinfo_chain):
+   434	            if depth == 0:
+   435	                formatted_stack_list.append(
+   436	                    FormattedStackItem(
+   437	                        FormatItemTypes.HEADER,
+   438	                        (
+   439	                            "Stack of the root task or coroutine "
+   440	                            "scheduled in the event loop"
+   441	                            "(most recent call last)"
+   442	                        ),
+   443	                    )
+   444	                )
+   445	            elif depth > 0:
+   446	                assert prev_tinfo is not None
+   447	                formatted_stack_list.append(
+   448	                    FormattedStackItem(
+   449	                        FormatItemTypes.HEADER,
+   450	                        (
+   451	                            "Stack of %s when creating the next task "
+   452	                            "(most recent call last)"
+   453	                            % _format_terminated_task(prev_tinfo)
+   454	                        ),
+   455	                    )
+   456	                )
+   457	            stack = tinfo.canceller_stack
+   458	            if stack is None:
+   459	                formatted_stack_list.append(
+   460	                    FormattedStackItem(
+   461	                        FormatItemTypes.CONTENT,
+   462	                        (
+   463	                            "No stack available "
+   464	                            "(maybe it is a self-raised cancellation or exception)"
+   465	                        ),
+   466	                    )
+   467	                )
+   468	            else:
+   469	                stack = _filter_stack(stack)
+   470	                formatted_stack_list.append(
+   471	                    FormattedStackItem(
+   472	                        FormatItemTypes.CONTENT,
+   473	                        textwrap.dedent("".join(traceback.format_list(stack))),
+   474	                    )
+   475	                )
+   476	            prev_tinfo = tinfo
+   477	            depth += 1
+   478	        tinfo = tinfo_chain[0]
+   479	        formatted_stack_list.append(
+   480	            FormattedStackItem(
+   481	                FormatItemTypes.HEADER,
+   482	                "Stack of %s (most recent call last)" % _format_terminated_task(tinfo),
+   483	            )
+   484	        )
+   485	        stack = tinfo.termination_stack
+   486	        if not stack:
+   487	            formatted_stack_list.append(
+   488	                FormattedStackItem(
+   489	                    FormatItemTypes.CONTENT,
+   490	                    (
+   491	                        "No stack available for %s (the task has run to completion)"
+   492	                        % _format_terminated_task(tinfo)
+   493	                    ),
+   494	                )
+   495	            )
+   496	        else:
+   497	            formatted_stack_list.append(
+   498	                FormattedStackItem(
+   499	                    FormatItemTypes.CONTENT,
+   500	                    textwrap.dedent("".join(traceback.format_list(stack))),
+   501	                )
+   502	            )
+   503	        return formatted_stack_list
+   504	
+   505	    async def _coro_wrapper(self, coro: Awaitable[T_co]) -> T_co:
+   506	        myself = asyncio.current_task()
+   507	        assert isinstance(myself, TracedTask)
+   508	        try:
+   509	            return await coro
+   510	        except BaseException as e:
+   511	            myself._termination_stack = _extract_stack_from_exception(e)[:-1]
+   512	            raise
+   513	
+   514	    def _create_task(
+   515	        self,
+   516	        loop: asyncio.AbstractEventLoop,
+   517	        coro: Coroutine[Any, Any, T_co] | Generator[Any, None, T_co],
+   518	        *,
+   519	        name: str | None = None,
+   520	        context: contextvars.Context | None = None,
+   521	    ) -> asyncio.Future[T_co]:
+   522	        assert loop is self._monitored_loop
+   523	        try:
+   524	            parent_task = asyncio.current_task()
+   525	        except RuntimeError:
+   526	            parent_task = None
+   527	        persistent = coro in persistent_coro
+   528	        task = TracedTask(
+   529	            self._coro_wrapper(coro),  # type: ignore
+   530	            termination_info_queue=self._termination_info_queue.sync_q,
+   531	            cancellation_chain_queue=self._cancellation_chain_queue.sync_q,
+   532	            persistent=persistent,
+   533	            loop=self._monitored_loop,
+   534	            name=name,  # since Python 3.8
+   535	            context=context,  # since Python 3.11
+   536	        )
+   537	        task._orig_coro = cast(Coroutine[Any, Any, T_co], coro)
+   538	        self._created_tracebacks[task] = _extract_stack_from_frame(sys._getframe())[
+   539	            :-1
+   540	        ]  # strip this wrapper method
+   541	        if parent_task is not None:
+   542	            self._created_traceback_chains[task] = weakref.ref(parent_task)
+   543	        return task
+   544	
+   545	    def _ui_main(self) -> None:
+   546	        asyncio.run(self._ui_main_async())
+   547	
+   548	    async def _ui_main_async(self) -> None:
+   549	        loop = asyncio.get_running_loop()
+   550	        self._termination_info_queue = janus.Queue()
+   551	        self._cancellation_chain_queue = janus.Queue()
+   552	        self._ui_loop = loop
+   553	        self._ui_forever_future = loop.create_future()
+   554	        self._ui_termination_handler_task = loop.create_task(
+   555	            self._ui_handle_termination_updates()
+   556	        )
+   557	        self._ui_cancellation_handler_task = loop.create_task(
+   558	            self._ui_handle_cancellation_updates()
+   559	        )
+   560	        telnet_server = TelnetServer(
+   561	            interact=functools.partial(interact, self),
+   562	            host=self._host,
+   563	            port=self._termui_port,
+   564	        )
+   565	        webui_app = await init_webui(self)
+   566	        webui_runner = web.AppRunner(webui_app)
+   567	        await webui_runner.setup()
+   568	        webui_site = web.TCPSite(
+   569	            webui_runner,
+   570	            str(self._host),
+   571	            self._webui_port,
+   572	            reuse_port=True,
+   573	        )
+   574	        await webui_site.start()
+   575	        telnet_server.start()
+   576	        await asyncio.sleep(0)
+   577	        self._ui_started.set()
+   578	        try:
+   579	            await self._ui_forever_future
+   580	        except asyncio.CancelledError:
+   581	            pass
+   582	        finally:
+   583	            termui_tasks = {*self._termui_tasks}
+   584	            for termui_task in termui_tasks:
+   585	                termui_task.cancel()
+   586	            await asyncio.gather(*termui_tasks, return_exceptions=True)
+   587	            self._ui_termination_handler_task.cancel()
+   588	            self._ui_cancellation_handler_task.cancel()
+   589	            with contextlib.suppress(asyncio.CancelledError):
+   590	                await self._ui_termination_handler_task
+   591	            with contextlib.suppress(asyncio.CancelledError):
+   592	                await self._ui_cancellation_handler_task
+   593	            await telnet_server.stop()
+   594	            await webui_runner.cleanup()
+   595	
+   596	    async def _ui_handle_termination_updates(self) -> None:
+   597	        while True:
+   598	            try:
+   599	                update: TerminatedTaskInfo = (
+   600	                    await self._termination_info_queue.async_q.get()
+   601	                )
+   602	            except asyncio.CancelledError:
+   603	                return
+   604	            self._terminated_tasks[update.id] = update
+   605	            if not update.persistent:
+   606	                self._terminated_history.append(update.id)
+   607	            # canceller stack is already put in _ui_handle_cancellation_updates()
+   608	            if canceller_stack := self._canceller_stacks.pop(update.id, None):
+   609	                update.canceller_stack = canceller_stack
+   610	            while len(self._terminated_history) > self._max_termination_history:
+   611	                removed_id = self._terminated_history.pop(0)
+   612	                self._terminated_tasks.pop(removed_id, None)
+   613	                self._canceller_chain.pop(removed_id, None)
+   614	                self._canceller_stacks.pop(removed_id, None)
+   615	
+   616	    async def _ui_handle_cancellation_updates(self) -> None:
+   617	        while True:
+   618	            try:
+   619	                update: CancellationChain = (
+   620	                    await self._cancellation_chain_queue.async_q.get()
+   621	                )
+   622	            except asyncio.CancelledError:
+   623	                return
+   624	            self._canceller_stacks[update.target_id] = update.canceller_stack
+   625	            self._canceller_chain[update.target_id] = update.canceller_id
+   626	
+   627	
+   628	def start_monitor(
+   629	    loop: asyncio.AbstractEventLoop,
+   630	    *,
+   631	    monitor_cls: Type[Monitor] = Monitor,
+   632	    host: str = MONITOR_HOST,
+   633	    port: int = MONITOR_TERMUI_PORT,  # kept the name for backward compatibility
+   634	    console_port: int = CONSOLE_PORT,
+   635	    webui_port: int = MONITOR_WEBUI_PORT,
+   636	    console_enabled: bool = True,
+   637	    hook_task_factory: bool = False,
+   638	    max_termination_history: Optional[int] = None,
+   639	    locals: Optional[Dict[str, Any]] = None,
+   640	) -> Monitor:
+   641	    """
+   642	    Factory function, creates instance of :class:`Monitor` and starts
+   643	    monitoring thread.
+   644	
+   645	    :param Type[Monitor] monitor: Monitor class to use
+   646	    :param str host: hostname to serve monitor telnet server
+   647	    :param int port: monitor port (terminal UI), by default 20101
+   648	    :param int webui_port: monitor port (web UI), by default 20102
+   649	    :param int console_port: python REPL port, by default 20103
+   650	    :param bool console_enabled: flag indicates if python REPL is requred
+   651	        to start with instance of monitor.
+   652	    :param dict locals: dictionary with variables exposed in python console
+   653	        environment
+   654	    """
+   655	    m = monitor_cls(
+   656	        loop,
+   657	        host=host,
+   658	        termui_port=port,
+   659	        webui_port=webui_port,
+   660	        console_port=console_port,
+   661	        console_enabled=console_enabled,
+   662	        hook_task_factory=hook_task_factory,
+   663	        max_termination_history=(
+   664	            max_termination_history
+   665	            if max_termination_history is not None
+   666	            else get_default_args(monitor_cls.__init__)["max_termination_history"]
+   667	        ),
+   668	        locals=locals,
+   669	    )
+   670	    m.start()
+   671	    return m

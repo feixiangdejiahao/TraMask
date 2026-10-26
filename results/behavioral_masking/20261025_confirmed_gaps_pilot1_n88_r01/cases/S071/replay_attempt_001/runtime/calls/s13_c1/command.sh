@@ -1,0 +1,1 @@
+cd /app && ls node_modules/.package-lock.json 2>/dev/null && grep -n "superjson" package-lock.json | head

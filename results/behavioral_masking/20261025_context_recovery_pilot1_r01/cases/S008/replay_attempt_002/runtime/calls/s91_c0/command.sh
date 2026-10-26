@@ -1,0 +1,1 @@
+sleep 15; cat /tmp/build2.log 2>/dev/null | head -40; ps aux | grep '[g]o build' | head -3

@@ -1,0 +1,1 @@
+grep -rn "initializ\|Initializ" src/ README.md CHANGELOG.md | head -50; echo "---"; cat src/awilix.ts

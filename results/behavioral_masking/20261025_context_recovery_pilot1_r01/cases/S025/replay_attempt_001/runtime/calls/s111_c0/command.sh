@@ -1,0 +1,1 @@
+cd /app && pnpm test 2>&1 | grep -E "Test Files|Tests |failed|FAIL" | tail -20 && pnpm exec biome check packages/core/src/prompts/autocomplete.ts packages/core/src/prompts/prompt.ts packages/prompts/src/autocomplete.ts packages/core/test/prompts/autocomplete.test.ts packages/prompts/test/autocomplete.test.ts 2>&1 | tail -3

@@ -1,0 +1,1 @@
+cd /app && cat src/schema/actions/jsonSchemer/formattedValue/schema.ts && echo "===INDEX===" && cat src/schema/actions/jsonSchemer/formattedValue/index.ts

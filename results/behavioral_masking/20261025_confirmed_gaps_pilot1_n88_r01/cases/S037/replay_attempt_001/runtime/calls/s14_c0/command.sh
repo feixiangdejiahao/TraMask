@@ -1,0 +1,1 @@
+cd /app && cat src/kea/kea.ts

@@ -1,0 +1,1 @@
+cd /app && ls .changeset && cat .changeset/*.md 2>/dev/null | head -30

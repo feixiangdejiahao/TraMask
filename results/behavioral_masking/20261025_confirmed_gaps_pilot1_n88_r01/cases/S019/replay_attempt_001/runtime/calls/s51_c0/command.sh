@@ -1,0 +1,1 @@
+cd /app && cat src/types/overwrite.ts && cat src/types/merge.ts && cat src/utils/overwrite.ts

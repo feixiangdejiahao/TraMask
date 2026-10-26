@@ -1,0 +1,1 @@
+cd /app && cat .babelrc && cat tsconfig.json && echo '=== events test ===' && cat test/jest/events.js && echo '=== hooks test ===' && cat test/jest/hooks.js

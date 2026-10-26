@@ -1,0 +1,1 @@
+cd /app && grep -n "Services{" backend/internal/huma/huma_test.go | head -5 && grep -rn "Services{" backend/internal/huma/*_test.go backend/internal/huma/handlers/*_test.go 2>/dev/null | head -5

@@ -1,0 +1,1 @@
+cd /app && grep -n "class Converter\|def __init__\|self.forbid_extra_keys\|self.use_alias\|self.omit_if_default\|self.type_overrides" src/cattrs/converters.py | sed -n '1,60p'

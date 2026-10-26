@@ -1,0 +1,1 @@
+python -m pytest tests/test_partial_structure.py::TestRefine::test_preserves_successful_fields -q -o addopts="" -p no:cacheprovider

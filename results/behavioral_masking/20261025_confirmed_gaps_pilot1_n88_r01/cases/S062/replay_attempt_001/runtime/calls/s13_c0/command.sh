@@ -1,0 +1,1 @@
+grep -n "def Thread\|class.*Thread" pwnlib/context/*.py | head; echo ---; grep -rn "context.Thread" pwnlib/tubes/*.py | head

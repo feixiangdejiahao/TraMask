@@ -1,0 +1,1 @@
+GOROOT=$(go env GOROOT); sed -n '839,900p' "$GOROOT/src/go/doc/comment/parse.go"

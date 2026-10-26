@@ -1,0 +1,1 @@
+cd /app && pnpm --filter @clack/core run build >/dev/null 2>&1 && pnpm --filter @clack/prompts run build >/dev/null 2>&1 && cd packages/core && npx vitest run 2>&1 | tail -6 && echo "=====PROMPTS (all except path)=====" && cd /app/packages/prompts && npx vitest run --exclude test/path.test.ts 2>&1 | tail -8

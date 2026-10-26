@@ -1,0 +1,1 @@
+cd / && ls -la && find . -maxdepth 2 -name package.json 2>/dev/null | head -20

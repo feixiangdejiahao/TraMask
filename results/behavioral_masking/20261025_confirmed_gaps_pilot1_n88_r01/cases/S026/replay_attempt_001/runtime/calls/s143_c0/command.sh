@@ -1,0 +1,1 @@
+ps -o pid,etime,pcpu,stat,cmd -p 43644; ls -la /tmp/checkers_test4.log

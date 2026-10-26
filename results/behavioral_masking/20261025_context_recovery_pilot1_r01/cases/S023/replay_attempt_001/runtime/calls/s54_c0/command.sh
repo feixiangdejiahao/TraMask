@@ -1,0 +1,1 @@
+cd /app && python /tmp/test_spec.py 2>&1 | tail -8 && python /tmp/edge.py 2>&1 | tail -3

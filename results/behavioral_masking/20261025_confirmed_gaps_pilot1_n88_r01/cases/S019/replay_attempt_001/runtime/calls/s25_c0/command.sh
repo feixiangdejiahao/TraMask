@@ -1,0 +1,1 @@
+cd /app && cat src/entity/utils/buildEntitySchema/buildEntitySchema.ts && echo "===TYPES===" && cat src/entity/utils/buildEntitySchema/types.ts

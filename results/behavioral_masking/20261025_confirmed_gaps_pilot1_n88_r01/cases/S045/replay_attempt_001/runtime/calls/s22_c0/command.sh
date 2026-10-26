@@ -1,0 +1,1 @@
+pip index versions langchain-core 2>/dev/null | head -5 || pip download langchain-core==1.2.18 --no-deps -d /tmp/check 2>&1 | tail -5

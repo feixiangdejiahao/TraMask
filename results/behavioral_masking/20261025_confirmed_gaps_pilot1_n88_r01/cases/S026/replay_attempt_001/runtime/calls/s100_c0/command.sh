@@ -1,0 +1,1 @@
+cd /app && go test ./checkers/internal/astwalk/... ./linter/... -count=1 2>&1 | tail -10 && echo "=== cmd tests ===" && grep -rn "^func Test" cmd/go-critic/check_test.go cmd/gocritic/check_test.go | head -20

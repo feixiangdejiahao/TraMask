@@ -1,0 +1,1 @@
+cd /app && git diff lib/app.js lib/server/index.js lib/runners/browser_test_runner.js lib/runners/process_test_runner.js lib/runners/tap_process_test_runner.js

@@ -1,0 +1,1 @@
+cd /app && git diff --stat && git diff src/dateutil/rrule.py | head -200

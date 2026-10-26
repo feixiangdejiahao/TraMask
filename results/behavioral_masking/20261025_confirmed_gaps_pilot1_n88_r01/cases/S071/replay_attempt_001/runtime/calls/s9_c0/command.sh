@@ -1,0 +1,1 @@
+cd /app && grep -n "Error\|error\|allowErrorProps\|stack" src/index.test.ts | head -80

@@ -1,0 +1,300 @@
+diff --git a/src/container.ts b/src/container.ts
+index 5e1253a..3328872 100644
+--- a/src/container.ts
++++ b/src/container.ts
+@@ -1,5 +1,7 @@
+ import * as util from 'util'
+ import {
++  AwilixInitializationError,
++  AwilixNotInitializedError,
+   AwilixRegistrationError,
+   AwilixResolutionError,
+   AwilixTypeError,
+@@ -17,6 +19,8 @@ import {
+   BuildResolverOptions,
+   Constructor,
+   DisposableResolver,
++  INITIALIZER,
++  Initializer,
+   Resolver,
+   asClass,
+   asFunction,
+@@ -140,6 +144,14 @@ export interface AwilixContainer<Cradle extends object = any> {
+    * Only applies to registrations with `SCOPED` or `SINGLETON` lifetime.
+    */
+   dispose(): Promise<void>
++  /**
++   * Initializes the container by resolving all registrations with an
++   * `initializer`, running the initializers in dependency order.
++   *
++   * @param {InitializeOptions} options
++   * @return {Promise<InitializeResult>}
++   */
++  initialize(options?: InitializeOptions): Promise<InitializeResult>
+ }
+ 
+ /**
+@@ -167,6 +179,46 @@ export interface CacheEntry<T = any> {
+   value: T
+ }
+ 
++/**
++ * Options for initializing the container.
++ */
++export interface InitializeOptions {
++  /**
++   * The maximum number of initializers to run concurrently within a
++   * single dependency level. Defaults to `Infinity`.
++   */
++  concurrency?: number
++}
++
++/**
++ * The result of initializing the container.
++ */
++export interface InitializeResult {
++  /**
++   * The total duration in milliseconds.
++   */
++  totalDuration: number
++  /**
++   * The metrics for each initialized registration.
++   */
++  metrics: Record<string | symbol, InitializeMetrics>
++}
++
++/**
++ * Metrics for an initialized registration.
++ */
++export interface InitializeMetrics {
++  /**
++   * The duration in milliseconds it took to initialize the registration.
++   */
++  duration: number
++  /**
++   * The dependency level of the registration. All registrations at a
++   * given level complete before the next level begins.
++   */
++  level: number
++}
++
+ /**
+  * Register a Registration
+  * @interface NameAndRegistrationPair
+@@ -214,6 +266,21 @@ const FAMILY_TREE = Symbol('familyTree')
+  */
+ const ROLL_UP_REGISTRATIONS = Symbol('rollUpRegistrations')
+ 
++/**
++ * Initialized values symbol. Maps registration names to their initialized values.
++ */
++const INITIALIZED_VALUES = Symbol('initializedValues')
++
++/**
++ * Finds an initialized value in this container or any parent.
++ */
++const FIND_INITIALIZED_VALUE = Symbol('findInitializedValue')
++
++/**
++ * Checks if a registration has been initialized in this container or any parent.
++ */
++const HAS_INITIALIZED_VALUE = Symbol('hasInitializedValue')
++
+ /**
+  * The string representation when calling toString.
+  */
+@@ -261,6 +328,22 @@ function createContainerInternal<
+   // Internal registration store for this container.
+   const registrations: RegistrationHash = {}
+ 
++  /**
++   * Values that have been initialized for this container. Keyed by registration name.
++   */
++  const initializedValues = new Map<string | symbol, CacheEntry>()
++
++  type InitializationState =
++    | { status: 'idle' }
++    | { status: 'initializing'; promise: Promise<InitializeResult> }
++    | { status: 'success'; result: InitializeResult }
++    | { status: 'failed'; error: Error }
++
++  /**
++   * The initialization state of this container.
++   */
++  let initializationState: InitializationState = { status: 'idle' }
++
+   /**
+    * The `Proxy` that is passed to functions so they can resolve their dependencies without
+    * knowing where they come from. I call it the "cradle" because
+@@ -336,9 +419,13 @@ function createContainerInternal<
+     resolve,
+     hasRegistration,
+     dispose,
++    initialize,
+     getRegistration,
+     [util.inspect.custom]: inspect,
+     [ROLL_UP_REGISTRATIONS!]: rollUpRegistrations,
++    [INITIALIZED_VALUES]: initializedValues,
++    [FIND_INITIALIZED_VALUE]: findInitializedValue,
++    [HAS_INITIALIZED_VALUE]: hasInitializedValue,
+     get registrations() {
+       return rollUpRegistrations()
+     },
+@@ -528,6 +615,16 @@ function createContainerInternal<
+         throw new AwilixResolutionError(name, resolutionStack)
+       }
+ 
++      // If this registration has an initializer, it must be initialized before it can be
++      // resolved. If it has already been initialized, return the initialized value.
++      if (typeof (resolver as any)[INITIALIZER] === 'function') {
++        const initializedEntry = findInitializedValue(name)
++        if (initializedEntry !== undefined) {
++          return initializedEntry.value
++        }
++        throw new AwilixNotInitializedError(name)
++      }
++
+       const lifetime = resolver.lifetime || Lifetime.TRANSIENT
+ 
+       // if we are running in strict mode, this resolver is not explicitly marked leak-safe, and any
+@@ -702,6 +799,377 @@ function createContainerInternal<
+     }
+   }
+ 
++  /**
++   * Finds an initialized value for a registration, walking up the parent
++   * chain if needed.
++   */
++  function findInitializedValue(name: string | symbol): CacheEntry | undefined {
++    const entry = initializedValues.get(name)
++    if (entry !== undefined) {
++      return entry
++    }
++    if (parentContainer) {
++      return (parentContainer as any)[FIND_INITIALIZED_VALUE](name)
++    }
++    return undefined
++  }
++
++  /**
++   * Checks if a registration has been initialized in this container or any parent.
++   */
++  function hasInitializedValue(name: string | symbol): boolean {
++    if (initializedValues.has(name)) {
++      return true
++    }
++    if (parentContainer) {
++      return (parentContainer as any)[HAS_INITIALIZED_VALUE](name)
++    }
++    return false
++  }
++
++  /**
++   * A single registration in an initialization plan.
++   */
++  interface InitializationEntry {
++    name: string | symbol
++    resolver: Resolver<any>
++  }
++
++  /**
++   * A level in an initialization plan. All entries in a level are initialized
++   * concurrently before the next level begins.
++   */
++  interface InitializationLevel {
++    entries: Array<InitializationEntry>
++  }
++
++  /**
++   * Extracts dependency names from a resolver. Dependencies are parsed when the
++   * resolver is created and exposed on the resolve function.
++   */
++  function getResolverDependencies(
++    resolver: Resolver<any>,
++  ): Array<string | symbol> {
++    const resolve = (resolver as any).resolve
++    const dependencies = resolve && resolve.dependencies
++    if (!Array.isArray(dependencies)) {
++      return []
++    }
++    return dependencies.map((dep: { name: string | symbol }) => dep.name)
++  }
++
++  /**
++   * Builds the initialization plan: registrations with an initializer grouped
++   * into dependency levels. Throws AwilixResolutionError if a cycle is detected.
++   */
++  function buildInitializationPlan(): Array<InitializationLevel> {
++    const entries: Array<InitializationEntry> = []
++    const localNames = [
++      ...Object.keys(registrations),
++      ...Object.getOwnPropertySymbols(registrations),
++    ]
++    for (const name of localNames) {
++      const resolver = registrations[name as any] as Resolver<any>
++      if (resolver && typeof (resolver as any)[INITIALIZER] === 'function') {
++        entries.push({ name, resolver })
++      }
++    }
++
++    if (entries.length === 0) {
++      return []
++    }
++
++    const byName = new Map<string | symbol, InitializationEntry>()
++    const initializedNames = new Set<string | symbol>()
++    for (const entry of entries) {
++      byName.set(entry.name, entry)
++      initializedNames.add(entry.name)
++    }
++
++    // Build a graph over all local registrations. Edges go from a registration
++    // to the local registrations it depends on.
++    const graph = new Map<string | symbol, Array<string | symbol>>()
++    for (const name of localNames) {
++      const resolver = registrations[name as any] as Resolver<any>
++      graph.set(
++        name,
++        resolver
++          ? getResolverDependencies(resolver).filter((depName) =>
++              Object.prototype.hasOwnProperty.call(registrations, depName),
++            )
++          : [],
++      )
++    }
++
++    // For each initialized registration, compute the set of initialized
++    // registrations it depends on (directly or through non-initialized
++    // registrations). Cycles are detected while traversing.
++    const initializedAncestors = new Map<
++      string | symbol,
++      Set<string | symbol>
++    >()
++
++    const collectAncestors = (
++      name: string | symbol,
++      visiting: Set<string | symbol>,
++    ): Set<string | symbol> => {
++      const cached = initializedAncestors.get(name)
++      if (cached) {
++        return cached
++      }
++      if (visiting.has(name)) {
++        throw new AwilixResolutionError(
++          name,
++          [],
++          'Cyclic dependencies detected.',
++        )
++      }
++      visiting.add(name)
++      const result = new Set<string | symbol>()
++      for (const depName of graph.get(name) || []) {
++        if (visiting.has(depName)) {
++          throw new AwilixResolutionError(
++            depName,
++            [],
++            'Cyclic dependencies detected.',
++          )
++        }
++        if (initializedNames.has(depName)) {
++          result.add(depName)

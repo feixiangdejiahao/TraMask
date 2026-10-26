@@ -1,0 +1,1 @@
+cd /app && ls types/ && grep -rn "type Container struct\|func.*Container" types/container/*.go | head -30

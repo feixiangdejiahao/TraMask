@@ -1,0 +1,1 @@
+cd /app && cat src/errors/index.ts && echo "===SCHEMA ERRORS===" && cat src/schema/errors.ts && echo "===PARSING ERRORS===" && cat src/schema/actions/parse/errors.ts && echo "===ACTIONS ERRORS===" && cat src/schema/actions/errors.ts

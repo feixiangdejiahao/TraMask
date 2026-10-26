@@ -1,0 +1,1 @@
+cd /app && sed -i 's/assert r2.value == Complete(1, "z")/assert r2.value == Complete(999, "z")/' /tmp/test_spec.py && python /tmp/test_spec.py 2>&1 | tail -3

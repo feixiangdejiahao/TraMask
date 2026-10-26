@@ -1,0 +1,1 @@
+grep -n "DocLink{" "$(go env GOROOT)/src/go/doc/comment/parse.go"; echo "-----"; grep -n "func.*parseDoc\|parseDoc\." "$(go env GOROOT)/src/go/doc/comment/parse.go" | head -60

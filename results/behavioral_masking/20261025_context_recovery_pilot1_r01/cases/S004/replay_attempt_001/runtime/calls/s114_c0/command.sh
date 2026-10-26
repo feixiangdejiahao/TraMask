@@ -1,0 +1,1 @@
+cd /app && git branch --show-current && python -m pytest tests/ -q -p no:warnings 2>&1 | tail -3 && ruff check aiomonitor tests && mypy aiomonitor && echo FINAL_OK
