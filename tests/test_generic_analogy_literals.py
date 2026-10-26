@@ -1,8 +1,8 @@
 import pytest
 
 from anchor_retrieval.syntax import Source, walk
-from experimental.generic_v2.analogy import analogy
-from experimental.generic_v2.literals import refine_strings
+from prototypes.test_edit_analogy_v02.analogy import analogy
+from prototypes.test_edit_analogy_v02.literals import refine_strings
 from generic_composition.terms import from_source, render, subterms
 
 

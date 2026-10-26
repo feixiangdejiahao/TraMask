@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from experimental.observed_write_frontier import Frontier, canonical, fingerprint, project, scalar
+from prototypes.observed_write_frontier import Frontier, canonical, fingerprint, project, scalar
 
 
 def event():

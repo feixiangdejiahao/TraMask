@@ -4,7 +4,7 @@ import json
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
 from generic_composition.gate import presentation, selection_candidates
-from experimental.generic_v2.generate import Budget, gate_evidence, generate
+from prototypes.test_edit_analogy_v02.generate import Budget, gate_evidence, generate
 
 
 def corpus(tmp_path, code, language='python', retrieval=None):

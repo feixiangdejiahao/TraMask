@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from experimental import llm_baseline as baseline
+from prototypes import llm_baseline as baseline
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
 from scripts import run_llm_generation_baseline as cli

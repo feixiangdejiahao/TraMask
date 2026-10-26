@@ -12,14 +12,14 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from experimental.exact_oracle_material import MaterialIndex, POLICY, VERSION, request_keys, select_unique, sha, summarize
+from prototypes.exact_oracle_material import MaterialIndex, POLICY, VERSION, request_keys, select_unique, sha, summarize
 from relation_search.impact_selection import select
 
-CODE_PATHS = ['experimental/exact_oracle_material.py', 'scripts/census_exact_oracle_material.py',
+CODE_PATHS = ['prototypes/exact_oracle_material.py', 'scripts/census_exact_oracle_material.py',
     'relation_search/impact_selection.py', 'relation_search/semantic_selection.py',
     'relation_search/instrument.py', 'relation_search/oracle.py',
-    'relation_search/oracle_evidence.py', 'experimental/singleton_oracle_slots.py',
-    'experimental/assertion_operand_guard.py', 'generic_composition/emitter.py']
+    'relation_search/oracle_evidence.py', 'prototypes/singleton_oracle_slots.py',
+    'prototypes/assertion_operand_guard.py', 'generic_composition/emitter.py']
 
 
 def read(path):

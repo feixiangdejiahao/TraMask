@@ -28,8 +28,8 @@ POLICY=dict(version='executed-source-control-oracle-budget-v1',budget=16,
     rounds='independent per completed round; no claim of campaign-wide backlog equivalence',
     forbidden=['evaluation labels','historical oracle cache','known target IDs','test failure message semantics'])
 CODE_FILES=['scripts/audit_executed_oracle_budget.py','relation_search/impact_selection.py',
-    'relation_search/semantic_selection.py','experimental/singleton_oracle_slots.py',
-    'experimental/assertion_operand_guard.py','anchor_retrieval/graph.py','anchor_retrieval/syntax.py',
+    'relation_search/semantic_selection.py','prototypes/singleton_oracle_slots.py',
+    'prototypes/assertion_operand_guard.py','anchor_retrieval/graph.py','anchor_retrieval/syntax.py',
     'anchor_retrieval/index.py','relational_gap/frontend.py','relation_search/instrument.py',
     'relation_search/feedback.py','relation_search/frontier.py','combination_testing/test_reports.py']
 

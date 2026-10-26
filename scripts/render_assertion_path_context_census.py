@@ -9,16 +9,16 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from experimental.assertion_write_origin import Index
-from experimental.assertion_path_context import render_context
+from prototypes.assertion_write_origin import Index
+from prototypes.assertion_path_context import render_context
 from relation_search.checkpoint import digest, read, write
 from scripts.analyze_assertion_write_origin_census import analyze_corpus
 
 
 def run(source, cases, output):
     output.mkdir(parents=True, exist_ok=False)
-    code = [Path(__file__), ROOT / 'experimental/assertion_path_context.py',
-            ROOT / 'experimental/assertion_write_origin.py', ROOT / 'scripts/analyze_assertion_write_origin_census.py']
+    code = [Path(__file__), ROOT / 'prototypes/assertion_path_context.py',
+            ROOT / 'prototypes/assertion_write_origin.py', ROOT / 'scripts/analyze_assertion_write_origin_census.py']
     write(output / 'protocol.json', dict(source=str(source.resolve()), cases=cases,
         corpus_sha256={case:digest(source / case / 'corpus.json') for case in cases},
         code_sha256={str(p.relative_to(ROOT)):digest(p) for p in code},

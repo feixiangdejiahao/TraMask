@@ -5,9 +5,9 @@ import pytest
 from generic_composition.corpus import build_corpus, source_text
 from generic_composition.emitter import emit
 from generic_composition.gate import presentation, selection_candidates
-from experimental.assertion_windows.generate import Budget, generate, gate_evidence
-from experimental.assertion_windows.compose import compose, prepare_environment
-from experimental.assertion_windows.extract import extract
+from prototypes.assertion_window_generation.generate import Budget, generate, gate_evidence
+from prototypes.assertion_window_generation.compose import compose, prepare_environment
+from prototypes.assertion_window_generation.extract import extract
 
 
 def corpus(tmp_path, code, language='python'):

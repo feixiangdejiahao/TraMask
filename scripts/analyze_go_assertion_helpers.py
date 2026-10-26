@@ -12,7 +12,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.go_assertion_helper import HelperIndex
+from prototypes.go_assertion_helper import HelperIndex
 from relation_search.checkpoint import digest, read, write
 
 
@@ -24,7 +24,7 @@ def run(inputs, output):
         inventory.append(dict(case=path.parent.name, path=str(path.resolve()),
             sha256=digest(path), language=corpus['language']))
     selected = [row for row in inventory if row['language'] == 'go']
-    sources = ['experimental/go_assertion_helper.py', 'experimental/go_arity_guard.py',
+    sources = ['prototypes/go_assertion_helper.py', 'prototypes/go_arity_guard.py',
                'anchor_retrieval/syntax.py', 'scripts/analyze_go_assertion_helpers.py']
     code = {}
     for relative in sources:

@@ -1,7 +1,7 @@
 """Source-only examples for the experimental lexical and callable checker."""
 import pytest
 
-from experimental.generic_v2.bindings import analyze_bindings
+from prototypes.test_edit_analogy_v02.bindings import analyze_bindings
 
 
 def check(code, before, after, language='python', **kwargs):

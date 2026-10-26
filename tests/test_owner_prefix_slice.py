@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.owner_prefix_slice import propose_candidate, slice_prefix
+from prototypes.owner_prefix_slice import propose_candidate, slice_prefix
 
 
 @pytest.mark.parametrize("owner,item,value,build,mutate,publish,read,retire,probe", [

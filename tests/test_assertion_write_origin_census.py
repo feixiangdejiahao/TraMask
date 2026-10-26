@@ -1,7 +1,7 @@
 import ast
 from unittest.mock import patch
 
-from experimental.assertion_write_origin import Index
+from prototypes.assertion_write_origin import Index
 from scripts.analyze_assertion_write_origin_census import analyze_corpus, enumerate_assertions
 
 

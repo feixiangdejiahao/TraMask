@@ -9,8 +9,8 @@ import types
 
 import pytest
 
-from experimental.assertion_write_origin import Module, analyze_assertion
-from experimental.exception_write_priority import evidence
+from prototypes.assertion_write_origin import Module, analyze_assertion
+from prototypes.exception_write_priority import evidence
 
 
 def example(subject, *, replacement=None, assertion='obj.amount == 20'):

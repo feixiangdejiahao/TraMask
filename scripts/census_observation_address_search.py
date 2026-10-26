@@ -159,10 +159,10 @@ def run(args):
         path = (ROOT / filename).resolve()
         require(path.is_relative_to(ROOT) and sha(path) == digest, 'Requested source freeze mismatch: ' + filename)
         requested_sources.add(path)
-    require({ROOT/'experimental'/filename for filename in ('observation_address_search.py',
+    require({ROOT/'prototypes'/filename for filename in ('observation_address_search.py',
             'observation_address_join.py','observation_address_effects.py')} <= requested_sources,
             'Freeze must name search, join, and effect modules before import')
-    generator = importlib.import_module('experimental.observation_address_search')
+    generator = importlib.import_module('prototypes.observation_address_search')
     seals = local_modules()
     inventory, protocol = read(args.inventory), read(args.protocol)
     require(inventory['case_count'] == 17 and len(inventory['cases']) == 17, 'Expected frozen17 cases')

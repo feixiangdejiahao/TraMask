@@ -165,11 +165,11 @@ def audit_candidate(candidate, corpus, output):
 
 
 def run(args):
-    for filename, expected in [('experimental/observation_address_join.py', args.generator_sha),
-                               ('experimental/observation_address_effects.py', args.effects_sha)]:
+    for filename, expected in [('prototypes/observation_address_join.py', args.generator_sha),
+                               ('prototypes/observation_address_effects.py', args.effects_sha)]:
         require(sha(ROOT / filename) == expected, 'Generator freeze mismatch: ' + filename)
-    generator = importlib.import_module('experimental.observation_address_join')
-    importlib.import_module('experimental.observation_address_effects')
+    generator = importlib.import_module('prototypes.observation_address_join')
+    importlib.import_module('prototypes.observation_address_effects')
     seals = local_modules()
     inventory = read(args.inventory)
     require(inventory['case_count'] == 17 and len(inventory['cases']) == 17, 'Expected frozen17 source cases')

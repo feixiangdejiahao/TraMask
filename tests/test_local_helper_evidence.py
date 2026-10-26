@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.local_helper_evidence import _writes, analyze
+from prototypes.local_helper_evidence import _writes, analyze
 from anchor_retrieval.syntax import walk
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search.oracle_evidence import _modified_sources

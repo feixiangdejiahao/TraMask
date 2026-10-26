@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from experimental.semantic_transport.oracle import (
+from prototypes.test_action_and_oracle_transfer.oracle import (
     Limits, OracleError, Unknown, decode_value, emit_literal, encode_value,
     evaluate_expression, parse_source_literal, unknown, validate_completions,
 )
@@ -236,7 +236,7 @@ def test_python_literal_emission_preserves_values_and_escape_sequences():
 def test_python_set_literals_and_completion_cache_are_stable_across_hash_seeds():
     script = r'''
 import json
-from experimental.semantic_transport.oracle import encode_value, emit_literal, same_value, validate_completions
+from prototypes.test_action_and_oracle_transfer.oracle import encode_value, emit_literal, same_value, validate_completions
 value = {
     'z_last_alphabetically': [
         {'indigo', 'amber', 'violet', 'cyan'},

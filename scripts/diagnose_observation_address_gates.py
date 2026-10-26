@@ -20,8 +20,8 @@ if __package__ in {None, ''}:
 
 from anchor_retrieval.index import Index
 from anchor_retrieval.syntax import Source
-from experimental import observation_address_join as join
-from experimental.observation_address_effects import summarize_method
+from prototypes import observation_address_join as join
+from prototypes.observation_address_effects import summarize_method
 from relational_gap import state_cells as cells
 
 
@@ -109,8 +109,8 @@ def main(argv=None):
         rows.append(row)
         print(json.dumps(dict(case=item['case'], indexed_read_sites=len(row['read_sites']),
                               gates=dict(Counter(r['first_excluding_gate'] for r in row['read_sites'])))), flush=True)
-    sources = [Path(__file__), ROOT/'experimental/observation_address_join.py',
-               ROOT/'experimental/observation_address_effects.py']
+    sources = [Path(__file__), ROOT/'prototypes/observation_address_join.py',
+               ROOT/'prototypes/observation_address_effects.py']
     output = dict(version='source-address-first-gates.v2',
         inventory=dict(path=str(args.inventory.resolve()), sha256=hashlib.sha256(inventory_raw).hexdigest()),
         modules=[dict(path=str(p.resolve()), sha256=hashlib.sha256(p.read_bytes()).hexdigest()) for p in sources],

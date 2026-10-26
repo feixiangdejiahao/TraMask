@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from experimental.go_arity_guard import filter_candidates
+from prototypes.go_arity_guard import filter_candidates
 
 
 def corpus(code, extra=None):

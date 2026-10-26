@@ -3,8 +3,8 @@ import ast
 
 import pytest
 
-from experimental.semantic_transport.state_contexts import generate_state_contexts
-from experimental.state_regions import generate_state_regions
+from prototypes.test_action_and_oracle_transfer.state_contexts import generate_state_contexts
+from prototypes.state_regions import generate_state_regions
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
 

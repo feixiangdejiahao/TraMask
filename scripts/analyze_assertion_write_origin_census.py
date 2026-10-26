@@ -18,7 +18,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.assertion_write_origin import Index, analyze_assertion
+from prototypes.assertion_write_origin import Index, analyze_assertion
 
 CASES = ('P1', 'P2', 'P3', 'P4', 'N01', 'N02', 'N03', 'N04')
 TIERS = ('multiple_writers_and_prior_operation', 'prior_operation_only',
@@ -191,7 +191,7 @@ def main():
     if args.output.exists():
         raise ValueError('Use a new output directory; do not overwrite the first census')
     args.output.mkdir(parents=True)
-    implementation = [Path(__file__).resolve(), ROOT/'experimental/assertion_write_origin.py']
+    implementation = [Path(__file__).resolve(), ROOT/'prototypes/assertion_write_origin.py']
     protocol = dict(created_utc=datetime.now(timezone.utc).isoformat(), cases=list(CASES),
         source=str(args.source.resolve()), corpus_sha256={case:digest(args.source/case/'corpus.json') for case in CASES},
         code_sha256={str(path):digest(path) for path in implementation},

@@ -14,11 +14,11 @@ import sys
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from experimental.local_helper_evidence import analyze
+from prototypes.local_helper_evidence import analyze
 
-FILES=['experimental/local_helper_evidence.py','tests/test_local_helper_evidence.py',
-    'scripts/census_local_helper_evidence.py','experimental/go_assertion_helper.py',
-    'experimental/go_arity_guard.py','relation_search/oracle_evidence.py','relation_search/instrument.py',
+FILES=['prototypes/local_helper_evidence.py','tests/test_local_helper_evidence.py',
+    'scripts/census_local_helper_evidence.py','prototypes/go_assertion_helper.py',
+    'prototypes/go_arity_guard.py','relation_search/oracle_evidence.py','relation_search/instrument.py',
     'anchor_retrieval/syntax.py','anchor_retrieval/index.py','anchor_retrieval/graph.py',
     'generic_composition/corpus.py','relational_gap/frontend.py']
 

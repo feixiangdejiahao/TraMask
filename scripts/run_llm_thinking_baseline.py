@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from experimental import llm_baseline as baseline
+from prototypes import llm_baseline as baseline
 from scripts import run_llm_generation_baseline as original
 
 PROTOCOL = {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}

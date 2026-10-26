@@ -1,7 +1,7 @@
 """Observed-value rewriting with invented equations; no subject execution."""
 import pytest
 
-from experimental.oracle_symbolic.core import Equation, derive
+from prototypes.oracle_value_analysis.core import Equation, derive
 
 
 A, C = Equation('f(3)', '3'), Equation('f(8)', '8')

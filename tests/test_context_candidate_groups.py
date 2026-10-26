@@ -5,7 +5,7 @@ import pytest
 
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend,to_emitter_corpus
-from experimental.context_candidate_groups import build_catalogue,schedule,select
+from prototypes.context_candidate_groups import build_catalogue,schedule,select
 
 
 def setup(code,language='python'):

@@ -6,7 +6,7 @@ import pytest
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend,to_emitter_corpus
 from relation_search.impact_selection import select as original_select
-from experimental.modified_observation_impact import Analyzer,map_unchanged_span,select
+from prototypes.modified_observation_impact import Analyzer,map_unchanged_span,select
 
 
 def setup(code,language='python'):

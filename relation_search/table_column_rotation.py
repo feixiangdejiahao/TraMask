@@ -11,7 +11,7 @@ import json
 import posixpath
 
 from anchor_retrieval.syntax import Source, call_parts, child, walk
-from experimental import relation_search_go_ts as syntax
+from prototypes import relation_search_go_ts as syntax
 
 VERSION = 'source-go-table-column-rotation.v1'
 MAX_CANDIDATES = 16

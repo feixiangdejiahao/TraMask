@@ -3,8 +3,8 @@ import copy
 
 import pytest
 
-from experimental.semantic_transport.seed_selection import select
-from experimental.semantic_transport.proposals import Budget, generate
+from prototypes.test_action_and_oracle_transfer.seed_selection import select
+from prototypes.test_action_and_oracle_transfer.proposals import Budget, generate
 from generic_composition.corpus import build_corpus
 
 

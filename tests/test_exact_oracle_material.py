@@ -6,7 +6,7 @@ import pytest
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search.oracle import prepare_requests
-from experimental.exact_oracle_material import MaterialIndex, request_keys, select_unique, summarize
+from prototypes.exact_oracle_material import MaterialIndex, request_keys, select_unique, summarize
 
 
 PROGRAMS = [

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.finite_oracle_questions import build_question, validate_question
+from prototypes.finite_oracle_questions import build_question, validate_question
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from scripts.evaluate_finite_oracle_pairs import (
     ARMS, evaluate, sha, verify_prepared,

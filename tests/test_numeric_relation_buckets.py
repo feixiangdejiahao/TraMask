@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from experimental.numeric_relation_buckets import candidate_relations, numeric_literal, refine_selections
+from prototypes.numeric_relation_buckets import candidate_relations, numeric_literal, refine_selections
 
 
 SELECTOR=Path(__file__).resolve().parents[1]/'relation_search/semantic_selection.py'

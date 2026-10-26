@@ -11,7 +11,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.source_declarations_context import CHANGED_FIELDS, POLICY, transform, verify_declaration_sources
+from prototypes.source_declarations_context import CHANGED_FIELDS, POLICY, transform, verify_declaration_sources
 from relation_search.checkpoint import digest, read, start, write
 
 
@@ -49,7 +49,7 @@ def prepare(ablation, output, frozen_root):
     for path, checksum in original['code_sha256'].items():
         if digest(path) != checksum:
             raise ValueError('Frozen paired ablation code changed')
-    code = [Path(__file__), ROOT/'experimental/source_declarations_context.py', ROOT/'relation_search/instrument.py']
+    code = [Path(__file__), ROOT/'prototypes/source_declarations_context.py', ROOT/'relation_search/instrument.py']
     driver = frozen_root/'scripts/relation_search_semantics.py'
     provider = frozen_root/'relational_gap/provider.py'
     for path in (driver, provider):

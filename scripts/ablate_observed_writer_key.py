@@ -10,7 +10,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from experimental.observed_write_frontier import fingerprint, project
+from prototypes.observed_write_frontier import fingerprint, project
 from relation_search.checkpoint import digest, read, write
 from scripts.replay_observed_write_frontier import replay_case
 
@@ -79,7 +79,7 @@ def run(execution, reference, output):
         raise ValueError('Reference replay is not the requested execution/representative policy')
     output.mkdir(parents=True, exist_ok=False)
     code = [Path(__file__), ROOT / 'scripts/replay_observed_write_frontier.py',
-            ROOT / 'experimental/observed_write_frontier.py']
+            ROOT / 'prototypes/observed_write_frontier.py']
     protocol = dict(input_execution=str(execution.resolve()), input_reference=str(reference.resolve()),
         execution_seal_sha256=digest(execution / 'seal.json'),
         reference_seal_sha256=digest(reference / 'seal.json'),

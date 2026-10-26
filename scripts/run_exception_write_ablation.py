@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.candidate_scheduling import select
+from prototypes.candidate_scheduling import select
 from relation_search.checkpoint import digest, read, write
 from scripts.execute_relation_search import emit_batch, run
 
@@ -28,8 +28,8 @@ def main():
     args.output.mkdir(exist_ok=False)
     rank_protocol = read(args.ranking/'protocol.json')
     cases = rank_protocol['cases']
-    code_files = [Path(__file__).resolve(), ROOT/'experimental/candidate_scheduling.py',
-        ROOT/'experimental/source_edit_identity.py', ROOT/'experimental/exception_write_priority.py',
+    code_files = [Path(__file__).resolve(), ROOT/'prototypes/candidate_scheduling.py',
+        ROOT/'prototypes/source_edit_identity.py', ROOT/'prototypes/exception_write_priority.py',
         ROOT/'scripts/execute_relation_search.py', ROOT/'scripts/relational_phase_runner.py',
         ROOT/'generic_composition/emitter.py', ROOT/'generic_composition/runner.py',
         ROOT/'relation_search/instrument.py', ROOT/'relation_search/runtime.py']

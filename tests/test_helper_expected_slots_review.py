@@ -9,8 +9,8 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source, child
-from experimental.go_assertion_helper import summarize_helper
-from experimental.helper_expected_slots import apply_response, prepare_request
+from prototypes.go_assertion_helper import summarize_helper
+from prototypes.helper_expected_slots import apply_response, prepare_request
 from relation_search.oracle import preview
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 

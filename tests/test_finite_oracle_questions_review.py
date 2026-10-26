@@ -5,10 +5,10 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.finite_oracle_questions import (
+from prototypes.finite_oracle_questions import (
     build_question, restore_evidence, validate_question,
 )
-from experimental.finite_oracle_templates import build_catalogue
+from prototypes.finite_oracle_templates import build_catalogue
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 
 

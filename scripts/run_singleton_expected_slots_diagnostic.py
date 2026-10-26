@@ -17,7 +17,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.singleton_oracle_slots import adapt_response
+from prototypes.singleton_oracle_slots import adapt_response
 from relation_search.checkpoint import digest, read, write
 from relational_gap.provider import dispatch
 

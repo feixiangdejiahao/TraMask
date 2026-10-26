@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 from anchor_retrieval.syntax import Source
-from experimental.finite_inputs import augment_corpus, _positions
+from prototypes.finite_inputs import augment_corpus, _positions
 from generic_composition.corpus import source_text
 from generic_composition.engine import stable_id
 

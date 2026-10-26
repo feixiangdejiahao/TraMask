@@ -11,7 +11,7 @@ from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass, field
 
 from anchor_retrieval.syntax import CALLS, Source, child, walk
-from experimental.semantic_transport import state_contexts as syntax
+from prototypes.test_action_and_oracle_transfer import state_contexts as syntax
 from generic_composition.corpus import expression, span
 from generic_composition.emitter import _unit_node
 from generic_composition.engine import stable_id

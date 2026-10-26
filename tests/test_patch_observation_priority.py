@@ -5,7 +5,7 @@ import difflib
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.patch_observation_priority import Analyzer, select
+from prototypes.patch_observation_priority import Analyzer, select
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search.semantic_selection import select as baseline
 

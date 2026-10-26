@@ -13,7 +13,7 @@ import hashlib
 import json
 
 from anchor_retrieval.syntax import Source,child,walk
-from experimental import assertion_operand_guard as guard
+from prototypes import assertion_operand_guard as guard
 from relation_search import oracle
 from relation_search.candidate_edit_transport import rewrite_view
 

@@ -25,11 +25,11 @@ from relation_search.semantic_selection import select
 
 
 ALGORITHM_FILES = [
-    'experimental/helper_expected_slots.py', 'experimental/go_assertion_helper.py',
-    'experimental/go_arity_guard.py', 'experimental/local_helper_evidence.py',
-    'experimental/source_failure_evidence.py',
-    'experimental/singleton_oracle_slots.py', 'experimental/assertion_operand_guard.py',
-    'experimental/finite_oracle_templates.py', 'generic_composition/corpus.py',
+    'prototypes/helper_expected_slots.py', 'prototypes/go_assertion_helper.py',
+    'prototypes/go_arity_guard.py', 'prototypes/local_helper_evidence.py',
+    'prototypes/source_failure_evidence.py',
+    'prototypes/singleton_oracle_slots.py', 'prototypes/assertion_operand_guard.py',
+    'prototypes/finite_oracle_templates.py', 'generic_composition/corpus.py',
     'anchor_retrieval/syntax.py', 'relation_search/semantic_selection.py',
     'relation_search/oracle.py', 'relation_search/oracle_evidence.py', 'relation_search/instrument.py',
     'relational_gap/provider.py', 'scripts/run_helper_expected_slots.py',
@@ -37,9 +37,9 @@ ALGORITHM_FILES = [
 
 
 def prepare(inventory, output, *, budget=8, max_bytes=64000):
-    from experimental.helper_expected_slots import inventory as slots, prepare_request
-    from experimental.go_assertion_helper import HelperIndex
-    from experimental.singleton_oracle_slots import assertion_inventory
+    from prototypes.helper_expected_slots import inventory as slots, prepare_request
+    from prototypes.go_assertion_helper import HelperIndex
+    from prototypes.singleton_oracle_slots import assertion_inventory
     if budget < 1:
         raise ValueError('The per-case budget must be positive')
     inventory, output = Path(inventory).resolve(), Path(output).resolve()
@@ -139,7 +139,7 @@ def verified(directory):
 
 
 def run(directory, *, workers=2):
-    from experimental.helper_expected_slots import apply_response
+    from prototypes.helper_expected_slots import apply_response
     from relational_gap.provider import dispatch
     directory = Path(directory).resolve()
     if workers not in {1, 2}:

@@ -153,5 +153,5 @@ def select_round(candidates, budget=128, previously_executed=()):
     Source order within each operator remains stable; metadata-only aliases
     cannot consume another attempt.
     """
-    from experimental.candidate_scheduling import select
+    from prototypes.candidate_scheduling import select
     return select(candidates, budget, previously_executed)

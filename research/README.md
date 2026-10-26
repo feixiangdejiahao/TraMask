@@ -1,31 +1,38 @@
-# 组合测试研究与实验记录
+# 研究记录与历史材料
 
-最新设计见[程序分析辅助的组合测试推理](method_design.md)，最新固定配置见[2026-09-29本轮独立评价](relation_search_v3_evaluation.md)。统一新请求v3完成17例两轮，确认16/17，N05尚未取得合格目标见证；没有实现全部目标或验证issue resolution rate。修改后图、去重等负结果与主实验分开保存，不从不同配置挑选结果拼成17/17。
+本目录保存观察分析、方法讨论和历史记录。读取 pilot 的结果时，先看[统一实验入口](../experiments/pilots/README.md)。按任务查找时，使用[跨轮任务索引](../experiments/pilots/tasks.tsv)。
 
-程序分析恢复测试、绑定、调用与断言依赖，构造候选并为局部预期推理提供源码。当前生成、运行反馈、模型预期修订与独立评价已连接；新writer反馈仍未集成在线搜索。2026-09-30已完成独立的有限oracle模板配对实验：相同50成员的完整正确预期为template20/50、expanded24/50，总token略增，没有新增目标检出。此前局部helper原型恢复8处调用绑定，新增期望参数端口为0；后续helper字面值接口增加30个端口，固定8请求中4个正确修订消除旧期望报警，另外4个length未知。这些独立组件研究不改变冻结16/17主臂结果。此前[关系形状设计](relation_search_method.md)、[旧检查点](relation_search_checkpoint_20260929.md)与[判别上下文方案](distinguishing_context_method.md)保留历史，其旧成绩不能代替当前结果。[17条trajectory重审](trajectory_logic_20260928/README.md)和[STARS阅读](stars_abstraction_review.md)保留研究依据。
+## 目录分工
 
-- [当前方法与能力边界](method_design.md)
-- [本轮结果与消融](relation_search_v3_evaluation.md)、[oracle探索的实际贡献](oracle_exploration_contributions_20260929.md)
-- [修改后依赖图](modified_observation_impact_v1.md)、[精确材料去重负结果](exact_oracle_material_v1.md)
-- [有限oracle模板与配对评价](finite_oracle_template_critical_review_20260930.md)、[局部helper绑定原型](local_helper_evidence_20260930.md)
-- [自定义Go断言的失败源码分析](source_failure_evidence_20260930.md)、[独立反例审查](source_failure_evidence_review_20260930.md)：新增确定性源码证据，尚无语义或检出增益。
-- [Helper期望参数接口](helper_expected_slots_20260930.md)、[源码覆盖与配对执行](helper_expected_slots_evaluation_20260930.md)：30个新端口来自N05一个helper；8个固定请求中4个正确修订消除旧期望报警，4个length未知，目标检出没有增加。
-- [本轮五小时报告](relational_gap_timebox_20260928.md)：17 个已见 trial 的进展、逐例缺口、误报与泛化限制。
-- [第六批独立评价](relational_gap_batch6_evaluation.md)：确认 N02、N07、N10，共 3/17。
-- [第七批独立评价](relational_gap_batch7_evaluation.md)：完整源断言恢复消融确认 P2、N02、N07、N10，共 4/17，仍漏检 13/17。
-- [第五批评价](relational_gap_batch5_evaluation.md)及[完整原断言恢复消融协议](relational_gap_v7_ablation_protocol.md)。
-- [新增十条轨迹](expanded_trials_20260926/README.md)与[关系特征及论文依据](expanded_trials_20260926/abstraction.md)。
-- [原七例人工分析](manual_case_analysis.md)及[人工标注](manual_annotations.json)。
-- [2026 文献依据](literature_2026.md)。
+| 位置 | 用途 |
+|---|---|
+| `<研究名>_<日期>/` | 保存该轮分析、讨论及引用材料。 |
+| [`history/`](history/README.md) | 整理前 355 个入口的分类索引。 |
+| [`../experiments/`](../experiments/index.html) | 按主题查看实验设置和分析。 |
+| [`../results/`](../results/README.md) | 按同名主题存放实际输出。 |
+| [`../prototypes/`](../prototypes/README.md) | 历史原型代码。 |
+| [`../docs/`](../docs/README.md) | 可阅读的研究报告。 |
+| 本目录已有的 JSON、子目录和兼容链接 | 历史记录。内容保留；旧地址由路径映射解释。 |
 
-第七批是评价后提出的统一断言恢复消融，结果单独报告。17 个 trial 对应 14 个 task，都是已见开发集；生成失败、测试失败、正确目标检出不能混为一谈。当前尚未穷尽评价误报，也没有 issue resolution rate 提升证据。
+新研究记录放入独立的主题目录。实验执行产物放在 `results/<主题>/`。`experiments/<同名主题>/results/` 指向同一位置。名称和读取入口见[实验管理说明](../experiments/README.md)。
 
-历史方法与负结果保留如下，不能与当前指标混用：
+## 接续研究时先看
 
-- [动作、观察与小期望变换](archive/method_design_action_observation_20260929.md)及[实验结果](semantic_transport_results.md)。
-- [观察前沿检索](observation_frontier_method.md)、[检索实验](observation_frontier_experiment.md)及[事前约定](observation_frontier_plan.md)；检索命中不等于正确组合。
-- [历史检索实验](anchor_retrieval_experiment.md)：旧完整方法双 Hit@10 为 0/7。
-- [A 的适用性审查](anchor_applicability_audit.md)。
-- [关系残差历史方案](archive/method_design_v2_residual.md)及[最初工程方案](archive/method_design_v1.md)。
 
-按用户授权，必要的 issue、候选代码、已有验证及静态证据可发送到 `.env` 指定的 provider，当前模型为 `deepseek-v4-flash`。隐藏 verifier、参考补丁及封存评价标签不进入生成或模型请求。第七批恢复消融没有新增模型请求。
+[全部 211 个 trial：组合验证缺口分析](deepswe_counterfactual_review_20261021/README.md)。按补有效组合测试可能指导修复并改善 F2P/P2P 逐案判定，88 条直接支持、30 条有条件支持。[独立双语阅读版](deepswe_report_presentation_20261022/README.md)提供完整任务、补丁及评价/验证证据对照，可离线使用；[组合表与测试生成记录](deepswe_gap_visuals_20261022/README.md)包含全部 211 份可视化表格与 436 个相关步骤。
+
+1. [主要 pilot](../experiments/pilots/README.md)：确认实验设置、判断标准和当前评价版本。
+2. [2026-10-19 独立审查](../experiments/reports/research/independent_review_20261019/independent_report.html)：问题抽象、方法建议和待做 pilot。建议不等于已验证效果。
+3. [30 项任务的轨迹与程序关系分析](../experiments/reports/docs/20261010_trajectory_program_analysis_n30.html)：原始观察和分析范围。
+4. [T08 统计修订](../experiments/reports/docs/20261010_behavioral_gap_evaluation_revision_t08.html)：解释旧报告中 23 项目标与修订后 22 项目标的区别。
+5. [全部报告](../docs/README.md)和[历史材料索引](history/README.md)：按需继续读取。
+
+## 材料与结论
+
+记录分析时，引用原始文件，并注明对应版本。历史结论不因目录整理而获得新的证据支持。验证缺口、原 patch 的错误、补测成功和修复后 resolution rate 分别记录。
+
+## 本次整理
+
+较早的一轮只调整研究入口。其[整理前说明](../experiments/maintenance/20261020_research_layout/before/research_README.md)、[文件清单](../experiments/maintenance/20261020_research_layout/before_inventory.json)和[校验结果](../experiments/maintenance/20261020_research_layout/verification.json)保留。
+
+本次进一步修改了实验主题、结果目录和历史原型代码名称。见 [命名规范](../experiments/NAMING.md)、[旧路径映射](../results/path_map.tsv)和[目录迁移检查](../experiments/maintenance/20261020_directory_rename/verification.json)。原始记录内容保留。

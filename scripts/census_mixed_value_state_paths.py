@@ -21,7 +21,7 @@ if __package__ in {None, ''}:
     sys.path.insert(0, str(ROOT))
 
 from anchor_retrieval.syntax import Source, child, units, walk
-from experimental.observation_address_effects import CONTROLS, SCOPES, summarize_method
+from prototypes.observation_address_effects import CONTROLS, SCOPES, summarize_method
 
 
 def pos(ref):
@@ -218,7 +218,7 @@ def main(argv=None):
         result = analyze(frozen(case['frontend']))
         rows.append(dict(case=case['case'], language=case['language'], frontend=case['frontend'], **result))
         print(json.dumps(dict(case=case['case'], paths=len(result['paths']), counts=result['counts'])), flush=True)
-    modules = [Path(__file__), ROOT/'experimental/observation_address_effects.py',
+    modules = [Path(__file__), ROOT/'prototypes/observation_address_effects.py',
                ROOT/'anchor_retrieval/syntax.py']
     result = dict(version='mixed-value-state-source-opportunities.v1',
         inventory=dict(path=str(args.inventory.resolve()), sha256=hashlib.sha256(raw).hexdigest()),

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from anchor_retrieval.syntax import Source, is_test_path, units
-from experimental.patch_observation_priority import _patch_facts
+from prototypes.patch_observation_priority import _patch_facts
 
 
 def read(path):
@@ -80,7 +80,7 @@ def _safe_path(value):
 
 
 def run(paired, output):
-    from experimental.go_comparison_probe import instrument_sources
+    from prototypes.go_comparison_probe import instrument_sources
 
     parent = read(paired / 'protocol.json')
     ready = read(paired / 'ready.json')
@@ -105,10 +105,10 @@ def run(paired, output):
         inputs[str(patch.resolve())] = digest(patch)
         case_paths[case] = (path, patch)
     code_names = ['scripts/census_go_comparison_probes.py',
-                  'experimental/go_comparison_probe.py',
+                  'prototypes/go_comparison_probe.py',
                   'tests/test_go_comparison_probe.py',
                   'tests/test_go_comparison_census.py',
-                  'experimental/patch_observation_priority.py',
+                  'prototypes/patch_observation_priority.py',
                   'anchor_retrieval/syntax.py']
     hashes = {name: digest(ROOT / name) for name in code_names}
     output.mkdir(parents=True, exist_ok=False)

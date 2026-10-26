@@ -4,8 +4,8 @@ import json
 from anchor_retrieval.syntax import Source, child, walk
 from generic_composition.corpus import build_corpus
 from generic_composition.terms import from_source, render
-from experimental.generic_v5.views import compose_views, observer_keys
-from experimental.generic_v5.generate import Budget, gate_evidence, generate
+from prototypes.unified_view_test_analogy_v05.views import compose_views, observer_keys
+from prototypes.unified_view_test_analogy_v05.generate import Budget, gate_evidence, generate
 from generic_composition.emitter import emit
 from generic_composition.gate import presentation, selection_candidates
 

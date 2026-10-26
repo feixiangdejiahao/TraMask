@@ -3,7 +3,7 @@ import ast
 import pytest
 
 from anchor_retrieval.syntax import Source, child, walk
-from experimental.generic_v3.alignment import align_analogy
+from prototypes.statement_aligned_test_analogy_v03.alignment import align_analogy
 from generic_composition.terms import from_source, render
 
 

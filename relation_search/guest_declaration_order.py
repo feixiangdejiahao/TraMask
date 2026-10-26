@@ -13,7 +13,7 @@ import json
 import re
 
 from anchor_retrieval.syntax import CALLS, Source, attr_parts, call_parts, child, walk
-from experimental import relation_search_go_ts as syntax
+from prototypes import relation_search_go_ts as syntax
 from relation_search import checked_carrier_inverse as flow
 
 VERSION = 'source-guest-independent-declaration-order.v1'

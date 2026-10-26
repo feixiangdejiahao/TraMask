@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from experimental.source_declarations_context import render_declarations, sha, transform, verify_declaration_sources
+from prototypes.source_declarations_context import render_declarations, sha, transform, verify_declaration_sources
 from relation_search.checkpoint import digest, read, write
 from scripts.prepare_source_declarations_ablation import prepare, select_request
 

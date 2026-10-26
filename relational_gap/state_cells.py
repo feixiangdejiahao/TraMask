@@ -13,9 +13,9 @@ from dataclasses import asdict, dataclass
 
 from anchor_retrieval.index import Index
 from anchor_retrieval.syntax import Source
-from experimental import state_regions as regions
-from experimental.semantic_transport.oracle import OracleError, Unknown, encode_value
-from experimental.semantic_transport import state_contexts as state
+from prototypes import state_regions as regions
+from prototypes.test_action_and_oracle_transfer.oracle import OracleError, Unknown, encode_value
+from prototypes.test_action_and_oracle_transfer import state_contexts as state
 from generic_composition.corpus import span
 
 

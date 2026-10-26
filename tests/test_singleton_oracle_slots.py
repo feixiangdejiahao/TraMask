@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from experimental.singleton_oracle_slots import (SYSTEM, adapt_frozen_singleton,
+from prototypes.singleton_oracle_slots import (SYSTEM, adapt_frozen_singleton,
     adapt_response, assertion_inventory, contract_without_wrapper, eligible_candidates,
     expected_slot, prepare_requests_v2, render_expected, sha, source_contexts, changed_call_context)
 from test_relation_oracle import setup

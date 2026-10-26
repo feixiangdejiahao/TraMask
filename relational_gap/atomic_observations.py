@@ -13,7 +13,7 @@ import hashlib
 import json
 
 from anchor_retrieval.syntax import ATTRS, CALLS, Source, attr_parts, call_parts, child, walk
-from experimental.semantic_transport.oracle import Unknown, parse_source_literal
+from prototypes.test_action_and_oracle_transfer.oracle import Unknown, parse_source_literal
 from .frontend import source_text
 
 

@@ -1,7 +1,7 @@
 """Structural admission only: accepted oracle values need not be correct."""
 import pytest
 
-from experimental.assertion_operand_guard import valid_assertion
+from prototypes.assertion_operand_guard import valid_assertion
 
 
 @pytest.mark.parametrize("old, observed, new", [

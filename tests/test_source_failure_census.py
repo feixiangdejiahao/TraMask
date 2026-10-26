@@ -156,7 +156,7 @@ def test_independent_span_audit_rejects_changed_declaration_or_argument_evidence
 
 
 def auditable_failure_fixture():
-    from experimental.source_failure_evidence import analyze
+    from prototypes.source_failure_evidence import analyze
     owner = Source('tests/x_test.go', '''package test
 import "testing"
 import p "example.org/proj/checks"

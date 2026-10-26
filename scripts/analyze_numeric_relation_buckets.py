@@ -16,7 +16,7 @@ import time
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from experimental.numeric_relation_buckets import refine_selections
+from prototypes.numeric_relation_buckets import refine_selections
 
 CASES=tuple(f'P{i}' for i in range(1,8))+tuple(f'N{i:02d}' for i in range(1,11))
 
@@ -33,7 +33,7 @@ def main():
     if args.output.exists():
         raise ValueError('Use a new output directory; static results are immutable')
     args.output.mkdir(parents=True)
-    code=[Path(__file__).resolve(),ROOT/'experimental/numeric_relation_buckets.py',
+    code=[Path(__file__).resolve(),ROOT/'prototypes/numeric_relation_buckets.py',
           ROOT/'relation_search/semantic_selection.py',ROOT/'anchor_retrieval/syntax.py']
     protocol=dict(created_utc=datetime.now(timezone.utc).isoformat(),cases=list(CASES),budget=16,
         arms=['baseline','delta','context'],inventory=str(args.inventory.resolve()),

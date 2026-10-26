@@ -164,7 +164,7 @@ def test_coordinator_propagates_flag_through_real_preparation(tmp_path, monkeypa
 
 
 def test_code_identity_includes_all_writer_analysis_dependencies():
-    relative = {'experimental/exception_write_priority.py', 'experimental/assertion_write_origin.py',
+    relative = {'prototypes/exception_write_priority.py', 'prototypes/assertion_write_origin.py',
                 'scripts/analyze_assertion_write_origin_census.py'}
     assert relative <= set(code_identity())
     assert relative <= {str(path.relative_to(path.parents[1])) for path in algorithm_files()}

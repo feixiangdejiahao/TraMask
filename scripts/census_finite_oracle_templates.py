@@ -15,13 +15,13 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.finite_oracle_templates import build_catalogue, expand, source_size_summary
+from prototypes.finite_oracle_templates import build_catalogue, expand, source_size_summary
 from relation_search.oracle import preview, program_candidate
 
 FILES = [
-    'experimental/finite_oracle_templates.py', 'tests/test_finite_oracle_templates.py',
-    'scripts/census_finite_oracle_templates.py', 'experimental/singleton_oracle_slots.py',
-    'experimental/assertion_operand_guard.py', 'relation_search/instrument.py',
+    'prototypes/finite_oracle_templates.py', 'tests/test_finite_oracle_templates.py',
+    'scripts/census_finite_oracle_templates.py', 'prototypes/singleton_oracle_slots.py',
+    'prototypes/assertion_operand_guard.py', 'relation_search/instrument.py',
     'relation_search/oracle.py', 'anchor_retrieval/syntax.py', 'anchor_retrieval/graph.py',
     'anchor_retrieval/index.py', 'relational_gap/frontend.py', 'generic_composition/corpus.py',
 ]

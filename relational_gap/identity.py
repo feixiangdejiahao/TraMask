@@ -11,7 +11,7 @@ from collections import defaultdict
 
 from anchor_retrieval.index import Index
 from anchor_retrieval.syntax import CALLS, FUNCTIONS, call_parts, walk
-from experimental import observation_projection as projection
+from prototypes import observation_projection as projection
 from generic_composition.corpus import expression, span
 from generic_composition.engine import stable_id
 

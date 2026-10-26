@@ -46,10 +46,10 @@ def algorithm_files():
     return sorted([*generation, Path(__file__).resolve(),
                    *ROOT.glob('anchor_retrieval/*.py'), ROOT/'generic_composition/corpus.py',
                    ROOT/'generic_composition/emitter.py', ROOT/'generic_composition/engine.py',
-                   ROOT/'generic_composition/edits.py', ROOT/'experimental/local_literal_contexts.py',
-                   ROOT/'experimental/finite_inputs.py', ROOT/'experimental/observation_projection.py',
-                   ROOT/'experimental/state_regions.py', ROOT/'experimental/semantic_transport/state_contexts.py',
-                   ROOT/'experimental/semantic_transport/oracle.py'])
+                   ROOT/'generic_composition/edits.py', ROOT/'prototypes/local_literal_contexts.py',
+                   ROOT/'prototypes/finite_inputs.py', ROOT/'prototypes/observation_projection.py',
+                   ROOT/'prototypes/state_regions.py', ROOT/'prototypes/test_action_and_oracle_transfer/state_contexts.py',
+                   ROOT/'prototypes/test_action_and_oracle_transfer/oracle.py'])
 
 
 def prepare(args):
@@ -58,7 +58,7 @@ def prepare(args):
     from relational_gap.inputs import select_sources
     from relational_gap.transforms import enumerate_transforms, TransformBudget
     from relational_gap.cells import generate_cells, merge_candidates, annotate_novelty, CellBudget
-    from experimental.finite_inputs import augment_corpus
+    from prototypes.finite_inputs import augment_corpus
     from relational_gap.script_wrappers import prepare_script_sources
     from relational_gap.embedded_relations import generate_embedded_relations, EmbeddedRelationBudget
     from relational_gap.state_cells import generate_state_cells, StateBudget

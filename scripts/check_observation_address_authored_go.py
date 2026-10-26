@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from anchor_retrieval.syntax import Source
-from experimental.observation_address_join import generate
+from prototypes.observation_address_join import generate
 from generic_composition.emitter import emit
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 
@@ -52,7 +52,7 @@ def run(output):
     if output.exists():
         raise ValueError('Use a new output directory; never overwrite receipts')
     output.mkdir(parents=True)
-    sources = [ROOT / 'experimental' / name for name in
+    sources = [ROOT / 'prototypes' / name for name in
                ('observation_address_join.py', 'observation_address_effects.py')]
     sources.append(Path(__file__).resolve())
     seals = {str(path): digest(path) for path in sources}

@@ -4,7 +4,7 @@ import json
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
 from generic_composition.gate import presentation, selection_candidates
-from experimental.generic_v3.generate import Budget, _novelty, gate_evidence, generate
+from prototypes.statement_aligned_test_analogy_v03.generate import Budget, _novelty, gate_evidence, generate
 from anchor_retrieval.syntax import Source, child, walk
 from generic_composition.terms import from_source
 

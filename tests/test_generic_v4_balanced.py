@@ -1,8 +1,8 @@
 """Lossless representation probes with invented DSL/config/path strings."""
 import pytest
 
-from experimental.generic_v2.analogy import analogy
-from experimental.generic_v4.balanced import balanced_tokens
+from prototypes.test_edit_analogy_v02.analogy import analogy
+from prototypes.balanced_literal_test_analogy_v04.balanced import balanced_tokens
 from generic_composition.edits import tokens, token_sort
 from generic_composition.terms import BudgetExceeded, Term, render, subterms
 
@@ -78,7 +78,7 @@ def test_representation_budgets_are_explicit():
 
 
 def test_existing_residual_slot_operator_can_align_unambiguous_token_sequences():
-    from experimental.generic_v3.alignment import align_analogy
+    from prototypes.statement_aligned_test_analogy_v03.alignment import align_analogy
     from generic_composition.terms import SourceTerm
     texts = ('alpha|beta', 'prefix!alpha|beta', 'alpha|beta?suffix')
     views = [balanced_tokens(text) for text in texts]
@@ -96,7 +96,7 @@ def test_existing_residual_slot_operator_can_align_unambiguous_token_sequences()
 
 
 def test_repeated_path_separator_makes_exact_token_alignment_ambiguous():
-    from experimental.generic_v3.alignment import align_analogy
+    from prototypes.statement_aligned_test_analogy_v03.alignment import align_analogy
     from generic_composition.terms import SourceTerm
     texts = ('/root/item', '/prefix/root/item', '/root/item/child')
     views = [balanced_tokens(text) for text in texts]

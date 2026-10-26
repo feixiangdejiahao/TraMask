@@ -4,7 +4,7 @@ import copy
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.observation_correspondence import correspond, enclosing_span
+from prototypes.observation_correspondence import correspond, enclosing_span
 from relation_search.oracle_evidence import _modified_sources
 from tests.test_patch_observation_priority import candidate, fixture
 

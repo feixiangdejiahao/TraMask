@@ -1,4 +1,4 @@
-from experimental.assertion_path_context import render_context
+from prototypes.assertion_path_context import render_context
 from test_assertion_write_origin import analyze, LIBRARY
 
 

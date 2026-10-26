@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental import relation_search_go_ts as neighbors
+from prototypes import relation_search_go_ts as neighbors
 from generic_composition.emitter import emit
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search import checked_carrier_inverse as relation

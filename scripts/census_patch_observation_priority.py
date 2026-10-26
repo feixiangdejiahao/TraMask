@@ -13,7 +13,7 @@ import time
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 
-from experimental.singleton_oracle_slots import assertion_inventory
+from prototypes.singleton_oracle_slots import assertion_inventory
 from relation_search.instrument import _program_edits
 from relation_search.oracle import program_candidate
 from relation_search.semantic_selection import select as shape_select
@@ -21,19 +21,19 @@ from relation_search.semantic_selection import select as shape_select
 
 FILES=['scripts/census_patch_observation_priority.py','tests/test_patch_observation_priority_census.py',
     'research/patch_observation_priority_protocol.md',
-    'experimental/patch_observation_priority.py','tests/test_patch_observation_priority.py',
+    'prototypes/patch_observation_priority.py','tests/test_patch_observation_priority.py',
     'tests/test_patch_observation_priority_review.py',
-    'relation_search/semantic_selection.py','experimental/singleton_oracle_slots.py',
+    'relation_search/semantic_selection.py','prototypes/singleton_oracle_slots.py',
     'tests/test_semantic_selection.py','tests/test_singleton_oracle_slots.py',
-    'experimental/assertion_operand_guard.py','tests/test_assertion_operand_guard.py','relation_search/oracle.py',
+    'prototypes/assertion_operand_guard.py','tests/test_assertion_operand_guard.py','relation_search/oracle.py',
     'relation_search/instrument.py','relation_search/runtime.py','relation_search/oracle_evidence.py',
-    'experimental/source_edit_identity.py','tests/test_source_edit_identity.py',
-    'experimental/modified_observation_impact.py','tests/test_modified_observation_impact.py',
+    'prototypes/source_edit_identity.py','tests/test_source_edit_identity.py',
+    'prototypes/modified_observation_impact.py','tests/test_modified_observation_impact.py',
     'relation_search/impact_selection.py','tests/test_impact_selection.py',
-    'experimental/local_helper_evidence.py','tests/test_local_helper_evidence.py',
-    'experimental/go_assertion_helper.py','tests/test_go_assertion_helper.py',
-    'experimental/go_arity_guard.py','tests/test_go_arity_guard.py',
-    'experimental/source_failure_evidence.py','tests/test_source_failure_evidence.py',
+    'prototypes/local_helper_evidence.py','tests/test_local_helper_evidence.py',
+    'prototypes/go_assertion_helper.py','tests/test_go_assertion_helper.py',
+    'prototypes/go_arity_guard.py','tests/test_go_arity_guard.py',
+    'prototypes/source_failure_evidence.py','tests/test_source_failure_evidence.py',
     'anchor_retrieval/index.py','anchor_retrieval/graph.py','anchor_retrieval/syntax.py',
     'anchor_retrieval/frontier.py','generic_composition/corpus.py','relational_gap/frontend.py',
     'anchor_retrieval/__init__.py','generic_composition/__init__.py',
@@ -123,7 +123,7 @@ def evidence_counts(ranking,selected_ids):
 
 
 def run(paired,output,budget=16):
-    from experimental.patch_observation_priority import select as patch_select
+    from prototypes.patch_observation_priority import select as patch_select
     parent,ready=read(paired/'protocol.json'),read(paired/'ready.json')
     if digest(paired/'protocol.json')!=ready['protocol_sha256']:
         raise ValueError('paired_source_protocol_changed')
@@ -170,8 +170,8 @@ def run(paired,output,budget=16):
     if fixed_count!=4502:raise ValueError('fixed_candidate_denominator_changed')
     write(output/'eligibility_seal.json',dict(candidates=fixed_count,
         files_sha256={str(path.relative_to(output)):digest(path) for path in sorted(output.glob('*/eligibility.json'))},
-        algorithm_sha256={name:hashes[name] for name in ('experimental/singleton_oracle_slots.py',
-            'experimental/assertion_operand_guard.py','scripts/census_patch_observation_priority.py')}))
+        algorithm_sha256={name:hashes[name] for name in ('prototypes/singleton_oracle_slots.py',
+            'prototypes/assertion_operand_guard.py','scripts/census_patch_observation_priority.py')}))
     summaries={}
     for case,paths in source_paths.items():
         corpus,front,pool=[read(paths[name]) for name in ('corpus.json','frontend.json','source_pool.json')]

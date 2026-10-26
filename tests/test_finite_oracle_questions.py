@@ -5,7 +5,7 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.finite_oracle_questions import (SYSTEM, build_question,
+from prototypes.finite_oracle_questions import (SYSTEM, build_question,
     factor_evidence, restore_evidence, validate_question)
 from relation_search.oracle import prepare_requests
 from relation_search.instrument import instrument_candidates

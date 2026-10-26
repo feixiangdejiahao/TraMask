@@ -132,7 +132,7 @@ def prepare(campaigns, output):
     write(output / 'authorization_scope.json', scope)
     sources = [Path(__file__), ROOT / 'scripts/relation_search_semantics.py',
                ROOT / 'relation_search/oracle.py', ROOT / 'relational_gap/provider.py',
-               ROOT / 'experimental/assertion_operand_guard.py']
+               ROOT / 'prototypes/assertion_operand_guard.py']
     snapshots = {}
     for source in sources:
         relative = source.relative_to(ROOT)

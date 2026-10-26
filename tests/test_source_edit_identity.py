@@ -1,6 +1,6 @@
 import copy
 
-from experimental.source_edit_identity import distinct_inputs, input_identity
+from prototypes.source_edit_identity import distinct_inputs, input_identity
 
 
 def proposal(identifier='first'):

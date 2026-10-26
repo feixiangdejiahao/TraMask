@@ -37,16 +37,16 @@ def write_json(path: Path, value: object) -> None:
 
 def algorithm_files() -> list[Path]:
     return sorted([*ROOT.glob("generic_composition/*.py"), *ROOT.glob("anchor_retrieval/*.py"),
-                   *ROOT.glob("experimental/generic_v2/*.py"),
-                   *ROOT.glob("experimental/generic_v21/*.py"),
-                   *ROOT.glob("experimental/generic_v3/*.py"),
-                   *ROOT.glob("experimental/generic_v4/*.py"),
-                   *ROOT.glob("experimental/generic_v5/*.py"),
-                   *ROOT.glob("experimental/assertion_instances/*.py"),
-                   *ROOT.glob("experimental/assertion_instances_v2/*.py"),
-                   *ROOT.glob("experimental/assertion_windows/*.py"),
-                   *ROOT.glob("experimental/edit_square/*.py"),
-                   *ROOT.glob("experimental/observation_priority/*.py"),
+                   *ROOT.glob("prototypes/test_edit_analogy_v02/*.py"),
+                   *ROOT.glob("prototypes/test_edit_analogy_allow_erasing_v02_01/*.py"),
+                   *ROOT.glob("prototypes/statement_aligned_test_analogy_v03/*.py"),
+                   *ROOT.glob("prototypes/balanced_literal_test_analogy_v04/*.py"),
+                   *ROOT.glob("prototypes/unified_view_test_analogy_v05/*.py"),
+                   *ROOT.glob("prototypes/helper_assertion_instances_v01/*.py"),
+                   *ROOT.glob("prototypes/helper_assertion_instances_v02/*.py"),
+                   *ROOT.glob("prototypes/assertion_window_generation/*.py"),
+                   *ROOT.glob("prototypes/test_edit_square_generation/*.py"),
+                   *ROOT.glob("prototypes/observation_guided_test_analogy/*.py"),
                    ROOT / "combination_testing/runner.py", ROOT / "combination_testing/container_runner.py",
                    ROOT / "combination_testing/test_reports.py", Path(__file__).resolve()])
 
@@ -179,29 +179,29 @@ def prepare(args) -> dict:
     from generic_composition.corpus import build_corpus
     generator = getattr(args, 'generator', 'context')
     if generator == 'analogy':
-        from experimental.generic_v2.generate import Budget, gate_evidence, generate
+        from prototypes.test_edit_analogy_v02.generate import Budget, gate_evidence, generate
     elif generator == 'analogy-erasing':
-        from experimental.generic_v21.generate import Budget, gate_evidence, generate
+        from prototypes.test_edit_analogy_allow_erasing_v02_01.generate import Budget, gate_evidence, generate
     elif generator == 'analogy-aligned':
-        from experimental.generic_v3.generate import Budget, gate_evidence, generate
+        from prototypes.statement_aligned_test_analogy_v03.generate import Budget, gate_evidence, generate
     elif generator == 'analogy-balanced':
-        from experimental.generic_v4.generate import Budget, gate_evidence, generate
+        from prototypes.balanced_literal_test_analogy_v04.generate import Budget, gate_evidence, generate
     elif generator == 'analogy-views':
-        from experimental.generic_v5.generate import Budget, gate_evidence, generate
+        from prototypes.unified_view_test_analogy_v05.generate import Budget, gate_evidence, generate
     elif generator == 'assertion-instances':
-        from experimental.assertion_instances.generate import Budget, gate_evidence, generate
+        from prototypes.helper_assertion_instances_v01.generate import Budget, gate_evidence, generate
     elif generator == 'assertion-instances-open':
-        from experimental.assertion_instances_v2.generate import Budget, gate_evidence, generate
+        from prototypes.helper_assertion_instances_v02.generate import Budget, gate_evidence, generate
     elif generator == 'assertion-windows':
-        from experimental.assertion_windows.generate import Budget, gate_evidence, generate
+        from prototypes.assertion_window_generation.generate import Budget, gate_evidence, generate
     elif generator == 'assertion-windows-balanced':
-        from experimental.assertion_windows.balanced import Budget, gate_evidence, generate
+        from prototypes.assertion_window_generation.balanced import Budget, gate_evidence, generate
     elif generator == 'assertion-windows-predicate-free':
-        from experimental.assertion_windows.predicate_free import Budget, gate_evidence, generate
+        from prototypes.assertion_window_generation.predicate_free import Budget, gate_evidence, generate
     elif generator == 'edit-square':
-        from experimental.edit_square.generate import Budget, gate_evidence, generate
+        from prototypes.test_edit_square_generation.generate import Budget, gate_evidence, generate
     elif generator == 'observation-priority':
-        from experimental.observation_priority.generate import Budget, gate_evidence, generate
+        from prototypes.observation_guided_test_analogy.generate import Budget, gate_evidence, generate
     elif generator == 'context':
         from generic_composition.engine import Budget, gate_evidence, generate
     else:

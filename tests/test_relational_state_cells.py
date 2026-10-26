@@ -86,7 +86,7 @@ def test_target():
 def test_no_current_program_state_edge_is_required(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError('current-program may-state evidence must not gate source construction')
-    monkeypatch.setattr('experimental.semantic_transport.state_contexts._witness', forbidden)
+    monkeypatch.setattr('prototypes.test_action_and_oracle_transfer.state_contexts._witness', forbidden)
     corpus = corpus_for('''class Marker:
     def touch(self, value): pass
     def ready(self): return True
@@ -285,7 +285,7 @@ def test_language_renderers_preserve_original_test_registration(language, code):
 
 
 def test_argument_metadata_round_trips_bytes_tuples_and_ordered_mapping_keys():
-    from experimental.semantic_transport.oracle import decode_value
+    from prototypes.test_action_and_oracle_transfer.oracle import decode_value
 
     corpus = corpus_for('''events = []
 class Holder:

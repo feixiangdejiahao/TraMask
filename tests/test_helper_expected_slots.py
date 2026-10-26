@@ -4,8 +4,8 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.go_assertion_helper import HelperIndex
-from experimental.helper_expected_slots import apply_response, inventory, prepare_request
+from prototypes.go_assertion_helper import HelperIndex
+from prototypes.helper_expected_slots import apply_response, inventory, prepare_request
 from relation_search.oracle import preview
 from relational_gap.frontend import extract_frontend,to_emitter_corpus
 

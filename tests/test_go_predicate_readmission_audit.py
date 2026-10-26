@@ -6,7 +6,7 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.assertion_operand_guard import valid_assertion
+from prototypes.assertion_operand_guard import valid_assertion
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search.oracle import prepare_requests
 from scripts.audit_go_predicate_readmission import (audit_completion, predicate_only_change,

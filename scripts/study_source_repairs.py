@@ -24,21 +24,21 @@ RUNNER='scripts/study_source_repairs.py'
 TESTS='tests/test_source_repairs_study.py'
 CACHE_READY_SHA='a51eadb2c980bd7686387077a830996ff57aedd7e5d4355244d41472d3e9659e'
 CACHE_RUN_SEAL_SHA='2034ee5ab3e1883dac7f283297834c80c61b46c7ccf37d99c72742fa4dc843fc'
-NEW_FILES=[RUNNER,TESTS,'experimental/repaired_observation_analysis.py',
-    'experimental/observation_correspondence.py','experimental/source_argument_binding.py',
-    'experimental/source_receiver_binding.py','tests/test_repaired_observation_analysis.py',
+NEW_FILES=[RUNNER,TESTS,'prototypes/repaired_observation_analysis.py',
+    'prototypes/observation_correspondence.py','prototypes/source_argument_binding.py',
+    'prototypes/source_receiver_binding.py','tests/test_repaired_observation_analysis.py',
     'tests/test_observation_correspondence.py','tests/test_source_argument_binding.py',
     'tests/test_source_receiver_binding.py']
 ARMS={
-    'cached_baseline':dict(module='experimental.patch_observation_priority_cached',
+    'cached_baseline':dict(module='prototypes.patch_observation_priority_cached',
         kwargs=dict(disable_receiver_fix=True)),
-    'repaired_control':dict(module='experimental.repaired_observation_analysis',
+    'repaired_control':dict(module='prototypes.repaired_observation_analysis',
         kwargs=dict(repair_correspondence=False,repair_arguments=False,disable_receiver_fix=True)),
-    'correspondence_only':dict(module='experimental.repaired_observation_analysis',
+    'correspondence_only':dict(module='prototypes.repaired_observation_analysis',
         kwargs=dict(repair_correspondence=True,repair_arguments=False,disable_receiver_fix=True)),
-    'binder_receiver_only':dict(module='experimental.repaired_observation_analysis',
+    'binder_receiver_only':dict(module='prototypes.repaired_observation_analysis',
         kwargs=dict(repair_correspondence=False,repair_arguments=True,disable_receiver_fix=False)),
-    'both':dict(module='experimental.repaired_observation_analysis',
+    'both':dict(module='prototypes.repaired_observation_analysis',
         kwargs=dict(repair_correspondence=True,repair_arguments=True,disable_receiver_fix=False)),
 }
 ARM_NAMES=list(ARMS)

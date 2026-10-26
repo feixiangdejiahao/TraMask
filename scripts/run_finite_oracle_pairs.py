@@ -12,7 +12,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from experimental.finite_oracle_questions import validate_question
+from prototypes.finite_oracle_questions import validate_question
 from relational_gap.provider import dispatch, encoded
 from scripts.prepare_finite_oracle_pairs import verify_pair, wire_preview
 

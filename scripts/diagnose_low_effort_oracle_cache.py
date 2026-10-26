@@ -108,7 +108,7 @@ def prepare(baseline, output):
             expected_wire_payload_sha256=digest(expected_path)))
     shutil.copyfile(scope_path, output / 'authorization_scope.json')
     sources = ['relational_gap/provider.py', 'relation_search/oracle.py',
-               'experimental/assertion_operand_guard.py', 'relation_search/checkpoint.py',
+               'prototypes/assertion_operand_guard.py', 'relation_search/checkpoint.py',
                'scripts/relation_search_semantics.py',
                'scripts/diagnose_low_effort_oracle_cache.py']
     code = {}

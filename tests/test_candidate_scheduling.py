@@ -1,4 +1,4 @@
-from experimental.candidate_scheduling import select
+from prototypes.candidate_scheduling import select
 
 
 def candidates(families=12, each=20):

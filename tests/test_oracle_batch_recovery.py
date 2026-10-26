@@ -5,7 +5,7 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.oracle_batch_recovery import plan_recovery, recovery_condition, validate_frozen_request
+from prototypes.oracle_batch_recovery import plan_recovery, recovery_condition, validate_frozen_request
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search.oracle import prepare_requests, validate
 

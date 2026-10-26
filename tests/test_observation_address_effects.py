@@ -3,7 +3,7 @@ import pytest
 
 from anchor_retrieval.index import Index
 from anchor_retrieval.syntax import Source
-from experimental.observation_address_effects import summarize_method
+from prototypes.observation_address_effects import summarize_method
 
 
 def setup(code,language='python',path=None):

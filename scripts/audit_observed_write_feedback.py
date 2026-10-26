@@ -11,7 +11,7 @@ import sys
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from experimental.assertion_write_origin import Module
+from prototypes.assertion_write_origin import Module
 from relation_search.checkpoint import read,write,digest
 
 

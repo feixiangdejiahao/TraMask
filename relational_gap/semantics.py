@@ -15,8 +15,8 @@ import hashlib
 import json
 
 from anchor_retrieval.syntax import Source
-from experimental.semantic_transport.expected_templates import extract_template
-from experimental.semantic_transport.oracle import (
+from prototypes.test_action_and_oracle_transfer.expected_templates import extract_template
+from prototypes.test_action_and_oracle_transfer.oracle import (
     OracleError, Unknown, decode_value, emit_literal, encode_value,
     evaluate_expression, parse_source_literal,
 )

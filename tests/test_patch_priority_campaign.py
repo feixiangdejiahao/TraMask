@@ -175,7 +175,7 @@ def test_unrequestable_prefix_cannot_block_budget_or_expand_batched_model_budget
 def test_main_code_freeze_includes_source_priority_transitive_parser_dependencies():
     from scripts.run_relation_campaign import code_identity
     paths = code_identity()
-    for path in ['experimental/patch_observation_priority.py', 'generic_composition/corpus.py',
-                 'experimental/modified_observation_impact.py', 'experimental/local_helper_evidence.py',
-                 'experimental/go_assertion_helper.py', 'experimental/source_failure_evidence.py']:
+    for path in ['prototypes/patch_observation_priority.py', 'generic_composition/corpus.py',
+                 'prototypes/modified_observation_impact.py', 'prototypes/local_helper_evidence.py',
+                 'prototypes/go_assertion_helper.py', 'prototypes/source_failure_evidence.py']:
         assert path in paths

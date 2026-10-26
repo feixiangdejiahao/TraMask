@@ -9,7 +9,7 @@ import time
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from experimental.context_candidate_groups import build_catalogue,schedule
+from prototypes.context_candidate_groups import build_catalogue,schedule
 
 
 def digest(path): return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -23,10 +23,10 @@ def run(inventory,output):
     output.mkdir(parents=True,exist_ok=False)
     inputs={case.name:{name:digest(case/name) for name in ('corpus.json','frontend.json','source_pool.json')}
             for case in sorted(inventory.iterdir()) if (case/'source_pool.json').exists()}
-    files=['experimental/context_candidate_groups.py','scripts/census_context_candidate_groups.py',
+    files=['prototypes/context_candidate_groups.py','scripts/census_context_candidate_groups.py',
            'tests/test_context_candidate_groups.py','relation_search/semantic_selection.py',
            'relation_search/impact_selection.py','relation_search/instrument.py',
-           'experimental/singleton_oracle_slots.py','experimental/assertion_operand_guard.py',
+           'prototypes/singleton_oracle_slots.py','prototypes/assertion_operand_guard.py',
            'anchor_retrieval/syntax.py','anchor_retrieval/graph.py','anchor_retrieval/index.py',
            'relational_gap/frontend.py']
     write(output/'protocol.json',dict(inventory=str(inventory.resolve()),input_sha256=inputs,

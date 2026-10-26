@@ -1,7 +1,7 @@
 """A controlled mathematical ablation; source examples are invented."""
 from anchor_retrieval.syntax import Source
-from experimental.generic_v2.analogy import analogy as strict_analogy
-from experimental.generic_v21.analogy import analogy as erasing_analogy
+from prototypes.test_edit_analogy_v02.analogy import analogy as strict_analogy
+from prototypes.test_edit_analogy_allow_erasing_v02_01.analogy import analogy as erasing_analogy
 from generic_composition.terms import from_source, render
 
 

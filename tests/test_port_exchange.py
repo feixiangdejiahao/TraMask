@@ -1,5 +1,5 @@
 from generic_composition.corpus import build_corpus
-from experimental.port_exchange import generate
+from prototypes.port_exchange import generate
 
 
 def test_different_source_producers_can_cross_the_same_argument_port(tmp_path):

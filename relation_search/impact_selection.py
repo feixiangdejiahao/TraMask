@@ -14,7 +14,7 @@ import json
 
 from anchor_retrieval.index import Index
 from anchor_retrieval.syntax import Source, Unit, literal
-from experimental.singleton_oracle_slots import assertion_inventory
+from prototypes.singleton_oracle_slots import assertion_inventory
 from relational_gap.frontend import _flow_for_test, _test_walk
 from relation_search import semantic_selection
 from relation_search.instrument import _program_edits

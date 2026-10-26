@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.relation_search_go_ts import (
+from prototypes.relation_search_go_ts import (
     _guest_factories, emit_neighbors, enrich, propose_neighbors, routing_templates,
 )
 
@@ -452,7 +452,7 @@ func TestView(t *testing.T) { bag:=value.(*guest.Vector); _=bag.Elements[0] }
 @pytest.mark.parametrize("name,offset", [("Position", 0), ("Index", 41)])
 def test_owner_prefix_prunes_proved_named_scalar_mismatch(name, offset):
     from anchor_retrieval.syntax import units, walk, child, CALLS
-    from experimental.relation_search_go_ts import _go_call_type_facts
+    from prototypes.relation_search_go_ts import _go_call_type_facts
     source = Source("sample_test.go", f'''package sample
 type {name} uint64
 type Alias = int

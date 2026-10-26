@@ -1,7 +1,7 @@
 """A representation budget failure skips one item, not the bounded search."""
 import pytest
 
-from experimental.assertion_instances.generate import Budget, _statement_key, generate
+from prototypes.helper_assertion_instances_v01.generate import Budget, _statement_key, generate
 from generic_composition.corpus import build_corpus
 from generic_composition.terms import BudgetExceeded
 

@@ -6,9 +6,9 @@ import types
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.assertion_write_origin import Module
-from experimental.emitted_q_origin import clone_mapping,map_span,bind_plan_origins
-from experimental.observed_write_runtime import Observer,build_plan,instrument_sources
+from prototypes.assertion_write_origin import Module
+from prototypes.emitted_q_origin import clone_mapping,map_span,bind_plan_origins
+from prototypes.observed_write_runtime import Observer,build_plan,instrument_sources
 from generic_composition.emitter import emit
 from relational_gap.frontend import extract_frontend,to_emitter_corpus
 

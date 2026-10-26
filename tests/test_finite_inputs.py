@@ -3,8 +3,8 @@ import copy
 
 import pytest
 
-from experimental import finite_inputs
-from experimental.finite_inputs import augment_corpus
+from prototypes import finite_inputs
+from prototypes.finite_inputs import augment_corpus
 from generic_composition.corpus import build_corpus
 from generic_composition.engine import Budget, expanded_donors, generate
 

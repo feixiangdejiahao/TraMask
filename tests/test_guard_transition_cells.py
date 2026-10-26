@@ -4,8 +4,8 @@ import copy
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.guard_transition_cells import candidate_cells
-from experimental.numeric_relation_buckets import candidate_relations
+from prototypes.guard_transition_cells import candidate_cells
+from prototypes.numeric_relation_buckets import candidate_relations
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 
 

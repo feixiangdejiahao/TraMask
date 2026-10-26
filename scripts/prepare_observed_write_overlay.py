@@ -12,7 +12,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.observed_write_runtime import build_plan, instrument_sources
+from prototypes.observed_write_runtime import build_plan, instrument_sources
 from relation_search.checkpoint import digest, read, write
 
 
@@ -39,7 +39,7 @@ def prepare_group(source_manifest, output, *, map_origins=False):
             sources[snapshot['target']] = {'code':Path(original['source']).read_text()}
         plan = build_plan(sources, assertion_paths=functions, assertion_functions=functions)
         if map_origins:
-            from experimental.emitted_q_origin import bind_plan_origins
+            from prototypes.emitted_q_origin import bind_plan_origins
             accepted=read(source_manifest.parent.parent/'accepted.json')
             plan=bind_plan_origins(plan,corpus,sources,items,accepted)
             write(folder/'source_q_mapping.json',plan['source_q_mapping'])
@@ -54,7 +54,7 @@ def prepare_group(source_manifest, output, *, map_origins=False):
                 if path in overlay:
                     target.write_text(overlay[path])
                 else:
-                    shutil.copyfile(ROOT/'experimental/observed_write_runtime.py', target)
+                    shutil.copyfile(ROOT/'prototypes/observed_write_runtime.py', target)
                 staged = '.relational_phase_inputs/'+role+'/observed_'+hashlib.sha256(path.encode()).hexdigest()+'.snapshot'
                 row = dict(target=path, staged=staged, sha256=digest(target))
                 mounts[staged] = dict(source=str(target.resolve()), target=staged, sha256=digest(target))
@@ -97,8 +97,8 @@ def prepare(emitted_paths, output, *, map_origins=False):
         for artifact in read(emitted/'artifacts.json'):
             source = Path(artifact)/'manifest.json'
             inputs.append(dict(path=str(source.resolve()), sha256=digest(source)))
-    code = [ROOT/'experimental/observed_write_runtime.py',
-            ROOT/'experimental/assertion_write_origin.py', ROOT/'experimental/emitted_q_origin.py',
+    code = [ROOT/'prototypes/observed_write_runtime.py',
+            ROOT/'prototypes/assertion_write_origin.py', ROOT/'prototypes/emitted_q_origin.py',
             ROOT/'generic_composition/emitter.py', Path(__file__).resolve()]
     write(output/'protocol.json', dict(inputs=inputs, subject_executions=0,
         provider_calls=0, target_labels_used=False,

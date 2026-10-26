@@ -20,11 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from anchor_retrieval.syntax import Source, child, walk
 from relation_search import oracle
-from experimental.assertion_operand_guard import valid_assertion
+from prototypes.assertion_operand_guard import valid_assertion
 
 
 CODE_FILES = ['scripts/audit_go_predicate_readmission.py', 'relation_search/oracle.py',
-    'experimental/assertion_operand_guard.py', 'experimental/singleton_oracle_slots.py',
+    'prototypes/assertion_operand_guard.py', 'prototypes/singleton_oracle_slots.py',
     'anchor_retrieval/graph.py', 'anchor_retrieval/syntax.py', 'relation_search/impact_selection.py',
     'relation_search/instrument.py', 'relation_search/oracle_evidence.py']
 PAIRS = [frozenset(pair) for pair in [('NoError', 'Error'), ('Nil', 'NotNil'),
@@ -193,7 +193,7 @@ def audit_completion(request_path, directory, corpus_path, legacy_guard):
 def run(campaign, output):
     output.mkdir(parents=True, exist_ok=False)
     current_hashes = {name:digest(ROOT/name) for name in CODE_FILES}
-    snapshot = campaign/'algorithm_snapshot/experimental/assertion_operand_guard.py'
+    snapshot = campaign/'algorithm_snapshot/prototypes/assertion_operand_guard.py'
     legacy_guard = load_guard(snapshot)
     inventory, excluded = [], []
     for semantic in sorted(campaign.glob('*/round_*/semantic')):
@@ -204,7 +204,7 @@ def run(campaign, output):
             excluded.append(dict(round=str(semantic.parent.resolve()), reason='round_feedback_not_complete'))
             continue
         stage = read(semantic/'stage.json')
-        old_sha = stage['code_sha256']['experimental/assertion_operand_guard.py']
+        old_sha = stage['code_sha256']['prototypes/assertion_operand_guard.py']
         if old_sha != digest(snapshot):
             raise ValueError('frozen guard does not match completed round')
         source_case = semantic.parent.parent.name

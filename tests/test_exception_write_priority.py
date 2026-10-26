@@ -2,8 +2,8 @@ import ast
 
 import pytest
 
-from experimental.assertion_write_origin import Module, analyze_assertion
-from experimental.exception_write_priority import evidence, prioritize
+from prototypes.assertion_write_origin import Module, analyze_assertion
+from prototypes.exception_write_priority import evidence, prioritize
 
 
 def example(*, operation='r.pump()', receiver='r', handler='pytest.raises(ValueError)',

@@ -683,7 +683,7 @@ def _exception_observation_transfers(corpus, sources, contexts, eligible, budget
     if not contexts or not corpus['capsules']:
         return
     from anchor_retrieval.index import Index
-    from experimental import observation_projection as projection
+    from prototypes import observation_projection as projection
 
     index = Index(list(sources.values()), '')
     templates = projection._bank(corpus, index, projection.Budget(max_templates=128, max_ports=1), skipped)
@@ -770,7 +770,7 @@ def _source_string_contexts(corpus, frontend, donors, sources, seeds, rank_order
     No protocol keys, parser method names, or regular-expression grammar is
     inferred from a string's contents.
     """
-    from experimental.local_literal_contexts import learn
+    from prototypes.local_literal_contexts import learn
     from generic_composition.edits import encode_literal, learn_literal_edits, tokens
 
     groups = defaultdict(list)

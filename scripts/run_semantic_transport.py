@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from experimental.semantic_transport import model, proposals
+from prototypes.test_action_and_oracle_transfer import model, proposals
 from scripts import run_generic_experiment as driver
 
 GENERATOR = "semantic_observation_transport"
@@ -35,11 +35,11 @@ def write_json(path: Path, value: object) -> None:
 
 
 def transport_hashes() -> dict:
-    paths = [*sorted((ROOT / "experimental/semantic_transport").glob("*.py")),
-             ROOT / "experimental/llm_baseline.py",
-             ROOT / "experimental/finite_inputs.py", ROOT / "experimental/state_regions.py",
-             ROOT / "experimental/observation_projection.py", ROOT / "experimental/local_literal_contexts.py",
-             ROOT / "experimental/port_exchange.py",
+    paths = [*sorted((ROOT / "prototypes/test_action_and_oracle_transfer").glob("*.py")),
+             ROOT / "prototypes/llm_baseline.py",
+             ROOT / "prototypes/finite_inputs.py", ROOT / "prototypes/state_regions.py",
+             ROOT / "prototypes/observation_projection.py", ROOT / "prototypes/local_literal_contexts.py",
+             ROOT / "prototypes/port_exchange.py",
              Path(__file__).resolve()]
     return {str(path.relative_to(ROOT)): driver.digest(path) for path in paths}
 

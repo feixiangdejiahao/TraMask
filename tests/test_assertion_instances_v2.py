@@ -6,10 +6,10 @@ import pytest
 
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
-from experimental.assertion_instances.core import extract as closed_extract
-from experimental.assertion_instances.generate import _json_provenance
-from experimental.assertion_instances_v2.core import extract, compose
-from experimental.assertion_instances_v2.generate import Budget, generate, novelty, gate_evidence
+from prototypes.helper_assertion_instances_v01.core import extract as closed_extract
+from prototypes.helper_assertion_instances_v01.generate import _json_provenance
+from prototypes.helper_assertion_instances_v02.core import extract, compose
+from prototypes.helper_assertion_instances_v02.generate import Budget, generate, novelty, gate_evidence
 from generic_composition.gate import presentation, selection_candidates
 
 

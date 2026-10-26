@@ -1,0 +1,41 @@
+# 研究工作区与历史材料
+
+后续使用 `se-auto-research` 时，进入 [test augmentation 工作区](workspaces/test_augmentation/README.md)。`research/` 是材料入口，不是 skill 的工作区根目录。
+
+## 目录分工
+
+| 位置 | 用途 |
+|---|---|
+| [`workspaces/test_augmentation/`](workspaces/test_augmentation/README.md) | 当前研究的独立工作区。保存新方案、日志、证据登记和草稿协议。 |
+| [`history/`](history/README.md) | 整理前 355 个入口的分类索引。历史文件仍位于原路径。 |
+| [`../experiments/`](../experiments/index.html) | 按主题查看历史实验。继续存放实验执行产物和既有脚本的输出。 |
+| [`../docs/`](../docs/README.md) | 可阅读的研究报告。 |
+| 本目录已有的 JSON、子目录和 120 个兼容链接 | 历史记录。旧脚本、报告链接和路径校验继续使用这些位置。 |
+
+每个新研究方向使用单独的 `workspaces/<研究名>/`。固定名称的 `01_scope.md`、`ledger.json` 和 `protocols/P1.json` 只在各自工作区中使用。
+
+## 接续研究时先看
+
+1. [研究范围](workspaces/test_augmentation/01_scope.md)：记录用户已确定的场景，不预先选择新的算法。
+2. [2026-10-19 独立审查](independent_review_20261019/independent_report.html)：问题抽象、方法建议和待做 pilot。建议不等于已验证效果。
+3. [30 项任务的轨迹与程序关系分析](../docs/augmentation_trajectory_program_study30_20261010.html)：原始观察和分析范围。
+4. [T08 统计修订](../docs/augmentation_t08_statistics_revision_20261010.html)：解释旧报告中 23 项目标与修订后 22 项目标的区别。
+5. [全部报告](../docs/README.md)和[历史材料索引](history/README.md)：按需继续读取。
+
+## 使用 skill
+
+可在下一次任务中明确指定：
+
+```text
+$se-auto-research mode=frame
+使用 research/workspaces/test_augmentation 作为工作区。
+先读取研究范围和相关历史证据，再处理本次问题。
+```
+
+新工作区已经按 `method` 类型初始化。`ledger.json` 为空，`protocols/P1.json` 是未启用的草稿。其余模板按任务需要填写。
+
+历史结论没有自动导入新证据记录。需要登记某个历史文件时，先核查该文件，再把实际使用的文件复制到工作区内的 `evidence/`，记录原路径和哈希。skill 的本地证据校验不接受指向工作区之外的路径或符号链接。
+
+## 本次整理
+
+本次只调整入口和后续写入位置。历史文件、兼容链接及其真实路径保持不变。查看[整理前说明](../experiments/maintenance/20261020_research_layout/before/research_README.md)、[整理前文件清单](../experiments/maintenance/20261020_research_layout/before_inventory.json)和[校验结果](../experiments/maintenance/20261020_research_layout/verification.json)。

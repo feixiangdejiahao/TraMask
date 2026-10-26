@@ -8,7 +8,7 @@ import json
 import math
 
 from anchor_retrieval.syntax import Source,child
-from experimental import assertion_operand_guard as guard
+from prototypes import assertion_operand_guard as guard
 from relation_search import expected_slots,oracle,oracle_constant_mask
 
 

@@ -4,7 +4,7 @@ import hashlib
 import pytest
 
 from anchor_retrieval.syntax import Source, walk
-from experimental.ordered_binding_history import analyze_source
+from prototypes.ordered_binding_history import analyze_source
 
 
 def py(body):
@@ -155,7 +155,7 @@ def test_augmented_assignment_does_not_claim_rhs_alias():
 
 
 def test_adapter_revalidates_modified_owner_and_preserves_all_compact_qs():
-    from experimental.ordered_binding_history import analyze
+    from prototypes.ordered_binding_history import analyze
     from relational_gap.frontend import extract_frontend,to_emitter_corpus
     from relation_search.compact_test_obligations import analyze as compact
     code='def test_case():\n    x=make()\n    assert use(x)==1\n    assert use(x)==2\n'

@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 import difflib
 
 from anchor_retrieval.syntax import Source
-from experimental.local_literal_contexts import learn
+from prototypes.local_literal_contexts import learn
 from generic_composition.corpus import source_text
 from generic_composition.edits import learn_literal_edits, tokens
 from generic_composition.engine import expected_only, slot_key, stable_id

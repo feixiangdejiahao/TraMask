@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from experimental.assertion_write_origin import analyze_assertion
+from prototypes.assertion_write_origin import analyze_assertion
 
 
 LIBRARY = '''class Channel:

@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Render the completed, manually reviewed Pilot 1 observations as a concise report."""
+from collections import Counter
+from html import escape
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+RUN = ROOT / "results/behavioral_masking/20261025_context_recovery_pilot1_r01"
+
+
+def main():
+    data = json.loads((RUN / "report_data.json").read_text())
+    assert data["status"] == "complete"
+    rows = data["cases"]
+    assert len(rows) == 10 and len({row["task"] for row in rows}) == 10
+    counts = Counter(row["outcome"] for row in rows)
+    assert counts["Single-factor Context Repair"] == 1
+    case_rows = "".join(
+        '<tr><td><a href="screening/{id}/screening_plan.json">{id} · {name}</a></td>'
+        '<td>{p} / {r}</td><td>{category}</td><td>{reason}</td></tr>'.format(
+            id=escape(row["screen_id"]), name=escape(row["name"]),
+            p=escape(row["original_P"]), r=escape(row["original_R"]),
+            category=escape(row["outcome"]), reason=escape(row["explanation_zh"]),
+        ) for row in rows
+    )
+    categories = ["Single-factor Context Repair", "Multi-factor Context Repair",
+                  "Assertion Repair Required", "Different Stimulus Required",
+                  "Not Comparable / Unresolved"]
+    count_rows = "".join(f"<tr><td>{name}</td><td>{counts[name]}</td></tr>" for name in categories)
+    html = '''<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pilot 1 · Context-only Repair</title>
+<style>
+:root{color-scheme:light;--ink:#182433;--muted:#52616f;--line:#d9e1e7;--accent:#176353}
+*{box-sizing:border-box}body{margin:0;background:#f6f8fa;color:var(--ink);font:16px/1.8 system-ui,-apple-system,"Noto Sans CJK SC",sans-serif}
+main{max-width:1080px;margin:36px auto;padding:36px 44px;background:white;border:1px solid var(--line);border-radius:12px}
+h1{font-size:30px;line-height:1.35;margin:8px 0 22px}h2{font-size:23px;line-height:1.5;margin:36px 0 12px}h3{font-size:18px;margin-top:25px}
+p{margin:12px 0}a{color:var(--accent);text-underline-offset:3px}.eyebrow,small{color:var(--muted)}.lead{font-size:19px;border-left:4px solid var(--accent);padding-left:18px}
+.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px;margin:16px 0}th,td{padding:11px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{background:#eef4f2}td:first-child{min-width:125px}
+pre{background:#f0f4f7;padding:20px;overflow:auto;line-height:1.6;font-size:14px}code{font-family:ui-monospace,monospace}details{margin-top:24px;border-top:1px solid var(--line);padding-top:18px}summary{cursor:pointer;font-weight:600}.pass{color:#176353}.fail{color:#a3312a}.flow{padding:16px;background:#eef4f2;text-align:center;font-weight:600}.footer{font-size:14px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}
+@media(max-width:720px){main{margin:0;padding:24px 18px;border:0;border-radius:0}h1{font-size:25px}h2{font-size:20px}}
+@media print{body{background:white}main{border:0;margin:0;padding:0}details{display:block}table{font-size:11px}}
+</style></head><body><main>
+<div class="eyebrow">Pilot 1 · 2026-10-25 · Codex 手工分析与两个独立线程复核</div>
+<h1>只改变测试上下文，能否揭露已知错误？</h1>
+<p class="lead">在固定顺序筛选出的 10 个 Validation Miss 中，Clack 的原测试通过增加两行 setup 揭露了已知错误：让前一次请求先完成，再执行原来的新请求与取消断言。轨迹里已有相近的执行条件，但没有把它用于这项断言。</p>
+<p>这轮回答的是四个 Observation。结果支持一个具体的上下文迁移操作：改变前一次异步操作的完成状态。跨任务的重复规律尚未建立。</p>
+
+<h2>O1 · Context-only Repair 是否存在？</h2>
+<p><strong>存在，确认 1 个。</strong>Clack 的要求是：启动新请求时，取消前一次请求的 signal。Agent 测试与 Verifier 都调用同一功能、检查同一取消行为，区别在于新请求开始前，旧请求是否已经完成。</p>
+<div class="table-wrap"><table><thead><tr><th>测试组成</th><th>原 Agent Test</th><th>失败的 Verifier Test</th></tr></thead><tbody>
+<tr><td>Setup</td><td>前一次请求 a 保持 pending</td><td>等待前一次请求完成</td></tr>
+<tr><td>目标操作</td><td>发起下一次请求 ab</td><td>发起下一次请求</td></tr>
+<tr><td>观察</td><td>旧请求的 signal.aborted</td><td>旧请求的 signal.aborted</td></tr>
+<tr><td>错误 patch 上结果</td><td>PASS：pending 请求会被取消</td><td>FAIL：已完成请求的 signal 没有被取消</td></tr>
+</tbody></table></div>
+<p>将“先完成旧请求”迁回原 Agent Test，保留原来的 <code>emit('ab')</code>、输入和断言，得到以下结果。每格执行两次，两次一致。</p>
+<table><thead><tr><th>测试</th><th>错误 patch P</th><th>独立参考实现 R</th></tr></thead><tbody>
+<tr><td>原 Agent Test t</td><td class="pass">PASS × 2</td><td class="pass">PASS × 2</td></tr>
+<tr><td>t + context edit</td><td class="fail">FAIL × 2</td><td class="pass">PASS × 2</td></tr>
+</tbody></table>
+<p>原因是错误 patch 在请求完成时清除了控制器；随后新请求无法再取消旧 signal。原测试让旧请求一直等待，控制器仍在，所以取消断言通过。修改后的测试在同一原断言处暴露错误。<a href="cases/S025/context_attempt_001/matrix_summary.json">执行四格</a> · <a href="cases/S025/context_attempt_001/context.patch">实际修改</a></p>
+<p>事后的机制检查表明，原测试确实执行了 pending 请求的取消；它未覆盖被断言请求的“完成后再取消”路径。该例属于有效的 Context-recoverable Validation Miss。它遗漏了完成后的执行路径；整体取消机制已经运行。按 PDF 的严格定义，原测试中被跟踪的 a-signal 在两实现上均为 true，尚未建立局部效应不同的 Masking witness，因此本轮确认的严格 Behavioral Masking 为 0，细分类型保留为“完成路径未覆盖”。</p>
+
+<h2>O2 · Repair 是否简单？</h2>
+<p><strong>这个成功修改只改变 1 个语义条件，新增 2 行可执行代码。</strong>它把前一次请求从 pending 变为 resolved，无需重构测试，也没有修改目标操作或断言。</p>
+<pre><code> signals.push(lastCall[1].signal);
++resolveA([{ value: 'stale' }]);
++await flush();
+ instance.emit('userInput', 'ab');
+ await vi.advanceTimersByTimeAsync(10);
+ expect(signals[0].aborted).toBe(true);</code></pre>
+<p>该修改揭露的是“旧 signal 必须被取消”这一任务语义。原复合测试末尾再次调用 <code>resolveA</code> 时，Promise 已经完成，因此那一部分不再构成迟到结果的竞态检查。这个成功结果具体支持取消行为的上下文修复。</p>
+
+<h2>O3 · Context Factor 是否有规律？</h2>
+<p><strong>发现了“前次操作的生命周期状态”这一因素，尚未观察到跨案例重复。</strong>本例给出的可执行变换是：在同一后续操作之前，让先前异步操作完成。它可以作为后续候选生成规则，但本轮只有一个成功案例，无法据此归纳出多类稳定的 Context Transformation。</p>
+<p>其余所选测试未建立合法的 setup 修复。对齐中发现的阻碍包括遗漏目标输入、原断言错误和参考对照不成立。</p>
+<table><thead><tr><th>结果类别</th><th>案例数</th></tr></thead><tbody>__COUNT_ROWS__</tbody></table>
+
+<h2>O4 · Trajectory 中是否存在相关线索？</h2>
+<p><strong>事后回查找到 1 条可追溯的执行线索。</strong>Clack 轨迹第 62 步曾运行一个 smoke test：启动异步 resolver，等待 50 ms 使初始请求完成，再输入字符 <code>x</code> 发起后续请求。执行记录显示它观察了 loading、选项和调用次数；它没有保存旧 signal，也没有检查取消状态。</p>
+<p>后来通过的目标测试把被检查的请求 a 保持为 pending。成功修改所需的“前次已完成”条件，已经在更早的执行历史中出现，却没有用于这一取消断言。这里可复用的是完成时序条件；历史脚本尚未检出该错误。<a href="cases/S025/postcheck/step_062_original_command.sh">第 62 步原命令</a> · <a href="cases/S025/postcheck/trajectory_action_evidence.json">原执行记录</a></p>
+<p>由此得到一个值得检验的简单算法：</p>
+<div class="flow">提取历史中的完成／等待条件 → 迁移到相关测试的目标操作前 → 执行 P/R 对照</div>
+<p>成功修改所需的条件可以在既有历史中找到。下一步应检验：同类历史条件能否在更多任务中被提取和复用，以及它能否提高候选修改的成功率。</p>
+
+<h2>10 个实例分别发生了什么？</h2>
+<p>下表中的原测试结果写为 P / R。全部 10 例的主 Verifier 均在 P 上实际执行失败、在 R 上通过，各重复两次。只有 Clack 进入并完成了 context edit 的四格实验；其余 9 例在测试对齐或参考对照阶段没有得到可执行的合法 setup 修改。</p>
+<div class="table-wrap"><table><thead><tr><th>实例</th><th>原测试 P / R</th><th>结果类别</th><th>解释</th></tr></thead><tbody>__CASE_ROWS__</tbody></table></div>
+
+<details><summary>样本来源、未纳入原因与复核材料</summary>
+<p>测试单位按对应的原验证行为选定：S006 是原表驱动测试中所选的一条独立 entry，S013 是原文件中所选的独立 it block，均原样用于 P/R。完整函数或文件中的其他测试所致参考失败仍保留在执行记录中。S008 的单位是整个原 TestComplianceRoutes，末尾断言也完整保留。</p>
+<p>从 211 条原始 failed trials 出发，预先排除 T02、T13、T29 及既往校准任务，共 10 条轨迹；其余 201 条按 task 名、trial 名排序，每个任务取首个满足 Step 1 的 trial，达到 10 个独立任务即停止。前 25 个排序位置中：10 个纳入，6 个未纳入，9 个因同任务已有合格实例而跳过。另有一项后续候选的预读材料保留在筛选记录中，未用于本轮结论。这里的计数用于描述筛选过程，不估计全部 DeepSWE 测试的 Masking 发生率。</p>
+<p>未纳入的 6 条：Adaptix S001–S003 只确认了异常类型不一致，任务文字不足以确证行为错误；Anko S007 的 Verifier 没有成功编译执行；Awilix S011–S012 的唯一失败涉及父 singleton 首次初始化，而任务只明确禁止重复初始化。两位审查者分别确认了这些边界。</p>
+<p>研究者手工选择可比较测试并提出修改；两个独立 Codex 线程分别阅读任务、原 trajectory、测试与执行输出，再复核语义和分类。严格 Masking 的初始分歧及按 PDF 定义的修订保留在审查文件中。本轮没有新增 DeepSeek 调用。</p>
+<p><a href="protocol.json">四步协议</a> · <a href="screening_ledger.json">完整筛选台账</a> · <a href="report_data.json">结果数据与执行索引</a> · <a href="reviews/reviewer_A/">独立复核 A</a> · <a href="reviews/reviewer_B/">独立复核 B</a> · <a href="reviews/adjudication.json">最终判定依据</a></p>
+</details>
+<p class="footer">原始轨迹与 Verifier 证据保留；被替换的 TraMask 实验记录和报告已删除。<a href="../../../experiments/behavioral_masking/cleanup_20261025.json">清理清单</a> · <a href="../../../scripts/run_context_recovery_pilot1.py">本轮 replay / 执行入口</a> · <a href="../../../experiments/behavioral_masking/replay_code/">保留的 replay 代码</a></p>
+</main></body></html>'''
+    html = html.replace("__COUNT_ROWS__", count_rows).replace("__CASE_ROWS__", case_rows)
+    (RUN / "report.html").write_text(html)
+    print(RUN / "report.html")
+
+
+if __name__ == "__main__":
+    main()

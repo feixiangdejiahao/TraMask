@@ -8,8 +8,8 @@ import pytest
 from anchor_retrieval.syntax import Source
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
-from experimental.semantic_transport import oracle
-from experimental.semantic_transport.proposals import Budget, _expected, generate, materialize
+from prototypes.test_action_and_oracle_transfer import oracle
+from prototypes.test_action_and_oracle_transfer.proposals import Budget, _expected, generate, materialize
 
 
 def corpus_for(tmp_path, code, language='python'):

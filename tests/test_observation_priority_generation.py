@@ -4,10 +4,10 @@ import json
 
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
-from experimental.generic_v5.views import compose_views
-from experimental.observation_priority.generate import Budget, gate_evidence
+from prototypes.unified_view_test_analogy_v05.views import compose_views
+from prototypes.observation_guided_test_analogy.generate import Budget, gate_evidence
 
-generator = importlib.import_module('experimental.observation_priority.generate')
+generator = importlib.import_module('prototypes.observation_guided_test_analogy.generate')
 
 
 def make_corpus(tmp_path):

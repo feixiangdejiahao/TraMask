@@ -4,8 +4,8 @@ from collections import defaultdict
 from anchor_retrieval.syntax import Source, child, walk
 from generic_composition.corpus import build_corpus
 from generic_composition.terms import from_source
-from experimental.generic_v2.generate import _binding_labels
-from experimental.observation_priority.core import _features, edit_priority, rank_neighbors, target_priority
+from prototypes.test_edit_analogy_v02.generate import _binding_labels
+from prototypes.observation_guided_test_analogy.core import _features, edit_priority, rank_neighbors, target_priority
 
 
 PRELUDE = '''from sample_api import left, right

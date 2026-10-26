@@ -17,18 +17,18 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from anchor_retrieval.syntax import Source, attr_parts, call_parts, child, literal, walk
-from experimental.local_helper_evidence import analyze as local_analysis
-from experimental.local_helper_evidence import _function_scope, _receiver_rebound
+from prototypes.local_helper_evidence import analyze as local_analysis
+from prototypes.local_helper_evidence import _function_scope, _receiver_rebound
 from generic_composition.corpus import span
 from relation_search.oracle_evidence import _modified_sources
 
 VERSION = 'source-failure-cohort-v1'
 FILES = ['scripts/census_source_failure_evidence.py',
-    'tests/test_source_failure_census.py', 'experimental/source_failure_evidence.py',
+    'tests/test_source_failure_census.py', 'prototypes/source_failure_evidence.py',
     'tests/test_source_failure_evidence.py',
-    'experimental/local_helper_evidence.py', 'tests/test_local_helper_evidence.py',
-    'experimental/go_assertion_helper.py',
-    'experimental/go_arity_guard.py', 'relation_search/oracle_evidence.py',
+    'prototypes/local_helper_evidence.py', 'tests/test_local_helper_evidence.py',
+    'prototypes/go_assertion_helper.py',
+    'prototypes/go_arity_guard.py', 'relation_search/oracle_evidence.py',
     'relation_search/instrument.py', 'anchor_retrieval/syntax.py',
     'anchor_retrieval/index.py', 'anchor_retrieval/graph.py',
     'generic_composition/corpus.py', 'relational_gap/frontend.py']
@@ -367,7 +367,7 @@ def audit_candidate_sources(corpus, candidate, result):
 
 
 def run(paired, output):
-    from experimental.source_failure_evidence import analyze_corpus
+    from prototypes.source_failure_evidence import analyze_corpus
     protocol, ready = read(paired/'protocol.json'), read(paired/'ready.json')
     if digest(paired/'protocol.json') != ready['protocol_sha256']:
         raise ValueError('paired protocol does not match ready record')

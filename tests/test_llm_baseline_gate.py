@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from experimental import llm_baseline
+from prototypes import llm_baseline
 from generic_composition import gate
 from generic_composition.corpus import build_corpus
 from scripts import run_llm_baseline_gate as postgate

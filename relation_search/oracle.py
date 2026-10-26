@@ -273,7 +273,7 @@ def prepare_requests(corpus, frontend, candidates, issue, max_requests=4, per_re
 
 
 def _valid_assertion(code, old, observed, language):
-    from experimental.assertion_operand_guard import valid_assertion
+    from prototypes.assertion_operand_guard import valid_assertion
     return valid_assertion(code, old, observed, language)
 
 

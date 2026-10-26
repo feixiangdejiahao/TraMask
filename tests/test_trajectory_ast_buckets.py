@@ -4,7 +4,7 @@ import json
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relational_gap.history import namespace_go_validation
-from experimental.trajectory_ast_buckets import Buckets, rank_all
+from prototypes.trajectory_ast_buckets import Buckets, rank_all
 
 
 GO = '''package toy

@@ -1,8 +1,8 @@
 """Invented counterexamples for source-anchored oracle reuse, no pilot data."""
 from anchor_retrieval.syntax import Source, walk
 from generic_composition.corpus import build_corpus, expected_atoms
-from experimental.semantic_transport import oracle
-from experimental.semantic_transport.proposals import generate
+from prototypes.test_action_and_oracle_transfer import oracle
+from prototypes.test_action_and_oracle_transfer.proposals import generate
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search.oracle_evidence import build_evidence
 

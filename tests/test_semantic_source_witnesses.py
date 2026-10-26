@@ -2,8 +2,8 @@
 import copy
 import pytest
 from generic_composition.corpus import build_corpus
-from experimental.semantic_transport import oracle
-from experimental.semantic_transport.proposals import generate
+from prototypes.test_action_and_oracle_transfer import oracle
+from prototypes.test_action_and_oracle_transfer.proposals import generate
 
 
 def prepare(tmp_path, code):
@@ -97,7 +97,7 @@ def test_literal_inside_noninjective_expected_constructor_is_not_a_witness(tmp_p
 
 
 def test_witness_span_metadata_does_not_alias_the_input_corpus(tmp_path):
-    from experimental.semantic_transport.source_witnesses import attach
+    from prototypes.test_action_and_oracle_transfer.source_witnesses import attach
     path = tmp_path / 'test_text.py'
     path.write_text(SOURCE)
     corpus = build_corpus(tmp_path, 'python')
@@ -121,7 +121,7 @@ def test_parameterized_parent_does_not_borrow_a_different_row_condition(tmp_path
 
 
 def test_foreign_input_escape_is_decoded_before_context_learning(tmp_path):
-    from experimental.semantic_transport.proposals import _source_string_values
+    from prototypes.test_action_and_oracle_transfer.proposals import _source_string_values
     source = r'''function render(x: string) { return x; }
 test('a', () => { expect(render('a\a;')).toBe('aa;'); });
 '''

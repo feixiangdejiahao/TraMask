@@ -16,12 +16,12 @@ from relation_search.checkpoint import read, write, digest, start, completed, se
 def algorithm_files():
     return sorted({*[p for p in ROOT.glob('relation_search/*.py') if p.name != 'oracle.py'],
                    *ROOT.glob('relational_gap/*.py'), *ROOT.glob('anchor_retrieval/*.py'),
-                   *ROOT.glob('experimental/relation_search_*.py'),
-                   *[ROOT/'experimental'/name for name in ('assertion_operand_guard.py', 'source_edit_identity.py',
+                   *ROOT.glob('prototypes/relation_search_*.py'),
+                   *[ROOT/'prototypes'/name for name in ('assertion_operand_guard.py', 'source_edit_identity.py',
                        'candidate_scheduling.py', 'go_arity_guard.py', 'oracle_batch_recovery.py', 'owner_prefix_slice.py',
                        'exception_write_priority.py', 'assertion_write_origin.py',
                        'singleton_oracle_slots.py', 'call_dependency_evidence.py')],
-                   *[ROOT/'experimental'/name for name in ('patch_observation_priority.py',
+                   *[ROOT/'prototypes'/name for name in ('patch_observation_priority.py',
                        'modified_observation_impact.py', 'local_helper_evidence.py',
                        'go_assertion_helper.py', 'source_failure_evidence.py')],
                    ROOT/'scripts/analyze_assertion_write_origin_census.py',
@@ -65,12 +65,12 @@ def prepare(args):
             rows = constructor_generate(corpus, frontend, budget=args.pool)
             candidates.extend(rows)
             counts['source_constructors'] = len(rows)
-            from experimental.relation_search_python import generate as python_generate
+            from prototypes.relation_search_python import generate as python_generate
             rows = python_generate(corpus, frontend)
             candidates.extend(rows)
             counts['python_contexts'] = len(rows)
     else:
-        from experimental.relation_search_go_ts import enrich
+        from prototypes.relation_search_go_ts import enrich
         rows = enrich(corpus, frontend, budget=args.pool)
         candidates.extend(rows)
         counts['typed_contexts'] = len(rows)
@@ -90,7 +90,7 @@ def prepare(args):
     counts['feedback_extensions'] = len(extensions)
     if corpus['language'] == 'go':
         from anchor_retrieval.syntax import Source
-        from experimental.owner_prefix_slice import propose_candidate
+        from prototypes.owner_prefix_slice import propose_candidate
         sources = [Source(path, entry['code'], 'go') for path, entry in corpus['sources'].items()
                    if entry.get('language', corpus['language']) == 'go' and not entry.get('parse_error')]
         prefix_records, prefix_candidates = [], []
@@ -106,7 +106,7 @@ def prepare(args):
         counts['bounded_owner_prefix_proposals'] = len(prefix_candidates)
         write(args.output/'prefix_construction.json', dict(records=prefix_records,
             claim='new_construction_hypotheses_not_semantics_preserving_slices'))
-        from experimental.go_arity_guard import filter_candidates
+        from prototypes.go_arity_guard import filter_candidates
         validation = filter_candidates(corpus, candidates, frontend)
         candidates = validation.pop('candidates')
         counts['static_arity_rejected'] = len(validation['rejected'])
@@ -115,7 +115,7 @@ def prepare(args):
         original_ids = [row['id'] for row in candidates]
         if corpus['language'] == 'python':
             from scripts.analyze_assertion_write_origin_census import analyze_corpus
-            from experimental.exception_write_priority import prioritize
+            from prototypes.exception_write_priority import prioritize
             census = analyze_corpus(corpus)
             priority = prioritize(corpus, candidates, census)
             # The stable partition precedes the existing fair scheduler. Keep

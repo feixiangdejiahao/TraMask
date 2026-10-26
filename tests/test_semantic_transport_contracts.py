@@ -1,4 +1,4 @@
-from experimental.semantic_transport.contracts import extract_contracts
+from prototypes.test_action_and_oracle_transfer.contracts import extract_contracts
 
 
 def evidence(code):

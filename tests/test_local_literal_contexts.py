@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from experimental.local_literal_contexts import generate, learn
+from prototypes.local_literal_contexts import generate, learn
 from generic_composition.corpus import build_corpus
 from generic_composition.edits import learn_literal_edits
 
@@ -90,7 +90,7 @@ def test_d():
 
 
 def test_oversized_literals_are_removed_before_neighbor_similarity(tmp_path, monkeypatch):
-    import experimental.local_literal_contexts as local
+    import prototypes.local_literal_contexts as local
     long_value = '[x;' * 300
     (tmp_path / 'test_ports.py').write_text(
         'def f(x): return x\n'

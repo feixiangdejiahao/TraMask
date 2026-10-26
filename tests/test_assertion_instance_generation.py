@@ -3,8 +3,8 @@ from collections import Counter
 import json
 import pytest
 
-from experimental.assertion_instances.generate import Budget, _json_provenance, generate, gate_evidence
-from experimental.generic_v2.generate import _refine
+from prototypes.helper_assertion_instances_v01.generate import Budget, _json_provenance, generate, gate_evidence
+from prototypes.test_edit_analogy_v02.generate import _refine
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
 from generic_composition.gate import presentation, selection_candidates

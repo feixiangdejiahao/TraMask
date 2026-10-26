@@ -4,8 +4,8 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.guard_transition_cells import candidate_cells as strict_cells
-from experimental.guard_transition_cells_v2 import candidate_cells
+from prototypes.guard_transition_cells import candidate_cells as strict_cells
+from prototypes.guard_transition_cells_v2 import candidate_cells
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 
 

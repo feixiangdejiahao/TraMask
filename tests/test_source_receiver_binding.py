@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.source_receiver_binding import dispatch_unknown
+from prototypes.source_receiver_binding import dispatch_unknown
 from relational_gap.frontend import _FrontendIndex, _parameters, _flow_for_test, _test_walk
 
 

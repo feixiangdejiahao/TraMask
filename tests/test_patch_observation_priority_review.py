@@ -50,7 +50,7 @@ RETURN_NEW = "def calculate(value):\n    return value * 3\n"
 
 
 def evidence(corpus, frontend, patch, candidate, mode):
-    from experimental.patch_observation_priority import select
+    from prototypes.patch_observation_priority import select
     result = select(corpus, frontend, [candidate], patch, mode=mode)
     assert result["input_count"] == 1
     assert result["selected_count"] == 1

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import httpx
 
-from experimental.semantic_transport import model
+from prototypes.test_action_and_oracle_transfer import model
 from scripts import run_semantic_transport as transport
 
 

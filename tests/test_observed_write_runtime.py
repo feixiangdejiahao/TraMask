@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from experimental.observed_write_runtime import Observer, build_plan, instrument_sources
+from prototypes.observed_write_runtime import Observer, build_plan, instrument_sources
 
 
 LIBRARY = '''class Resource:

@@ -1,7 +1,7 @@
 import pytest
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend,to_emitter_corpus
-from experimental.call_dependency_evidence import candidate_evidence,render_evidence
+from prototypes.call_dependency_evidence import candidate_evidence,render_evidence
 
 
 def setup(language,code,before,after):

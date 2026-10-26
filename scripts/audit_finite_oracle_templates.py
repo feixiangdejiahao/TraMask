@@ -16,7 +16,7 @@ from collections import Counter
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from experimental.finite_oracle_templates import build_catalogue, expand
+from prototypes.finite_oracle_templates import build_catalogue, expand
 
 
 def canonical(value):
@@ -183,7 +183,7 @@ def run(source, output, *, sealed_census=None, check_reordering=False):
             raise ValueError('Sealed census cases differ from independently audited input')
     write(output/'protocol.json', {'source':str(source.resolve()),'case_ids':[p.name for p in cases],
         'code_sha256':{str(p.relative_to(ROOT)):sha(p.read_bytes()) for p in
-                       [Path(__file__),ROOT/'experimental/finite_oracle_templates.py']},
+                       [Path(__file__),ROOT/'prototypes/finite_oracle_templates.py']},
         'generator_under_test':'build_catalogue and expand only',
         'independent_checks':'raw UTF-8 edits, whole assertion frontend inventory, metadata, original/modified spans and source hashes',
         'sealed_census':str(sealed_census.resolve()) if sealed_census else None,

@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.source_failure_evidence import analyze, analyze_corpus
+from prototypes.source_failure_evidence import analyze, analyze_corpus
 
 
 PROGRAM = '''package assertions

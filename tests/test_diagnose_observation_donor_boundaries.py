@@ -1,5 +1,5 @@
 from anchor_retrieval.syntax import Source
-from experimental.observation_address_search import generate
+from prototypes.observation_address_search import generate
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 import pytest
 

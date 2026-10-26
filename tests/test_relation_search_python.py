@@ -6,7 +6,7 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.relation_search_python import Budget, analyze, generate
+from prototypes.relation_search_python import Budget, analyze, generate
 from generic_composition.emitter import emit
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 

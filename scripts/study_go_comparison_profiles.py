@@ -201,7 +201,7 @@ def prepare(paired, census, output, dependency_root, *, limit=128, timeout=90):
         'scripts/execute_relation_search.py', 'scripts/go_history_dependencies_v6.py',
         'scripts/go_dependency_import_aliases.py', 'scripts/go_materialization.py',
         'generic_composition/emitter.py', 'anchor_retrieval/syntax.py',
-        'experimental/go_comparison_probe.py', 'tests/test_go_comparison_profiles_study.py']
+        'prototypes/go_comparison_probe.py', 'tests/test_go_comparison_profiles_study.py']
     code = {name: digest(ROOT / name) for name in names}
     output.mkdir(parents=True)
     write(output / 'protocol.json', dict(version=VERSION, cases=parent['cases'], selection=records,

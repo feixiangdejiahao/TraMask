@@ -5,8 +5,8 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.generic_v3.generate import generate as flat_generate
-from experimental.generic_v4.generate import Budget, balanced_refine, gate_evidence, generate, refine_literals
+from prototypes.statement_aligned_test_analogy_v03.generate import generate as flat_generate
+from prototypes.balanced_literal_test_analogy_v04.generate import Budget, balanced_refine, gate_evidence, generate, refine_literals
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
 from generic_composition.terms import from_source, render, subterms

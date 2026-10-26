@@ -6,8 +6,8 @@ import subprocess
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.semantic_transport import state_contexts
-from experimental.semantic_transport.state_contexts import generate_state_contexts
+from prototypes.test_action_and_oracle_transfer import state_contexts
+from prototypes.test_action_and_oracle_transfer.state_contexts import generate_state_contexts
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
 

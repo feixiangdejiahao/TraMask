@@ -20,8 +20,8 @@ if __package__ in {None, ''}:
 
 from anchor_retrieval.index import Index
 from anchor_retrieval.syntax import Source, walk
-from experimental import observation_address_search as search
-from experimental.observation_address_effects import summarize_method
+from prototypes import observation_address_search as search
+from prototypes.observation_address_effects import summarize_method
 from scripts.diagnose_observation_address_gates import read_frozen
 
 
@@ -91,8 +91,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.output.exists():
         raise ValueError('Refusing to overwrite diagnostic artifact')
-    source_paths = [Path(__file__), ROOT/'experimental/observation_address_search.py',
-        ROOT/'experimental/observation_address_join.py', ROOT/'experimental/observation_address_effects.py',
+    source_paths = [Path(__file__), ROOT/'prototypes/observation_address_search.py',
+        ROOT/'prototypes/observation_address_join.py', ROOT/'prototypes/observation_address_effects.py',
         ROOT/'scripts/diagnose_observation_address_gates.py']
     seals = [freeze(p) for p in source_paths]
     inventory_receipt = freeze(args.inventory)

@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from anchor_retrieval.syntax import Source, child, walk
-from experimental.go_assertion_helper import HelperIndex, summarize_helper
+from prototypes.go_assertion_helper import HelperIndex, summarize_helper
 
 
 def summarize(code, name='check'):

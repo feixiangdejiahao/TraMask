@@ -11,14 +11,14 @@ import time
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from experimental.modified_observation_impact import select
+from prototypes.modified_observation_impact import select
 from relation_search.impact_selection import select as production_select
 
 
-FILES=['experimental/modified_observation_impact.py','tests/test_modified_observation_impact.py',
+FILES=['prototypes/modified_observation_impact.py','tests/test_modified_observation_impact.py',
     'scripts/census_modified_observation_impact.py','relation_search/impact_selection.py',
     'relation_search/semantic_selection.py','relation_search/oracle_evidence.py','relation_search/instrument.py',
-    'experimental/singleton_oracle_slots.py','experimental/assertion_operand_guard.py',
+    'prototypes/singleton_oracle_slots.py','prototypes/assertion_operand_guard.py',
     'anchor_retrieval/index.py','anchor_retrieval/graph.py','anchor_retrieval/syntax.py',
     'relational_gap/frontend.py','generic_composition/corpus.py']
 

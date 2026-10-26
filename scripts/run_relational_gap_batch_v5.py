@@ -48,8 +48,8 @@ def main():
                                "generic_composition/corpus.py", "combination_testing/test_reports.py")]
     code.extend(ROOT / p for p in ("anchor_retrieval/syntax.py", "anchor_retrieval/frontier.py",
                                    "anchor_retrieval/index.py", "anchor_retrieval/graph.py",
-                                   "experimental/semantic_transport/oracle.py",
-                                   "experimental/semantic_transport/expected_templates.py"))
+                                   "prototypes/test_action_and_oracle_transfer/oracle.py",
+                                   "prototypes/test_action_and_oracle_transfer/expected_templates.py"))
     hashes = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in code}
     write(ledger / "frozen_driver.json", {"files_sha256": hashes, "provider_concurrency": args.workers,
                                          "docker_concurrency": 2, "automatic_retries": 0,

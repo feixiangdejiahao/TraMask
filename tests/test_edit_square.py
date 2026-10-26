@@ -3,7 +3,7 @@ import textwrap
 
 import pytest
 
-from experimental.edit_square.core import edit_square
+from prototypes.test_edit_square_generation.core import edit_square
 
 
 def codes(result):

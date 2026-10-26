@@ -22,14 +22,14 @@ VERSION='patch-priority-cache-equivalence-v1'
 FROZEN_V1_SEAL='96b1528bd7ff73f5eb645f9e384b43030099a24c45a05c866fcf6dbae5860682'
 RUNNER='scripts/study_patch_priority_cache_equivalence.py'
 TESTS='tests/test_patch_priority_cache_study.py'
-NEW_FILES=[RUNNER,TESTS,'experimental/patch_observation_priority_v2.py',
+NEW_FILES=[RUNNER,TESTS,'prototypes/patch_observation_priority_v2.py',
     'tests/test_patch_observation_priority_v2.py','tests/test_patch_observation_priority_v2_review.py',
-    'experimental/patch_observation_priority_cached.py','tests/test_patch_observation_priority_cached.py']
+    'prototypes/patch_observation_priority_cached.py','tests/test_patch_observation_priority_cached.py']
 ARMS={
-    'v1':dict(module='experimental.patch_observation_priority',kwargs={},cache_equivalence=True),
-    'v2_cache':dict(module='experimental.patch_observation_priority_v2',kwargs={'disable_receiver_fix':True},cache_equivalence=True),
-    'v3_cache':dict(module='experimental.patch_observation_priority_cached',kwargs={'disable_receiver_fix':True},cache_equivalence=True),
-    'v2_receiver':dict(module='experimental.patch_observation_priority_v2',kwargs={'disable_receiver_fix':False},cache_equivalence=False),
+    'v1':dict(module='prototypes.patch_observation_priority',kwargs={},cache_equivalence=True),
+    'v2_cache':dict(module='prototypes.patch_observation_priority_v2',kwargs={'disable_receiver_fix':True},cache_equivalence=True),
+    'v3_cache':dict(module='prototypes.patch_observation_priority_cached',kwargs={'disable_receiver_fix':True},cache_equivalence=True),
+    'v2_receiver':dict(module='prototypes.patch_observation_priority_v2',kwargs={'disable_receiver_fix':False},cache_equivalence=False),
 }
 PRIMARY_ARMS=['v1','v2_cache','v3_cache']
 PACKAGES=['tree-sitter','tree-sitter-go','tree-sitter-python','tree-sitter-typescript']

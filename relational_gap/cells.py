@@ -14,7 +14,7 @@ from anchor_retrieval.syntax import CALLS, Source, child, walk
 from generic_composition.engine import expected_only, slot_key
 from relational_gap.closure import ClosureBudget, canonical, identifier, missing_cells
 from relational_gap.structured_ports import carrier_ports
-from experimental.semantic_transport.oracle import parse_source_literal, Unknown
+from prototypes.test_action_and_oracle_transfer.oracle import parse_source_literal, Unknown
 
 
 @dataclass(frozen=True)

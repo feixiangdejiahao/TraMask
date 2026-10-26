@@ -5,7 +5,7 @@ statement occurrence counts and order, and never executes a subject repository
 or computes an oracle for generation.
 """
 from anchor_retrieval.syntax import Source
-from experimental.generic_v3.alignment import align_analogy
+from prototypes.statement_aligned_test_analogy_v03.alignment import align_analogy
 from generic_composition.terms import from_source, render
 
 

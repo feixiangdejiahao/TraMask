@@ -1,9 +1,9 @@
 """Only invented source graphs; no subject execution or provider calls."""
 import pytest
 
-from experimental.assertion_windows.extract import extract
-from experimental.generic_v2.generate import _roles
-from experimental.generic_v3.alignment import align_analogy
+from prototypes.assertion_window_generation.extract import extract
+from prototypes.test_edit_analogy_v02.generate import _roles
+from prototypes.statement_aligned_test_analogy_v03.alignment import align_analogy
 from generic_composition.corpus import build_corpus, source_text
 from generic_composition.terms import render, subterms
 

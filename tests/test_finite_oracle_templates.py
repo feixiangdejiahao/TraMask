@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.finite_oracle_templates import build_catalogue, expand, source_size_summary
+from prototypes.finite_oracle_templates import build_catalogue, expand, source_size_summary
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relation_search.oracle import preview, program_candidate
 

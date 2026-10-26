@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from experimental import llm_baseline as baseline
+from prototypes import llm_baseline as baseline
 from scripts import run_generic_experiment as driver
 
 
@@ -34,7 +34,7 @@ def write_json(path: Path, value: object) -> None:
 
 
 def baseline_hashes() -> dict:
-    paths = [ROOT / "experimental/llm_baseline.py", Path(__file__).resolve()]
+    paths = [ROOT / "prototypes/llm_baseline.py", Path(__file__).resolve()]
     return {str(path.relative_to(ROOT)): driver.digest(path) for path in paths}
 
 

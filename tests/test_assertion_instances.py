@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from experimental.assertion_instances.core import compose, extract
+from prototypes.helper_assertion_instances_v01.core import compose, extract
 from generic_composition.corpus import build_corpus, source_text
 from generic_composition.emitter import emit
 from generic_composition.terms import render

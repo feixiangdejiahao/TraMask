@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from experimental import llm_baseline as baseline
+from prototypes import llm_baseline as baseline
 from scripts import run_llm_generation_baseline as original
 from scripts import run_llm_thinking_baseline as thinking
 from test_llm_generation_baseline import provider, response_content, staged_toy

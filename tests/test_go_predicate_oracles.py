@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from experimental.assertion_operand_guard import valid_assertion
-from experimental.singleton_oracle_slots import adapt_response, expected_slot
+from prototypes.assertion_operand_guard import valid_assertion
+from prototypes.singleton_oracle_slots import adapt_response, expected_slot
 from test_singleton_oracle_slots import adapted
 from anchor_retrieval.syntax import Source
 from relational_gap.frontend import extract_frontend, to_emitter_corpus

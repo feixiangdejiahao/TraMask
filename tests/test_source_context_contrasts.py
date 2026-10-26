@@ -7,7 +7,7 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.source_context_contrasts import build_catalogue, candidate_hints
+from prototypes.source_context_contrasts import build_catalogue, candidate_hints
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 
 

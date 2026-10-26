@@ -1,6 +1,6 @@
 import subprocess
 import pytest
-from experimental.generic_v2.bindings import analyze_bindings
+from prototypes.test_edit_analogy_v02.bindings import analyze_bindings
 
 CODE='package sample\nfunc sibling() int { ret:=4; return ret }\nfunc target() int { return 0 }\n'
 

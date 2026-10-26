@@ -14,14 +14,14 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.singleton_oracle_slots import adapt_frozen_singleton, eligible_candidates
+from prototypes.singleton_oracle_slots import adapt_frozen_singleton, eligible_candidates
 from relation_search.checkpoint import digest, read, write
 from relation_search.semantic_selection import select
 
 
 def freeze(output, inputs, stage):
     output.mkdir(parents=True, exist_ok=False)
-    files = ['experimental/singleton_oracle_slots.py', 'experimental/assertion_operand_guard.py',
+    files = ['prototypes/singleton_oracle_slots.py', 'prototypes/assertion_operand_guard.py',
              'relation_search/oracle.py', 'relation_search/semantic_selection.py',
              'anchor_retrieval/syntax.py', 'scripts/analyze_singleton_oracle_slots.py']
     code = {}

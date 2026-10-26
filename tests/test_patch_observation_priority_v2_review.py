@@ -7,8 +7,8 @@ import difflib
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.patch_observation_priority import select as old_select
-from experimental.patch_observation_priority_v2 import Analyzer, select
+from prototypes.patch_observation_priority import select as old_select
+from prototypes.patch_observation_priority_v2 import Analyzer, select
 from relational_gap.frontend import _flow_for_test, _test_walk, extract_frontend, to_emitter_corpus
 
 

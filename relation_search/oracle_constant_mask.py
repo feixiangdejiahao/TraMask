@@ -9,7 +9,7 @@ from __future__ import annotations
 import ast
 
 from anchor_retrieval.syntax import Source,child,walk
-from experimental import assertion_operand_guard as guard
+from prototypes import assertion_operand_guard as guard
 
 
 VERSION='constant-oracle-local-mask.v1'

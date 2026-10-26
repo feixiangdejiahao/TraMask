@@ -8,7 +8,7 @@ oracle or authorize a new edit location.
 from __future__ import annotations
 
 from anchor_retrieval.syntax import FUNCTIONS, Source, child, walk
-from experimental.semantic_transport.oracle import OracleError, Unknown, encode_value, parse_source_literal
+from prototypes.test_action_and_oracle_transfer.oracle import OracleError, Unknown, encode_value, parse_source_literal
 from generic_composition.corpus import ASSIGNMENTS
 
 

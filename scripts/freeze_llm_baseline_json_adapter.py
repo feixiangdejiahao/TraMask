@@ -29,7 +29,7 @@ def freeze(args):
     snapshot = args.output.resolve() / 'algorithm_snapshot'
     sys.path.insert(0, str(snapshot))
     driver = importlib.import_module('scripts.run_llm_generation_baseline')
-    baseline = importlib.import_module('experimental.llm_baseline')
+    baseline = importlib.import_module('prototypes.llm_baseline')
     runner = importlib.import_module('generic_composition.runner')
     assert Path(driver.__file__).resolve().is_relative_to(snapshot)
     original_load = baseline.load_generation

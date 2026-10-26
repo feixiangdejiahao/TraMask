@@ -50,8 +50,8 @@ def main():
                                "generic_composition/corpus.py", "combination_testing/test_reports.py")]
     code.extend(ROOT / p for p in ("anchor_retrieval/syntax.py", "anchor_retrieval/frontier.py",
                                    "anchor_retrieval/index.py", "anchor_retrieval/graph.py",
-                                   "experimental/semantic_transport/oracle.py",
-                                   "experimental/semantic_transport/expected_templates.py"))
+                                   "prototypes/test_action_and_oracle_transfer/oracle.py",
+                                   "prototypes/test_action_and_oracle_transfer/expected_templates.py"))
     hashes = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in code}
     dependency_files = sorted(args.dependency_packages_root.glob('*.json'))
     dependency_hashes = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest()

@@ -7,9 +7,9 @@ from pathlib import Path
 from anchor_retrieval.syntax import Source
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
-from experimental.semantic_transport.proposals import generate,materialize,_expected
-from experimental.semantic_transport import oracle
-from experimental.observation_projection import generate_projections
+from prototypes.test_action_and_oracle_transfer.proposals import generate,materialize,_expected
+from prototypes.test_action_and_oracle_transfer import oracle
+from prototypes.observation_projection import generate_projections
 
 
 def corpus_for(tmp_path,code,language='python'):
@@ -106,7 +106,7 @@ def test_single_value_hole_keeps_scalar_pre_and_literal_replacement(tmp_path):
 
 
 def test_model_presentation_declares_vector_values_and_fixed_expression(tmp_path):
-    from experimental.semantic_transport import model
+    from prototypes.test_action_and_oracle_transfer import model
     corpus=corpus_for(tmp_path,PYTHON)
     generated=generate(corpus)
     candidate=next(c for c in generated['candidates'] if c.get('expected_template') and 'wrap(make(1))' in c['preview_body'])

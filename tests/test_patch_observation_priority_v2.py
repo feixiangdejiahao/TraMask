@@ -5,8 +5,8 @@ import difflib
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.patch_observation_priority import select as v1_select
-from experimental.patch_observation_priority_v2 import Analyzer, select
+from prototypes.patch_observation_priority import select as v1_select
+from prototypes.patch_observation_priority_v2 import Analyzer, select
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 
 
@@ -155,7 +155,7 @@ def test_equal_length_call_replacement_cannot_reuse_previous_candidate_binding()
 
 
 def test_many_observations_reuse_one_call_binding_per_mode(monkeypatch):
-    import experimental.patch_observation_priority_v2 as module
+    import prototypes.patch_observation_priority_v2 as module
     original = module._resolved_targets; count = []
     def counted(*args, **kwargs):
         count.append(1)

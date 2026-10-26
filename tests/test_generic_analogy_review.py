@@ -2,8 +2,8 @@
 import ast
 
 from anchor_retrieval.syntax import Source
-from experimental.generic_v2.analogy import analogy
-from experimental.generic_v2.generate import generate
+from prototypes.test_edit_analogy_v02.analogy import analogy
+from prototypes.test_edit_analogy_v02.generate import generate
 from generic_composition.corpus import build_corpus
 from generic_composition.terms import from_source, render
 
@@ -95,7 +95,7 @@ def test_table(value,want):
 
 
 def test_writes_through_objects_are_not_lexical_declarations():
-    from experimental.generic_v2.generate import _binding_labels
+    from prototypes.test_edit_analogy_v02.generate import _binding_labels
     source = Source('invented.py', 'box.value = 1\narray[index] = 2\nassert read(box) == 1\n', 'python')
     tree = from_source(source)
     labels = _binding_labels(source, source.root, tree, [])

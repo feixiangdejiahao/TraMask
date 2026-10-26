@@ -1,8 +1,8 @@
 """Representation ablation on an invented input language, without execution."""
 import json
 
-from experimental.assertion_windows.balanced import generate, gate_evidence
-from experimental.assertion_windows.generate import generate as flat_generate
+from prototypes.assertion_window_generation.balanced import generate, gate_evidence
+from prototypes.assertion_window_generation.generate import generate as flat_generate
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
 

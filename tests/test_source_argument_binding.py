@@ -7,7 +7,7 @@ import inspect
 import pytest
 
 from anchor_retrieval.syntax import Source, units
-from experimental.source_argument_binding import bind_python_arguments
+from prototypes.source_argument_binding import bind_python_arguments
 from relational_gap.frontend import _parameters
 
 

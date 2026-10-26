@@ -1,9 +1,1 @@
-# 断言窗口实现的独立复核
-
-本复核只使用临时合成程序，未以真实 case、参考实现或隐藏目标指导实现。审计者此前接触过实验评价，因此不能声称审计者盲态。未修改生成器，未发模型请求。
-
-发现并由开发者修复了一个词法绑定问题：原实现按同名赋值的源码位置寻找 expected 定义，会把嵌套函数的 `expected = 99` 错标为外层断言的来源，而遗漏外层 `expected = 2`。修复后独立复跑确认：外层 2 得到正确角色、嵌套 99 不污染；条件赋值的两种可能值均保留，属于 may 信息；同一值同时作为输入和 expected 时保留两个角色。
-
-另一个合成组合检查确认：C 窗口外的 Unicode 前缀、后续语句、窗口内两条 gap 操作的字节和顺序均保留；A/B/C 源控制均生成。该检查验证源码保留与绑定信息，不证明 oracle。例如 `actual` 从标量变成列表后，后续未修改的 `consume(actual)` 仍可能不适用。alias、helper effects、liveout 和语义准入保持明确的未证明状态。
-
-截至复核未发现其他阻断级实现问题；这不是完整静态分析健全性证明，也不代表已覆盖所有 Python/Go/TS 语言机制。可复现 toy、逐项输出及受检源码 SHA 见 [独立复核归档](../results/independent_window_review/v1/review.json)。
+../experiments/program_relation_search/research/assertion_windows_independent_review.md

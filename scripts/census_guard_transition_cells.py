@@ -18,9 +18,9 @@ from relation_search.checkpoint import digest, read, write
 
 def census(args):
     if args.variant == "partial":
-        from experimental.guard_transition_cells_v2 import POLICY, candidate_cells
+        from prototypes.guard_transition_cells_v2 import POLICY, candidate_cells
     else:
-        from experimental.guard_transition_cells import POLICY, candidate_cells
+        from prototypes.guard_transition_cells import POLICY, candidate_cells
     started = time.monotonic()
     deadline = started + args.max_seconds
     frozen = read(args.sample/"protocol.json")
@@ -39,10 +39,10 @@ def census(args):
         records[case] = members
         selected[case] = [row["id"] for row in members]
         checksums[case] = {str(path): digest(path) for path in [pool_path, source/case/"corpus.json", source/case/"frontend.json"]}
-    files = [Path(__file__), ROOT/"experimental/guard_transition_cells.py", ROOT/"relational_gap/frontend.py",
+    files = [Path(__file__), ROOT/"prototypes/guard_transition_cells.py", ROOT/"relational_gap/frontend.py",
              ROOT/"anchor_retrieval/syntax.py", ROOT/"relation_search/instrument.py"]
     if args.variant == "partial":
-        files.append(ROOT/"experimental/guard_transition_cells_v2.py")
+        files.append(ROOT/"prototypes/guard_transition_cells_v2.py")
     code = {str(path.relative_to(ROOT)): digest(path) for path in files}
     protocol = dict(policy=POLICY, mode=args.mode, variant=args.variant, sample_protocol_sha256=digest(args.sample/"protocol.json"),
                     candidate_ids=selected, input_sha256=checksums, code_sha256=code,

@@ -3,8 +3,8 @@ import copy
 import unittest
 
 from anchor_retrieval.syntax import Source
-from experimental.semantic_transport.oracle import Limits, OracleError, decode_value
-from experimental.semantic_transport.expected_templates import extract_template, render_template
+from prototypes.test_action_and_oracle_transfer.oracle import Limits, OracleError, decode_value
+from prototypes.test_action_and_oracle_transfer.expected_templates import extract_template, render_template
 
 
 def source(expression, language):

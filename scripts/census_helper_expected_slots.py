@@ -15,17 +15,17 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from experimental.singleton_oracle_slots import assertion_inventory
+from prototypes.singleton_oracle_slots import assertion_inventory
 from relation_search.instrument import _program_edits
 from relation_search.oracle import program_candidate
 
 FILES = ['scripts/census_helper_expected_slots.py','tests/test_helper_expected_slots_census.py',
-    'experimental/helper_expected_slots.py','tests/test_helper_expected_slots.py',
-    'experimental/singleton_oracle_slots.py','experimental/go_assertion_helper.py',
-    'tests/test_go_assertion_helper.py','experimental/go_arity_guard.py','experimental/assertion_operand_guard.py',
-    'experimental/source_failure_evidence.py','experimental/local_helper_evidence.py',
+    'prototypes/helper_expected_slots.py','tests/test_helper_expected_slots.py',
+    'prototypes/singleton_oracle_slots.py','prototypes/go_assertion_helper.py',
+    'tests/test_go_assertion_helper.py','prototypes/go_arity_guard.py','prototypes/assertion_operand_guard.py',
+    'prototypes/source_failure_evidence.py','prototypes/local_helper_evidence.py',
     'tests/test_source_failure_evidence.py','tests/test_local_helper_evidence.py',
-    'experimental/finite_oracle_templates.py','tests/test_finite_oracle_templates.py',
+    'prototypes/finite_oracle_templates.py','tests/test_finite_oracle_templates.py',
     'relation_search/oracle.py','relation_search/instrument.py','relation_search/oracle_evidence.py',
     'anchor_retrieval/syntax.py','anchor_retrieval/index.py','anchor_retrieval/graph.py',
     'generic_composition/corpus.py','relational_gap/frontend.py']
@@ -82,8 +82,8 @@ def select_source_members(rows,limit=2):
 
 
 def run(paired,output,limit=2):
-    from experimental.helper_expected_slots import inventory
-    from experimental.go_assertion_helper import HelperIndex
+    from prototypes.helper_expected_slots import inventory
+    from prototypes.go_assertion_helper import HelperIndex
     protocol,ready=read(paired/'protocol.json'),read(paired/'ready.json')
     if digest(paired/'protocol.json')!=ready['protocol_sha256']:raise ValueError('paired protocol changed')
     source_root=Path(protocol['inventory'])

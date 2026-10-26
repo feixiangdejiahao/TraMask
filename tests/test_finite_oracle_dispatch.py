@@ -5,7 +5,7 @@ import json
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.finite_oracle_questions import build_question
+from prototypes.finite_oracle_questions import build_question
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from relational_gap.provider import encoded
 from scripts import run_finite_oracle_pairs as driver

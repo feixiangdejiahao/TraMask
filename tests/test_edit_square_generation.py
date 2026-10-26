@@ -7,7 +7,7 @@ from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
 from generic_composition.gate import presentation, selection_candidates
 from generic_composition.terms import render
-from experimental.edit_square.generate import Budget, _parse_body, generate, gate_evidence
+from prototypes.test_edit_square_generation.generate import Budget, _parse_body, generate, gate_evidence
 
 
 CASES = [

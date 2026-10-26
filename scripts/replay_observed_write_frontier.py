@@ -10,8 +10,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.assertion_write_origin import Module
-from experimental.observed_write_frontier import Frontier, fingerprint, project
+from prototypes.assertion_write_origin import Module
+from prototypes.observed_write_frontier import Frontier, fingerprint, project
 from relation_search.checkpoint import digest, read, write
 from relation_search.frontier import canonical_profile, _observed_roles
 
@@ -168,7 +168,7 @@ def run(execution, output, representatives):
         write(output / case / 'frontier.json', snapshot)
         write(output / case / 'old_profiles.json', old_records)
     write(output / 'summary.json', summaries)
-    code = [Path(__file__), ROOT / 'experimental/observed_write_frontier.py',
+    code = [Path(__file__), ROOT / 'prototypes/observed_write_frontier.py',
             ROOT / 'relation_search/frontier.py']
     write(output / 'protocol.json', dict(
         input_execution=str(execution.resolve()), input_seal_sha256=digest(execution / 'seal.json'),

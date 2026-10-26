@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 from relation_search.checkpoint import digest, read, write, start
 from scripts.run_relation_search import algorithm_files, prepare, feedback
 from scripts.execute_relation_search import emit_batch, run
-from experimental.oracle_batch_recovery import POLICY as RECOVERY_POLICY, plan_recovery
+from prototypes.oracle_batch_recovery import POLICY as RECOVERY_POLICY, plan_recovery
 from relation_search.semantic_frontier import POLICY as SEMANTIC_FRONTIER_POLICY
 
 

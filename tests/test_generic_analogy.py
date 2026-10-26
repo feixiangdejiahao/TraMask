@@ -1,7 +1,7 @@
 """Mechanical analogies on synthetic terms, without repositories or execution."""
 from anchor_retrieval.syntax import Source
 from generic_composition.terms import Hole, Term, from_source, render, substitute, subterms
-from experimental.generic_v2.analogy import analogy
+from prototypes.test_edit_analogy_v02.analogy import analogy
 
 
 def literal(value):

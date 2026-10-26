@@ -2,7 +2,7 @@ import shutil
 import subprocess
 import pytest
 
-from experimental.semantic_transport.go_slice_bindings import normalize_body
+from prototypes.test_action_and_oracle_transfer.go_slice_bindings import normalize_body
 
 @pytest.mark.parametrize('body', [
     '{x := 1; _ = x}',

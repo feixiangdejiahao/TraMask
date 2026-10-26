@@ -13,7 +13,7 @@ import json
 import re
 
 from anchor_retrieval.syntax import CALLS, Source, attr_parts, call_parts, child, units, walk
-from experimental import relation_search_go_ts as neighbors
+from prototypes import relation_search_go_ts as neighbors
 
 VERSION = 'checked-guest-carrier-inverse.v2'
 POLICY = dict(version=VERSION, language='go',

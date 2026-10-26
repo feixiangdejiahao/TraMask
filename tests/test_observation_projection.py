@@ -8,11 +8,11 @@ import pytest
 
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
-from experimental.semantic_transport import oracle
-from experimental.semantic_transport import model
-from experimental.semantic_transport.proposals import generate, materialize
-from experimental import observation_projection
-from experimental.observation_projection import Budget, generate_projections, materialize_projection
+from prototypes.test_action_and_oracle_transfer import oracle
+from prototypes.test_action_and_oracle_transfer import model
+from prototypes.test_action_and_oracle_transfer.proposals import generate, materialize
+from prototypes import observation_projection
+from prototypes.observation_projection import Budget, generate_projections, materialize_projection
 
 
 STATE = '''class Sequence:

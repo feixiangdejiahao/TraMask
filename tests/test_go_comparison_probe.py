@@ -9,7 +9,7 @@ import subprocess
 import pytest
 
 from anchor_retrieval.syntax import Source, child
-from experimental.go_comparison_probe import TRACE_ENV, instrument_sources, read_trace
+from prototypes.go_comparison_probe import TRACE_ENV, instrument_sources, read_trace
 
 
 def source(code, path='toy.go'):

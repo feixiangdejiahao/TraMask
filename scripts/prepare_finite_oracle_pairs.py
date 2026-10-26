@@ -15,14 +15,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from experimental.finite_oracle_questions import build_question, restore_evidence
+from prototypes.finite_oracle_questions import build_question, restore_evidence
 
 CASES = ['N01','N02','N03','N04','N05','N06','N07','N08','N09','N10','P1','P2','P3','P4','P5','P6','P7']
-FILES = ['scripts/prepare_finite_oracle_pairs.py','experimental/finite_oracle_questions.py',
-         'experimental/finite_oracle_templates.py','experimental/singleton_oracle_slots.py',
-         'experimental/assertion_operand_guard.py','relation_search/oracle.py',
+FILES = ['scripts/prepare_finite_oracle_pairs.py','prototypes/finite_oracle_questions.py',
+         'prototypes/finite_oracle_templates.py','prototypes/singleton_oracle_slots.py',
+         'prototypes/assertion_operand_guard.py','relation_search/oracle.py',
          'relation_search/oracle_evidence.py','relation_search/instrument.py',
-         'experimental/call_dependency_evidence.py','anchor_retrieval/syntax.py',
+         'prototypes/call_dependency_evidence.py','anchor_retrieval/syntax.py',
          'anchor_retrieval/graph.py','anchor_retrieval/index.py','relational_gap/provider.py']
 
 

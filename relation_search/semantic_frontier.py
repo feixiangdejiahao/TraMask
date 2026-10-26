@@ -36,7 +36,7 @@ def advance(corpus, candidates, previous=None, *, budget=16, selected_ids=(),
     elif selection_policy == 'shape':
         ordered = select(corpus, catalogue.values(), budget=len(catalogue))
     elif selection_policy in {'patch-strict', 'patch-may'}:
-        from experimental.patch_observation_priority import select as select_patch
+        from prototypes.patch_observation_priority import select as select_patch
         ordered = select_patch(corpus, frontend, list(catalogue.values()), patch,
                                budget=len(catalogue), mode=selection_policy.removeprefix('patch-'))
     else:

@@ -12,7 +12,7 @@ from anchor_retrieval.syntax import Source
 from relation_search.checkpoint import read, write
 from relation_search.instrument import instrument_candidates
 from relation_search.oracle import prepare_requests, validate
-from experimental.oracle_batch_recovery import plan_recovery, validate_frozen_request
+from prototypes.oracle_batch_recovery import plan_recovery, validate_frozen_request
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 from scripts import run_relation_campaign as campaign_module
 

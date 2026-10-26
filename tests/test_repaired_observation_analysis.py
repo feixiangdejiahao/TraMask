@@ -3,8 +3,8 @@ import copy
 
 import pytest
 
-from experimental.patch_observation_priority_cached import Analyzer as CachedAnalyzer
-from experimental.repaired_observation_analysis import Analyzer
+from prototypes.patch_observation_priority_cached import Analyzer as CachedAnalyzer
+from prototypes.repaired_observation_analysis import Analyzer
 from tests.test_patch_observation_priority import candidate, fixture
 
 

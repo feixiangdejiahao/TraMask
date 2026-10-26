@@ -10,8 +10,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.trajectory_ast_buckets import Buckets, rank_all, sha
-from experimental.candidate_scheduling import select
+from prototypes.trajectory_ast_buckets import Buckets, rank_all, sha
+from prototypes.candidate_scheduling import select
 
 
 def read(path):
@@ -28,8 +28,8 @@ def main(args):
     report = {'scope': 'source AST scheduling analysis; no execution, verdict, target or LLM input',
               'claim': 'same scheduling bucket does not imply behavioral equivalence',
               'files': {}, 'cases': []}
-    for code in ('experimental/trajectory_ast_buckets.py', 'experimental/candidate_scheduling.py',
-                 'experimental/source_edit_identity.py', 'scripts/analyze_trajectory_ast_buckets.py'):
+    for code in ('prototypes/trajectory_ast_buckets.py', 'prototypes/candidate_scheduling.py',
+                 'prototypes/source_edit_identity.py', 'scripts/analyze_trajectory_ast_buckets.py'):
         report['files'][str(ROOT/code)] = digest(ROOT/code)
         snapshot = args.output/'algorithm_snapshot'/code
         snapshot.parent.mkdir(parents=True, exist_ok=True)

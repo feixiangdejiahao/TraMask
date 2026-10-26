@@ -1,7 +1,7 @@
 """Read-only search/alignment review, with independent source-only examples."""
 from anchor_retrieval.syntax import Source, child, walk
-from experimental.generic_v3.alignment import align_analogy
-from experimental.generic_v21.analogy import analogy as raw_analogy
+from prototypes.statement_aligned_test_analogy_v03.alignment import align_analogy
+from prototypes.test_edit_analogy_allow_erasing_v02_01.analogy import analogy as raw_analogy
 from generic_composition.corpus import build_corpus
 from generic_composition.terms import from_source, render
 

@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 from anchor_retrieval.syntax import Source, units
-from experimental.relation_search_go_ts import emit_neighbors, propose_neighbors
+from prototypes.relation_search_go_ts import emit_neighbors, propose_neighbors
 from generic_composition.emitter import emit
 
 

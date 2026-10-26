@@ -3,8 +3,8 @@ import json
 
 from generic_composition.corpus import build_corpus
 from generic_composition.emitter import emit
-from experimental.assertion_windows.generate import generate as predicate_grouped
-from experimental.assertion_windows.predicate_free import Budget, generate, gate_evidence
+from prototypes.assertion_window_generation.generate import generate as predicate_grouped
+from prototypes.assertion_window_generation.predicate_free import Budget, generate, gate_evidence
 
 
 CODE = '''def test_a():

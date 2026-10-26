@@ -7,8 +7,8 @@ from dataclasses import replace
 import pytest
 
 from anchor_retrieval.syntax import Source
-from experimental.patch_observation_priority_cached import Analyzer, _AssertionLookup, select
-from experimental.patch_observation_priority_v2 import Analyzer as OriginalAnalyzer, select as original_select
+from prototypes.patch_observation_priority_cached import Analyzer, _AssertionLookup, select
+from prototypes.patch_observation_priority_v2 import Analyzer as OriginalAnalyzer, select as original_select
 from relational_gap.frontend import extract_frontend, to_emitter_corpus
 
 
@@ -117,8 +117,8 @@ def test_duplicate_statement_span_keeps_original_earliest_assertion_object():
 
 
 def test_unused_late_assertion_is_not_eagerly_parsed(monkeypatch):
-    import experimental.patch_observation_priority as old_module
-    import experimental.patch_observation_priority_cached as new_module
+    import prototypes.patch_observation_priority as old_module
+    import prototypes.patch_observation_priority_cached as new_module
     c, f, p = fixture('value=11\nresult=compute(value)\nassert result==22\nassert result>0')
     f = copy.deepcopy(f); f['observations'] = f['observations'][:1]
     original_adapter = old_module._assertion_nodes
@@ -136,8 +136,8 @@ def test_unused_late_assertion_is_not_eagerly_parsed(monkeypatch):
 
 
 def test_reached_adapter_exception_keeps_original_unknown_and_no_witnesses(monkeypatch):
-    import experimental.patch_observation_priority as old_module
-    import experimental.patch_observation_priority_cached as new_module
+    import prototypes.patch_observation_priority as old_module
+    import prototypes.patch_observation_priority_cached as new_module
     c, f, p = fixture('value=11\nresult=compute(value)\nassert result==22\nassert result>0')
     original_adapter = old_module._assertion_nodes
     def guarded(source, assertion, unit):
@@ -177,8 +177,8 @@ def test_edited_owner_invalidation_covers_lengths_unicode_callee_and_repeated_id
 
 @pytest.mark.parametrize('n', [1, 8, 32])
 def test_work_count_replaces_quadratic_body_scans_with_at_most_one_per_assertion(monkeypatch, n):
-    import experimental.patch_observation_priority as old_module
-    import experimental.patch_observation_priority_cached as new_module
+    import prototypes.patch_observation_priority as old_module
+    import prototypes.patch_observation_priority_cached as new_module
     c, f, p = fixture('value=11\nresult=compute(value)\n'+'\n'.join(['assert result==22']*n))
     original_adapter = old_module._assertion_nodes
     old_calls = []; new_calls = []

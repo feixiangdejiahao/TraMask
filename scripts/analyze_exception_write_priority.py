@@ -10,7 +10,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from experimental.exception_write_priority import prioritize
+from prototypes.exception_write_priority import prioritize
 
 
 def sha(path):
@@ -32,8 +32,8 @@ def main():
         if source.exists() and census.exists() and json.loads(source.read_text())['language'] == 'python':
             cases.append(folder.name)
             inputs[folder.name] = {str(p.resolve()): sha(p) for p in [source, folder/'source_pool.json', census]}
-    code = [Path(__file__).resolve(), ROOT/'experimental/exception_write_priority.py',
-            ROOT/'experimental/assertion_write_origin.py']
+    code = [Path(__file__).resolve(), ROOT/'prototypes/exception_write_priority.py',
+            ROOT/'prototypes/assertion_write_origin.py']
     protocol = dict(cases=cases, inputs=inputs, created_at=datetime.now(timezone.utc).isoformat(),
                     code_sha256={str(p.relative_to(ROOT)): sha(p) for p in code},
                     target_labels=False, oracle_cache=False, provider_calls=0, subject_executions=0,
