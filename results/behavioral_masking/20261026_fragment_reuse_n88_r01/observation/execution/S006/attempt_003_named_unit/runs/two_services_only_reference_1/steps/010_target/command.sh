@@ -1,0 +1,1 @@
+./node_modules/.bin/jest --runInBand src/__tests__/fragment_S006.test.ts -t "limits concurrency within a level"

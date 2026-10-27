@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs apply --whitespace=nowarn --allow-empty /tmp/tramask-2e21ffaca10b41f8965c/implementation.patch

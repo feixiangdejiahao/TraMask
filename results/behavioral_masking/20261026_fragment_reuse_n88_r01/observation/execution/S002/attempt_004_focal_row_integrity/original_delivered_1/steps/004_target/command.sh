@@ -1,0 +1,1 @@
+go test ./vm/ -count=1 -run '^TestFragmentS002Original$' -v

@@ -1,0 +1,1207 @@
+diff --git a/ast/astutil/walk.go b/ast/astutil/walk.go
+index 19068cb..8dedf28 100644
+--- a/ast/astutil/walk.go
++++ b/ast/astutil/walk.go
+@@ -1,3 +1,4 @@
++//go:build !appengine
+ // +build !appengine
+ 
+ package astutil
+@@ -196,6 +197,11 @@ func walkExpr(expr ast.Expr, f WalkFunc) error {
+ 	case *ast.ParenExpr:
+ 		return walkExpr(expr.SubExpr, f)
+ 	case *ast.FuncExpr:
++		for _, d := range expr.Defaults {
++			if err := walkExpr(d, f); err != nil {
++				return err
++			}
++		}
+ 		return walkStmt(expr.Stmt, f)
+ 	case *ast.LetsExpr:
+ 		if err := walkExprs(expr.LHSS, f); err != nil {
+diff --git a/ast/expr.go b/ast/expr.go
+index 939ab8f..36fafc3 100644
+--- a/ast/expr.go
++++ b/ast/expr.go
+@@ -132,10 +132,11 @@ type SliceExpr struct {
+ // FuncExpr provide function expression.
+ type FuncExpr struct {
+ 	ExprImpl
+-	Name   string
+-	Stmt   Stmt
+-	Params []string
+-	VarArg bool
++	Name     string
++	Stmt     Stmt
++	Params   []string
++	VarArg   bool
++	Defaults []Expr
+ }
+ 
+ // LetsExpr provide multiple expression of let.
+diff --git a/parser/defaults.go b/parser/defaults.go
+new file mode 100644
+index 0000000..fec3a06
+--- /dev/null
++++ b/parser/defaults.go
+@@ -0,0 +1,611 @@
++package parser
++
++import (
++	"sort"
++	"strings"
++
++	"github.com/mattn/anko/ast"
++)
++
++// defaultParamInfo records information about a single function parameter while
++// scanning source before it is handed to the generated parser.
++type defaultParamInfo struct {
++	ExprText   string
++	HasExpr    bool
++	IsVariadic bool
++}
++
++// defaultRewrite describes a region of the source that should be removed so
++// that "name = expression" becomes just "name".
++type defaultRewrite struct {
++	eqOffset  int
++	endOffset int
++}
++
++// funcDefaultInfo records a function definition that contains default parameter
++// values.
++type funcDefaultInfo struct {
++	origOffset int
++	infos      []defaultParamInfo
++	rews       []defaultRewrite
++}
++
++// defaultScanner is a small scanner used to find function definitions and
++// rewrite default parameter declarations before parsing.
++type defaultScanner struct {
++	src    []rune
++	pos    int
++	starts []int
++}
++
++func newDefaultScanner(src string) *defaultScanner {
++	runes := []rune(src)
++	return &defaultScanner{src: runes, starts: lineStarts(runes)}
++}
++
++func (s *defaultScanner) positionAt(offset int) ast.Position {
++	return positionAtStarts(s.starts, offset)
++}
++
++func lineStarts(runes []rune) []int {
++	starts := []int{0}
++	for i, r := range runes {
++		if r == '\n' {
++			starts = append(starts, i+1)
++		}
++	}
++	return starts
++}
++
++func positionAtStarts(starts []int, offset int) ast.Position {
++	lo, hi := 0, len(starts)-1
++	for lo < hi {
++		mid := (lo + hi + 1) / 2
++		if starts[mid] <= offset {
++			lo = mid
++		} else {
++			hi = mid - 1
++		}
++	}
++	return ast.Position{Line: lo + 1, Column: offset - starts[lo] + 1}
++}
++
++func (s *defaultScanner) eof() bool {
++	return s.pos >= len(s.src)
++}
++
++func (s *defaultScanner) peek() rune {
++	return s.peekAt(0)
++}
++
++func (s *defaultScanner) peekAt(offset int) rune {
++	i := s.pos + offset
++	if i < 0 || i >= len(s.src) {
++		return -1
++	}
++	return s.src[i]
++}
++
++func (s *defaultScanner) next() rune {
++	if s.eof() {
++		return -1
++	}
++	r := s.src[s.pos]
++	s.pos++
++	return r
++}
++
++func (s *defaultScanner) skipSpace() {
++	for !s.eof() {
++		switch s.peek() {
++		case ' ', '\t', '\r', '\n':
++			s.next()
++		default:
++			return
++		}
++	}
++}
++
++func (s *defaultScanner) skipComment() bool {
++	if s.eof() {
++		return false
++	}
++	switch {
++	case s.peek() == '#':
++		for !s.eof() && s.peek() != '\n' {
++			s.next()
++		}
++		return true
++	case s.peek() == '/' && s.peekAt(1) == '/':
++		for !s.eof() && s.peek() != '\n' {
++			s.next()
++		}
++		return true
++	case s.peek() == '/' && s.peekAt(1) == '*':
++		s.next()
++		s.next()
++		for !s.eof() {
++			if s.peek() == '*' && s.peekAt(1) == '/' {
++				s.next()
++				s.next()
++				return true
++			}
++			s.next()
++		}
++		return true
++	}
++	return false
++}
++
++func (s *defaultScanner) skipSpaceAndComments() {
++	for {
++		s.skipSpace()
++		if !s.skipComment() {
++			return
++		}
++	}
++}
++
++func (s *defaultScanner) skipString() {
++	if s.eof() {
++		return
++	}
++	quote := s.peek()
++	if quote != '"' && quote != '\'' && quote != '`' {
++		return
++	}
++	s.next()
++	if quote == '`' {
++		for !s.eof() {
++			if s.next() == '`' {
++				return
++			}
++		}
++		return
++	}
++	for !s.eof() {
++		r := s.next()
++		if r == '\\' {
++			if !s.eof() {
++				s.next()
++			}
++			continue
++		}
++		if r == quote {
++			return
++		}
++	}
++}
++
++func (s *defaultScanner) readIdent() string {
++	start := s.pos
++	for !s.eof() && (isLetter(s.peek()) || isDigit(s.peek())) {
++		s.next()
++	}
++	return string(s.src[start:s.pos])
++}
++
++// preprocessDefaultParams rewrites default parameter declarations in function
++// parameter lists into plain parameter lists and returns the rewritten source
++// together with the parsed default expressions keyed by the position of the
++// enclosing function expression in the rewritten source.
++func preprocessDefaultParams(src string) (string, map[ast.Position][]ast.Expr, error) {
++	if !strings.Contains(src, "func") {
++		return src, nil, nil
++	}
++	s := newDefaultScanner(src)
++	runes := s.src
++	var funcs []funcDefaultInfo
++
++	for !s.eof() {
++		s.skipSpaceAndComments()
++		if s.eof() {
++			break
++		}
++		ch := s.peek()
++		if ch == '"' || ch == '\'' || ch == '`' {
++			s.skipString()
++			continue
++		}
++		if isLetter(ch) {
++			idStart := s.pos
++			id := s.readIdent()
++			if id == "func" {
++				funcPos := s.positionAt(idStart)
++				handled, infos, rews, err := s.processFunc(funcPos)
++				if err != nil {
++					return "", nil, err
++				}
++				if handled && len(rews) > 0 {
++					funcs = append(funcs, funcDefaultInfo{origOffset: idStart, infos: infos, rews: rews})
++				}
++			}
++			continue
++		}
++		s.next()
++	}
++
++	// Remove "= expression" text from the source so the existing parser can
++	// parse the parameter list.
++	var allRanges []defaultRewrite
++	for _, f := range funcs {
++		allRanges = append(allRanges, f.rews...)
++	}
++	sort.Slice(allRanges, func(i, j int) bool {
++		return allRanges[i].eqOffset < allRanges[j].eqOffset
++	})
++	newRunes := make([]rune, 0, len(runes))
++	pos := 0
++	for _, rw := range allRanges {
++		if rw.eqOffset > pos {
++			newRunes = append(newRunes, runes[pos:rw.eqOffset]...)
++		}
++		pos = rw.endOffset
++	}
++	if pos < len(runes) {
++		newRunes = append(newRunes, runes[pos:]...)
++	}
++	newSrc := string(newRunes)
++
++	// Compute the rewritten position of each function and parse its defaults.
++	newStarts := lineStarts(newRunes)
++	defaults := make(map[ast.Position][]ast.Expr)
++	for _, f := range funcs {
++		delta := 0
++		for _, rw := range allRanges {
++			if rw.endOffset <= f.origOffset {
++				delta += rw.endOffset - rw.eqOffset
++			}
++		}
++		newOffset := f.origOffset - delta
++		newPos := positionAtStarts(newStarts, newOffset)
++		defs := make([]ast.Expr, len(f.infos))
++		for i, info := range f.infos {
++			if info.HasExpr {
++				expr, err := parseDefaultExpr(info.ExprText)
++				if err != nil {
++					return "", nil, err
++				}
++				defs[i] = expr
++			}
++		}
++		defaults[newPos] = defs
++	}
++
++	return newSrc, defaults, nil
++}
++
++func parseDefaultExpr(text string) (ast.Expr, error) {
++	stmt, err := ParseSrc(text)
++	if err != nil {
++		return nil, err
++	}
++	switch stmt := stmt.(type) {
++	case *ast.StmtsStmt:
++		if len(stmt.Stmts) == 1 {
++			if es, ok := stmt.Stmts[0].(*ast.ExprStmt); ok {
++				return es.Expr, nil
++			}
++		}
++	case *ast.ExprStmt:
++		return stmt.Expr, nil
++	}
++	return nil, &Error{Message: "invalid default argument declaration"}
++}
++
++// processFunc parses the parameter list of a function definition. s.pos must be
++// immediately after the "func" keyword. It returns whether a parameter list was
++// successfully processed, the parameter information, and the rewrite ranges.
++func (s *defaultScanner) processFunc(funcPos ast.Position) (bool, []defaultParamInfo, []defaultRewrite, error) {
++	s.skipSpaceAndComments()
++	if !s.eof() && isLetter(s.peek()) {
++		// named function: skip the name
++		s.readIdent()
++		s.skipSpaceAndComments()
++	}
++	if s.eof() || s.peek() != '(' {
++		return false, nil, nil, nil
++	}
++	s.next() // consume '('
++
++	var infos []defaultParamInfo
++	var rews []defaultRewrite
++	seenDefault := false
++
++	for {
++		s.skipSpaceAndComments()
++		if s.eof() {
++			return false, nil, nil, nil
++		}
++		if s.peek() == ')' {
++			s.next()
++			break
++		}
++		if !isLetter(s.peek()) {
++			return false, nil, nil, nil
++		}
++
++		s.readIdent()
++		infos = append(infos, defaultParamInfo{})
++		idx := len(infos) - 1
++
++		s.skipSpaceAndComments()
++
++		// variadic "..."
++		if s.peek() == '.' && s.peekAt(1) == '.' && s.peekAt(2) == '.' {
++			infos[idx].IsVariadic = true
++			s.next()
++			s.next()
++			s.next()
++			s.skipSpaceAndComments()
++			if s.eof() {
++				return false, nil, nil, nil
++			}
++			if s.peek() == ')' {
++				s.next()
++				break
++			}
++			// variadic parameter must be last; leave malformed source to the parser
++			return false, nil, nil, nil
++		}
++
++		// default value "= expression"
++		if s.peek() == '=' && s.peekAt(1) != '=' {
++			eqOffset := s.pos
++			s.next() // consume '='
++			exprStart := s.pos
++			depth := 0
++		exprLoop:
++			for !s.eof() {
++				c := s.peek()
++				if c == '"' || c == '\'' || c == '`' {
++					s.skipString()
++					continue
++				}
++				if c == '#' || (c == '/' && (s.peekAt(1) == '/' || s.peekAt(1) == '*')) {
++					s.skipComment()
++					continue
++				}
++				switch c {
++				case '(', '[', '{':
++					depth++
++				case ')', ']', '}':
++					if depth == 0 && c == ')' {
++						break exprLoop
++					}
++					depth--
++					if depth < 0 {
++						return false, nil, nil, nil
++					}
++				case ',':
++					if depth == 0 {
++						break exprLoop
++					}
++				}
++				s.next()
++			}
++			exprEnd := s.pos
++			exprText := strings.TrimSpace(string(s.src[exprStart:exprEnd]))
++			if exprText == "" {
++				return false, nil, nil, nil
++			}
++			// A default value followed by "..." means the variadic parameter
++			// itself declares a default, which is not allowed.
++			if strings.HasSuffix(exprText, "...") {
++				return false, nil, nil, &Error{Message: "invalid default argument declaration", Pos: funcPos}
++			}
++			infos[idx].HasExpr = true
++			infos[idx].ExprText = exprText
++			rews = append(rews, defaultRewrite{eqOffset: eqOffset, endOffset: exprEnd})
++		}
++
++		s.skipSpaceAndComments()
++		if s.eof() {
++			return false, nil, nil, nil
++		}
++		if s.peek() == ',' {
++			s.next()
++			continue
++		}
++		if s.peek() == ')' {
++			s.next()
++			break
++		}
++		return false, nil, nil, nil
++	}
++
++	// Validate declarations.
++	for _, info := range infos {
++		if info.IsVariadic {
++			if info.HasExpr {
++				return false, nil, nil, &Error{Message: "invalid default argument declaration", Pos: funcPos}
++			}
++			continue
++		}
++		if info.HasExpr {
++			seenDefault = true
++		} else if seenDefault {
++			return false, nil, nil, &Error{Message: "invalid default argument declaration", Pos: funcPos}
++		}
++	}
++
++	return true, infos, rews, nil
++}
++
++// attachFuncDefaults attaches parsed default expressions to FuncExpr nodes that
++// were found during preprocessing.
++func attachFuncDefaults(stmt ast.Stmt, defaults map[ast.Position][]ast.Expr) error {
++	if len(defaults) == 0 {
++		return nil
++	}
++	walkStmtForDefaults(stmt, func(funcExpr *ast.FuncExpr) {
++		if defs, ok := defaults[funcExpr.Position()]; ok {
++			funcExpr.Defaults = defs
++		}
++	})
++	return nil
++}
++
++func walkStmtForDefaults(stmt ast.Stmt, f func(*ast.FuncExpr)) {
++	if stmt == nil || f == nil {
++		return
++	}
++	switch stmt := stmt.(type) {
++	case *ast.StmtsStmt:
++		for _, s := range stmt.Stmts {
++			walkStmtForDefaults(s, f)
++		}
++	case *ast.ExprStmt:
++		walkExprForDefaults(stmt.Expr, f)
++	case *ast.VarStmt:
++		walkExprsForDefaults(stmt.Exprs, f)
++	case *ast.LetsStmt:
++		walkExprsForDefaults(stmt.RHSS, f)
++		walkExprsForDefaults(stmt.LHSS, f)
++	case *ast.LetMapItemStmt:
++		walkExprForDefaults(stmt.RHS, f)
++		walkExprsForDefaults(stmt.LHSS, f)
++	case *ast.IfStmt:
++		walkExprForDefaults(stmt.If, f)
++		walkStmtForDefaults(stmt.Then, f)
++		for _, s := range stmt.ElseIf {
++			walkStmtForDefaults(s, f)
++		}
++		walkStmtForDefaults(stmt.Else, f)
++	case *ast.TryStmt:
++		walkStmtForDefaults(stmt.Try, f)
++		walkStmtForDefaults(stmt.Catch, f)
++		walkStmtForDefaults(stmt.Finally, f)
++	case *ast.ForStmt:
++		walkExprForDefaults(stmt.Value, f)
++		walkStmtForDefaults(stmt.Stmt, f)
++	case *ast.CForStmt:
++		walkStmtForDefaults(stmt.Stmt1, f)
++		walkExprForDefaults(stmt.Expr2, f)
++		walkExprForDefaults(stmt.Expr3, f)
++		walkStmtForDefaults(stmt.Stmt, f)
++	case *ast.LoopStmt:
++		walkExprForDefaults(stmt.Expr, f)
++		walkStmtForDefaults(stmt.Stmt, f)
++	case *ast.ReturnStmt:
++		walkExprsForDefaults(stmt.Exprs, f)
++	case *ast.ThrowStmt:
++		walkExprForDefaults(stmt.Expr, f)
++	case *ast.ModuleStmt:
++		walkStmtForDefaults(stmt.Stmt, f)
++	case *ast.SwitchStmt:
++		walkExprForDefaults(stmt.Expr, f)
++		for _, c := range stmt.Cases {
++			if cc, ok := c.(*ast.SwitchCaseStmt); ok {
++				walkExprsForDefaults(cc.Exprs, f)
++				walkStmtForDefaults(cc.Stmt, f)
++			}
++		}
++		walkStmtForDefaults(stmt.Default, f)
++	case *ast.GoroutineStmt:
++		walkExprForDefaults(stmt.Expr, f)
++	case *ast.DeleteStmt:
++		walkExprForDefaults(stmt.Item, f)
++		walkExprForDefaults(stmt.Key, f)
++	case *ast.CloseStmt:
++		walkExprForDefaults(stmt.Expr, f)
++	case *ast.ChanStmt:
++		walkExprForDefaults(stmt.LHS, f)
++		walkExprForDefaults(stmt.OkExpr, f)
++		walkExprForDefaults(stmt.RHS, f)
++	}
++}
++
++func walkExprsForDefaults(exprs []ast.Expr, f func(*ast.FuncExpr)) {
++	for _, e := range exprs {
++		walkExprForDefaults(e, f)
++	}
++}
++
++func walkExprForDefaults(expr ast.Expr, f func(*ast.FuncExpr)) {
++	if expr == nil || f == nil {
++		return
++	}
++	if funcExpr, ok := expr.(*ast.FuncExpr); ok {
++		f(funcExpr)
++		walkStmtForDefaults(funcExpr.Stmt, f)
++		return
++	}
++	switch expr := expr.(type) {
++	case *ast.OpExpr:
++		walkOperatorForDefaults(expr.Op, f)
++	case *ast.ArrayExpr:
++		walkExprsForDefaults(expr.Exprs, f)
++	case *ast.MapExpr:
++		walkExprsForDefaults(expr.Keys, f)
++		walkExprsForDefaults(expr.Values, f)
++	case *ast.UnaryExpr:
++		walkExprForDefaults(expr.Expr, f)
++	case *ast.AddrExpr:
++		walkExprForDefaults(expr.Expr, f)
++	case *ast.DerefExpr:
++		walkExprForDefaults(expr.Expr, f)
++	case *ast.ParenExpr:
++		walkExprForDefaults(expr.SubExpr, f)
++	case *ast.NilCoalescingOpExpr:
++		walkExprForDefaults(expr.LHS, f)
++		walkExprForDefaults(expr.RHS, f)
++	case *ast.TernaryOpExpr:
++		walkExprForDefaults(expr.Expr, f)
++		walkExprForDefaults(expr.LHS, f)
++		walkExprForDefaults(expr.RHS, f)
++	case *ast.CallExpr:
++		walkExprsForDefaults(expr.SubExprs, f)
++	case *ast.AnonCallExpr:
++		walkExprForDefaults(expr.Expr, f)
++		walkExprsForDefaults(expr.SubExprs, f)
++	case *ast.MemberExpr:
++		walkExprForDefaults(expr.Expr, f)
++	case *ast.ItemExpr:
++		walkExprForDefaults(expr.Item, f)
++		walkExprForDefaults(expr.Index, f)
++	case *ast.SliceExpr:
++		walkExprForDefaults(expr.Item, f)
++		walkExprForDefaults(expr.Begin, f)
++		walkExprForDefaults(expr.End, f)
++		walkExprForDefaults(expr.Cap, f)
++	case *ast.LetsExpr:
++		walkExprsForDefaults(expr.LHSS, f)
++		walkExprsForDefaults(expr.RHSS, f)
++	case *ast.ChanExpr:
++		walkExprForDefaults(expr.LHS, f)
++		walkExprForDefaults(expr.RHS, f)
++	case *ast.ImportExpr:
++		walkExprForDefaults(expr.Name, f)
++	case *ast.MakeExpr:
++		walkExprForDefaults(expr.LenExpr, f)
++		walkExprForDefaults(expr.CapExpr, f)
++	case *ast.MakeTypeExpr:
++		walkExprForDefaults(expr.Type, f)
++	case *ast.LenExpr:
++		walkExprForDefaults(expr.Expr, f)
++	case *ast.IncludeExpr:
++		walkExprForDefaults(expr.ItemExpr, f)
++		walkExprForDefaults(expr.ListExpr, f)
++	}
++}
++
++func walkOperatorForDefaults(op ast.Operator, f func(*ast.FuncExpr)) {
++	if op == nil {
++		return
++	}
++	switch op := op.(type) {
++	case *ast.BinaryOperator:
++		walkExprForDefaults(op.LHS, f)
++		walkExprForDefaults(op.RHS, f)
++	case *ast.ComparisonOperator:
++		walkExprForDefaults(op.LHS, f)
++		walkExprForDefaults(op.RHS, f)
++	case *ast.AddOperator:
++		walkExprForDefaults(op.LHS, f)
++		walkExprForDefaults(op.RHS, f)
++	case *ast.MultiplyOperator:
++		walkExprForDefaults(op.LHS, f)
++		walkExprForDefaults(op.RHS, f)
++	}
++}
+diff --git a/parser/lexer.go b/parser/lexer.go
+index 4a9e6c1..b7fd4a8 100644
+--- a/parser/lexer.go
++++ b/parser/lexer.go
+@@ -87,6 +87,11 @@ func (s *Scanner) Init(src string) {
+ 	s.src = []rune(src)
+ }
+ 
++// Source returns the source code.
++func (s *Scanner) Source() string {
++	return string(s.src)
++}
++
+ // Scan analyses token, and decide identify or literals.
+ func (s *Scanner) Scan() (tok int, lit string, pos ast.Position, err error) {
+ retry:
+@@ -587,10 +592,21 @@ func (l *Lexer) Error(msg string) {
+ 
+ // Parse provides way to parse the code using Scanner.
+ func Parse(s *Scanner) (ast.Stmt, error) {
++	src := s.Source()
++	newSrc, defaults, err := preprocessDefaultParams(src)
++	if err != nil {
++		return nil, err
++	}
++	if newSrc != src {
++		s = &Scanner{src: []rune(newSrc)}
++	}
+ 	l := Lexer{s: s}
+ 	if yyParse(&l) != 0 {
+ 		return nil, l.e
+ 	}
++	if err := attachFuncDefaults(l.stmt, defaults); err != nil {
++		return nil, err
++	}
+ 	return l.stmt, l.e
+ }
+ 
+diff --git a/vm/vm.go b/vm/vm.go
+index 949a53b..b64cffa 100644
+--- a/vm/vm.go
++++ b/vm/vm.go
+@@ -54,6 +54,7 @@ var (
+ 	trueValue                 = reflect.ValueOf(true)
+ 	falseValue                = reflect.ValueOf(false)
+ 	zeroValue                 = reflect.Value{}
++	missingParamValue         = reflect.ValueOf(reflect.Value{})
+ 	reflectValueNilValue      = reflect.ValueOf(nilValue)
+ 	reflectValueErrorNilValue = reflect.ValueOf(reflect.New(errorType).Elem())
+ 
+diff --git a/vm/vmDefaultArgs_test.go b/vm/vmDefaultArgs_test.go
+new file mode 100644
+index 0000000..e83f308
+--- /dev/null
++++ b/vm/vmDefaultArgs_test.go
+@@ -0,0 +1,78 @@
++package vm
++
++import (
++	"fmt"
++	"testing"
++
++	"github.com/mattn/anko/ast"
++	"github.com/mattn/anko/ast/astutil"
++	"github.com/mattn/anko/parser"
++)
++
++func TestDefaultArguments(t *testing.T) {
++	t.Parallel()
++
++	tests := []Test{
++		{Script: `func f(a = 1, b = 2) { return a + b }; f()`, RunOutput: int64(3)},
++		{Script: `func f(a = 1, b = 2) { return a + b }; f(10)`, RunOutput: int64(12)},
++		{Script: `func f(a = 1, b = 2) { return a + b }; f(10, 20)`, RunOutput: int64(30)},
++		{Script: `x = 100; func f(a = x, b = a + 1) { return a + b }; f()`, RunOutput: int64(201)},
++		{Script: `func f(a, b = a) { return b }; f(5)`, RunOutput: int64(5)},
++		{Script: `func f(a = 1, b = 2) { return a }; f(10, 20, 30)`, RunError: fmt.Errorf("function wants 2 arguments but received 3")},
++		{Script: `func f(a) { return a }; f()`, RunError: fmt.Errorf("function wants 1 arguments but received 0")},
++		{Script: `func f(a = 1) { return a }; f(nil)`, RunOutput: nil},
++
++		// Variadic parameter may follow defaulted fixed parameters.
++		{Script: `func f(a = 1, b = 2, rest...) { return [a, b, rest] }; f()`, RunOutput: []interface{}{int64(1), int64(2), []interface{}{}}},
++		{Script: `func f(a = 1, b = 2, rest...) { return [a, b, rest] }; f(9, 8)`, RunOutput: []interface{}{int64(9), int64(8), []interface{}{}}},
++		{Script: `func f(a = 1, b = 2, rest...) { return [a, b, rest] }; f(9, 8, 7, 6)`, RunOutput: []interface{}{int64(9), int64(8), []interface{}{int64(7), int64(6)}}},
++
++		// Default expressions are evaluated at call time, left to right.
++		{Script: `count = 0; func f(a = count++) { return a }; f(100); count`, RunOutput: int64(0)},
++		{Script: `count = 0; func f(a = count++) { return a }; f(); count`, RunOutput: int64(1)},
++
++		// Anonymous and nested functions.
++		{Script: `f = func(a = 5) { return a }; f()`, RunOutput: int64(5)},
++		{Script: `func outer(f = func(x = 3) { return x }) { return f() }; outer()`, RunOutput: int64(3)},
++
++		// Complex default expressions.
++		{Script: `func f(m = {"a": 1, "b": 2}) { return m.a }; f()`, RunOutput: int64(1)},
++		{Script: `func f(a = [1, 2, 3], i = 1) { return a[i] }; f()`, RunOutput: int64(2)},
++
++		// Multi-line default expressions must not shift positions of later functions.
++		{Script: "func f(a = [1,\n2]) { return a[1] }\nfunc g(b = 5) { return b }; g()", RunOutput: int64(5)},
++		{Script: "func f(a = [1,\n2]) { return a[1] }\nfunc g(b = 5) { return b }; f()", RunOutput: int64(2)},
++
++		// Invalid declarations.
++		{Script: `func f(a = 1, b) {}`, ParseError: fmt.Errorf("invalid default argument declaration")},
++		{Script: `func f(a = 1, b = 2, c) {}`, ParseError: fmt.Errorf("invalid default argument declaration")},
++		{Script: `func f(a = 1, b = 2...) {}`, ParseError: fmt.Errorf("invalid default argument declaration")},
++		{Script: `func f(a = 1, b = 2, c...) { return c }; f()`, RunOutput: []interface{}{}},
++	}
++	runTests(t, tests, nil, nil)
++}
++
++func TestDefaultArgumentsAST(t *testing.T) {
++	t.Parallel()
++
++	stmt, err := parser.ParseSrc(`func f(a = 1, b = 2) { return a + b }`)
++	if err != nil {
++		t.Fatal(err)
++	}
++	found := false
++	err = astutil.Walk(stmt, func(node interface{}) error {
++		if fe, ok := node.(*ast.FuncExpr); ok {
++			found = true
++			if len(fe.Defaults) != 2 || fe.Defaults[0] == nil || fe.Defaults[1] == nil {
++				t.Errorf("unexpected defaults: %#v", fe.Defaults)
++			}
++		}
++		return nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !found {
++		t.Fatal("no FuncExpr found")
++	}
++}
+diff --git a/vm/vmExprFunction.go b/vm/vmExprFunction.go
+index 37c15d9..e0ae70f 100644
+--- a/vm/vmExprFunction.go
++++ b/vm/vmExprFunction.go
+@@ -36,22 +36,32 @@ func (runInfo *runInfoStruct) funcExpr() {
+ 	runVMFunction := func(in []reflect.Value) []reflect.Value {
+ 		runInfo := runInfoStruct{ctx: in[0].Interface().(context.Context), options: runInfo.options, env: envFunc.NewEnv(), stmt: funcExpr.Stmt, rv: nilValue}
+ 
+-		// add Params to newEnv, except last Params
+-		for i := 0; i < len(funcExpr.Params)-1; i++ {
+-			runInfo.rv = in[i+1].Interface().(reflect.Value)
+-			runInfo.env.DefineValue(funcExpr.Params[i], runInfo.rv)
+-		}
+-		// add last Params to newEnv
+-		if len(funcExpr.Params) > 0 {
+-			if funcExpr.VarArg {
++		// add Params to newEnv
++		for i := 0; i < len(funcExpr.Params); i++ {
++			if funcExpr.VarArg && i == len(funcExpr.Params)-1 {
+ 				// function is variadic, add last Params to newEnv without convert to Interface and then reflect.Value
+-				runInfo.rv = in[len(funcExpr.Params)]
+-				runInfo.env.DefineValue(funcExpr.Params[len(funcExpr.Params)-1], runInfo.rv)
+-			} else {
+-				// function is not variadic, add last Params to newEnv
+-				runInfo.rv = in[len(funcExpr.Params)].Interface().(reflect.Value)
+-				runInfo.env.DefineValue(funcExpr.Params[len(funcExpr.Params)-1], runInfo.rv)
++				runInfo.rv = in[i+1]
++				runInfo.env.DefineValue(funcExpr.Params[i], runInfo.rv)
++				continue
++			}
++			rv := in[i+1].Interface().(reflect.Value)
++			if !rv.IsValid() {
++				// parameter was omitted by the call; evaluate its default value
++				if funcExpr.Defaults == nil || funcExpr.Defaults[i] == nil {
++					runInfo.err = newStringError(funcExpr, fmt.Sprintf("function wants %v arguments but received %v", len(funcExpr.Params), providedArgCount(in, len(funcExpr.Params), funcExpr.VarArg)))
++					runInfo.err = newError(funcExpr, runInfo.err)
++					return []reflect.Value{reflectValueNilValue, reflect.ValueOf(reflect.ValueOf(newError(funcExpr, runInfo.err)))}
++				}
++				runInfo.expr = funcExpr.Defaults[i]
++				runInfo.expr.SetPosition(funcExpr.Position())
++				runInfo.invokeExpr()
++				if runInfo.err != nil {
++					runInfo.err = newError(funcExpr, runInfo.err)
++					return []reflect.Value{reflectValueNilValue, reflect.ValueOf(reflect.ValueOf(newError(funcExpr, runInfo.err)))}
++				}
++				rv = runInfo.rv
+ 			}
++			runInfo.env.DefineValue(funcExpr.Params[i], rv)
+ 		}
+ 
+ 		// run function statements
+@@ -207,6 +217,25 @@ func checkIfRunVMFunction(rt reflect.Type) bool {
+ 	return true
+ }
+ 
++// providedArgCount returns the number of arguments explicitly provided to a VM
++// function call. Omitted parameters are represented by invalid reflect.Value
++// placeholders, and variadic elements are counted individually.
++func providedArgCount(in []reflect.Value, numParams int, varArg bool) int {
++	count := 0
++	for i := 0; i < numParams; i++ {
++		if varArg && i == numParams-1 {
++			if in[i+1].IsValid() {
++				count += in[i+1].Len()
++			}
++			continue
++		}
++		if in[i+1].Interface().(reflect.Value).IsValid() {
++			count++
++		}
++	}
++	return count
++}
++
+ // makeCallArgs creates the arguments reflect.Value slice for the four different kinds of functions.
+ // Also returns true if CallSlice should be used on the arguments, or false if Call should be used.
+ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool, callExpr *ast.CallExpr) ([]reflect.Value, bool) {
+@@ -228,8 +257,16 @@ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool
+ 
+ 	// number of expressions
+ 	numExprs := len(callExpr.SubExprs)
+-	// checks to short circuit wrong number of arguments
+-	if (!rt.IsVariadic() && !callExpr.VarArg && numIn != numExprs) ||
++	// checks to short circuit wrong number of arguments.
++	// VM functions allow a normal call to omit trailing arguments; missing
++	// arguments are filled in by runVMFunction using default values.
++	if isRunVMFunction && !callExpr.VarArg {
++		if !rt.IsVariadic() && numExprs > numIn {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
++			return nil, false
++		}
++	} else if (!rt.IsVariadic() && !callExpr.VarArg && numIn != numExprs) ||
+ 		(rt.IsVariadic() && callExpr.VarArg && (numIn < numExprs || numIn > numExprs+1)) ||
+ 		(rt.IsVariadic() && !callExpr.VarArg && numIn > numExprs+1) ||
+ 		(!rt.IsVariadic() && callExpr.VarArg && numIn < numExprs) {
+@@ -244,74 +281,106 @@ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool
+ 	}
+ 
+ 	var args []reflect.Value
+-	indexIn := 0
+-	indexInReal := 0
+-	indexExpr := 0
+-
+ 	if numInReal > numExprs {
+ 		args = make([]reflect.Value, 0, numInReal)
+ 	} else {
+ 		args = make([]reflect.Value, 0, numExprs)
+ 	}
++	indexInReal := 0
++	indexExpr := 0
++
+ 	if isRunVMFunction {
+ 		// for runVMFunction first arg is always context
+ 		args = append(args, reflect.ValueOf(runInfo.ctx))
+ 		indexInReal++
+ 	}
+ 
+-	// create arguments except the last one
+-	for indexInReal < numInReal-1 && indexExpr < numExprs-1 {
+-		runInfo.expr = callExpr.SubExprs[indexExpr]
++	// appendExpr evaluates an expression and appends it as an argument.
++	appendExpr := func(expr ast.Expr, inType reflect.Type) bool {
++		runInfo.expr = expr
+ 		runInfo.invokeExpr()
+ 		if runInfo.err != nil {
+-			return nil, false
++			return false
+ 		}
+ 		if isRunVMFunction {
+ 			args = append(args, reflect.ValueOf(runInfo.rv))
+ 		} else {
+-			runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, rt.In(indexInReal))
++			var rv reflect.Value
++			rv, runInfo.err = convertReflectValueToType(runInfo.rv, inType)
+ 			if runInfo.err != nil {
+-				runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
+-					"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
++				runInfo.err = newStringError(expr,
++					"function wants argument type "+inType.String()+" but received type "+runInfo.rv.Type().String())
+ 				runInfo.rv = nilValue
+-				return nil, false
++				return false
+ 			}
+-			args = append(args, runInfo.rv)
++			args = append(args, rv)
+ 		}
+-		indexIn++
+ 		indexInReal++
++		return true
++	}
++
++	// appendMissing fills omitted trailing parameters for VM functions.
++	appendMissing := func(count int) {
++		for i := 0; i < count; i++ {
++			args = append(args, missingParamValue)
++			indexInReal++
++		}
++	}
++
++	// Convert the argument at the given expression index to a VM/Go argument
++	// for the given parameter type.
++	convertExpr := func(exprIndex int, inType reflect.Type) bool {
++		return appendExpr(callExpr.SubExprs[exprIndex], inType)
++	}
++
++	// create arguments except the last one
++	for indexInReal < numInReal-1 && indexExpr < numExprs-1 {
++		if !convertExpr(indexExpr, rt.In(indexInReal)) {
++			return nil, false
++		}
+ 		indexExpr++
+ 	}
+ 
+ 	if !rt.IsVariadic() && !callExpr.VarArg {
+ 		// function is not variadic and call is not variadic
+-		// add last arguments and return
+-		runInfo.expr = callExpr.SubExprs[indexExpr]
+-		runInfo.invokeExpr()
+-		if runInfo.err != nil {
+-			return nil, false
+-		}
+-		if runInfo.err != nil {
+-			return nil, false
++		for indexExpr < numExprs && indexInReal < numInReal {
++			if !convertExpr(indexExpr, rt.In(indexInReal)) {
++				return nil, false
++			}
++			indexExpr++
+ 		}
+-		if isRunVMFunction {
+-			args = append(args, reflect.ValueOf(runInfo.rv))
+-		} else {
+-			runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, rt.In(indexInReal))
+-			if runInfo.err != nil {
+-				runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
+-					"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
++		if indexInReal < numInReal {
++			if !isRunVMFunction {
++				runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
+ 				runInfo.rv = nilValue
+ 				return nil, false
+ 			}
+-			args = append(args, runInfo.rv)
++			appendMissing(numInReal - indexInReal)
+ 		}
+ 		return args, false
+ 	}
+ 
+ 	if !rt.IsVariadic() && callExpr.VarArg {
+ 		// function is not variadic and call is variadic
+-		runInfo.expr = callExpr.SubExprs[indexExpr]
++		if numExprs == 0 {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
++			return nil, false
++		}
++		if numExprs > numIn {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
++			return nil, false
++		}
++		// first numExprs-1 expressions are fixed arguments
++		for indexExpr < numExprs-1 && indexInReal < numInReal-1 {
++			if !convertExpr(indexExpr, rt.In(indexInReal)) {
++				return nil, false
++			}
++			indexExpr++
++		}
++		// last expression must be a slice to expand into remaining parameters
++		runInfo.expr = callExpr.SubExprs[numExprs-1]
+ 		runInfo.invokeExpr()
+ 		if runInfo.err != nil {
+ 			return nil, false
+@@ -321,27 +390,27 @@ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool
+ 			runInfo.rv = nilValue
+ 			return nil, false
+ 		}
+-		if runInfo.rv.Len() < numIn-indexIn {
++		needed := numInReal - indexInReal
++		if runInfo.rv.Len() < needed {
+ 			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs+runInfo.rv.Len()-1))
+ 			runInfo.rv = nilValue
+ 			return nil, false
+ 		}
+-
+ 		indexSlice := 0
+-		for indexInReal < numInReal {
++		for indexInReal < numInReal && indexSlice < runInfo.rv.Len() {
+ 			if isRunVMFunction {
+ 				args = append(args, reflect.ValueOf(runInfo.rv.Index(indexSlice)))
+ 			} else {
+-				runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv.Index(indexSlice), rt.In(indexInReal))
++				var rv reflect.Value
++				rv, runInfo.err = convertReflectValueToType(runInfo.rv.Index(indexSlice), rt.In(indexInReal))
+ 				if runInfo.err != nil {
+-					runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
++					runInfo.err = newStringError(callExpr.SubExprs[numExprs-1],
+ 						"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
+ 					runInfo.rv = nilValue
+ 					return nil, false
+ 				}
+-				args = append(args, runInfo.rv)
++				args = append(args, rv)
+ 			}
+-			indexIn++
+ 			indexInReal++
+ 			indexSlice++
+ 		}
+@@ -350,78 +419,95 @@ func (runInfo *runInfoStruct) makeCallArgs(rt reflect.Type, isRunVMFunction bool
+ 
+ 	// function is variadic and call may or may not be variadic
+ 
+-	if indexExpr == numExprs {
+-		// no more expressions, return what we have and let reflect Call handle if call is variadic or not
+-		return args, false
+-	}
+-
+-	if numIn > numExprs {
+-		// there are more arguments after this one, so does not matter if call is variadic or not
+-		// add the last argument then return what we have and let reflect Call handle if call is variadic or not
+-		runInfo.expr = callExpr.SubExprs[indexExpr]
+-		runInfo.invokeExpr()
+-		if runInfo.err != nil {
++	if callExpr.VarArg {
++		// function is variadic and call is variadic
++		if numExprs > numIn {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
+ 			return nil, false
+ 		}
+-		if isRunVMFunction {
+-			args = append(args, reflect.ValueOf(runInfo.rv))
+-		} else {
+-			runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, rt.In(indexInReal))
+-			if runInfo.err != nil {
+-				runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
+-					"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
+-				runInfo.rv = nilValue
+-				return nil, false
++		if numExprs == numIn {
++			// last expression is the variadic slice
++			// first numIn-1 expressions are fixed arguments
++			for indexExpr < numExprs-1 && indexInReal < numInReal-1 {
++				if !convertExpr(indexExpr, rt.In(indexInReal)) {
++					return nil, false
++				}
++				indexExpr++
+ 			}
+-			args = append(args, runInfo.rv)
+-		}
+-		return args, false
+-	}
+-
+-	if rt.IsVariadic() && !callExpr.VarArg {
+-		// function is variadic and call is not variadic
+-		sliceType := rt.In(numInReal - 1).Elem()
+-		for indexExpr < numExprs {
+-			runInfo.expr = callExpr.SubExprs[indexExpr]
++			runInfo.expr = callExpr.SubExprs[numExprs-1]
+ 			runInfo.invokeExpr()
+ 			if runInfo.err != nil {
+ 				return nil, false
+ 			}
++			sliceType := rt.In(numInReal - 1)
++			if sliceType.Kind() == reflect.Interface && !runInfo.rv.IsNil() {
++				sliceType = sliceType.Elem()
++			}
+ 			runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, sliceType)
+ 			if runInfo.err != nil {
+-				runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
++				runInfo.err = newStringError(callExpr.SubExprs[numExprs-1],
+ 					"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
+ 				runInfo.rv = nilValue
+ 				return nil, false
+ 			}
+ 			args = append(args, runInfo.rv)
++			return args, true
++		}
++		// numExprs == numIn-1: last expression fills the last fixed parameter
++		// and the variadic parameter is empty.
++		for indexExpr < numExprs-1 && indexInReal < numInReal-1 {
++			if !convertExpr(indexExpr, rt.In(indexInReal)) {
++				return nil, false
++			}
++			indexExpr++
++		}
++		if indexExpr < numExprs {
++			if !convertExpr(indexExpr, rt.In(indexInReal)) {
++				return nil, false
++			}
+ 			indexExpr++
+ 		}
+ 		return args, false
+-
+ 	}
+ 
+-	// function is variadic and call is variadic
+-	// the only time we return CallSlice is true
+-	sliceType := rt.In(numInReal - 1)
+-	if sliceType.Kind() == reflect.Interface && !runInfo.rv.IsNil() {
+-		sliceType = sliceType.Elem()
++	// function is variadic and call is not variadic
++	// fill fixed parameters
++	for indexExpr < numExprs && indexInReal < numInReal-1 {
++		if !convertExpr(indexExpr, rt.In(indexInReal)) {
++			return nil, false
++		}
++		indexExpr++
+ 	}
+-	runInfo.expr = callExpr.SubExprs[indexExpr]
+-	runInfo.invokeExpr()
+-	if runInfo.err != nil {
+-		return nil, false
++	// if not enough fixed arguments, fill with defaults (VM) or error (Go)
++	if indexInReal < numInReal-1 {
++		if !isRunVMFunction {
++			runInfo.err = newStringError(callExpr, fmt.Sprintf("function wants %v arguments but received %v", numIn, numExprs))
++			runInfo.rv = nilValue
++			return nil, false
++		}
++		appendMissing(numInReal - 1 - indexInReal)
+ 	}
+-	runInfo.rv, runInfo.err = convertReflectValueToType(runInfo.rv, sliceType)
+-	if runInfo.err != nil {
+-		runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
+-			"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
+-		runInfo.rv = nilValue
+-		return nil, false
++	// remaining expressions become variadic elements
++	sliceType := rt.In(numInReal - 1).Elem()
++	for indexExpr < numExprs {
++		runInfo.expr = callExpr.SubExprs[indexExpr]
++		runInfo.invokeExpr()
++		if runInfo.err != nil {
++			return nil, false
++		}
++		var rv reflect.Value
++		rv, runInfo.err = convertReflectValueToType(runInfo.rv, sliceType)
++		if runInfo.err != nil {
++			runInfo.err = newStringError(callExpr.SubExprs[indexExpr],
++				"function wants argument type "+rt.In(indexInReal).String()+" but received type "+runInfo.rv.Type().String())
++			runInfo.rv = nilValue
++			return nil, false
++		}
++		args = append(args, rv)
++		indexExpr++
+ 	}
+-	args = append(args, runInfo.rv)
+-
+-	return args, true
++	return args, false
+ }
+ 
+ // processCallReturnValues get/converts the values returned from a function call into our normal reflect.Value, error

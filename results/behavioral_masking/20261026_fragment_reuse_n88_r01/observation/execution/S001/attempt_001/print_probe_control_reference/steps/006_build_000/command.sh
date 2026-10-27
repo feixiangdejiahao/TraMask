@@ -1,0 +1,1 @@
+go build -o /tmp/abs main.go

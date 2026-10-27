@@ -1,0 +1,1 @@
+cd /app && echo 's="abc"; s[10]="x"' > /tmp/one.abs && /tmp/abs /tmp/one.abs 2>&1 | head -3 && echo '---' && echo 's="abc"; s[-1]="x"' > /tmp/one.abs && /tmp/abs /tmp/one.abs 2>&1 | head -3

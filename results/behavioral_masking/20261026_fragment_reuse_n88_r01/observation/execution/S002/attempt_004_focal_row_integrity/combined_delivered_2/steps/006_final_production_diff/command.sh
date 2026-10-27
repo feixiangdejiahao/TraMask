@@ -1,0 +1,1 @@
+git -c safe.directory=/app -C /app --literal-pathspecs diff --binary 9d2d84bb1564e9513287998c56ccf16c01c19008 -- ast/astutil/walk.go ast/expr.go core/core.go parser/default_args.go parser/defaults.go parser/lexer.go vm/vm.go vm/vmDefaultArgs_test.go vm/vmExprFunction.go
