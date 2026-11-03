@@ -3,6 +3,7 @@ import json
 import pytest
 
 from tramask_rerun import replay_v02
+from eviweave.replay import core
 
 
 @pytest.mark.parametrize("terminal", [False, True])
@@ -23,15 +24,19 @@ def test_plan_retains_observed_actions_and_whole_unexecuted_boundary(tmp_path, m
     def stop_before_docker(*args, **kwargs):
         raise RuntimeError("synthetic stop after plan")
 
-    monkeypatch.setattr(replay_v02, "Container", stop_before_docker)
+    monkeypatch.setattr(core, "open_container", stop_before_docker)
     out = tmp_path / "attempt"
-    result = replay_v02.replay_case({"id": "synthetic", "image": "synthetic:image", "base_commit": "a" * 40}, source, out)
-    assert result["completed_actions"] == 0
+    with pytest.raises(RuntimeError, match='synthetic stop after plan'):
+        replay_v02.replay_case({"id": "synthetic", "image": "synthetic:image", "base_commit": "a" * 40}, source, out)
     plan = json.loads((out / "plan.json").read_text())
     assert plan["action_ids"] == ["s0_c0"]
-    boundary = plan["observed_submission_boundary"]
+    boundary = plan["boundary"]
     assert boundary["all_recorded_executed_actions_retained"] is True
     assert boundary["compound_commands_split"] is False
     assert boundary["kind"] == ("explicit_unexecuted_submission_request" if terminal else "EOF_after_last_observed_action")
     if terminal:
         assert boundary["explicitly_unexecuted_calls"][0]["command"] == commands[1][0]
+    assert not (out / 'tests').exists()
+    with pytest.raises(FileExistsError):
+        replay_v02.replay_case({'id': 'synthetic', 'image': 'synthetic:image', 'base_commit': 'a' * 40},
+                              source, out, collect_validation_tests=True)

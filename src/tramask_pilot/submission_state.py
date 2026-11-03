@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 import uuid
 
+from .gitlink_state import collect_gitlink_state, compare_gitlink
+
 if TYPE_CHECKING:
     from .runtime import Container
 
@@ -39,6 +41,7 @@ def compare_tracked_tree(observation: dict) -> dict:
     names = set(expected) | set(observation["base"]) | set(observation["current_index"])
     mismatches, unverified = [], []
     matched, absent = 0, 0
+    qualified_gitlinks = []
     for path in sorted(names):
         want_index, have = expected.get(path), actual[path]
         want = observation.get("expected_checkout", expected).get(path)
@@ -56,8 +59,28 @@ def compare_tracked_tree(observation: dict) -> dict:
             else:
                 reasons.append("present_but_absent_from_submitted_tree")
         elif want_index["mode"] == "160000":
-            unverified.append({"path": path, "reason": "submodule_worktree_not_validated",
-                               "expected": want_index, "actual": have})
+            evidence = observation.get("gitlink_evidence")
+            if not evidence:
+                unverified.append({"path": path, "reason": "submodule_worktree_not_validated",
+                                   "expected": want_index, "actual": have})
+                continue
+            check = compare_gitlink(want_index, evidence["original"]["gitlinks"].get(path),
+                                    evidence["checkpoint"]["gitlinks"].get(path))
+            if (evidence["original"].get("parent_head_unchanged") is not True
+                    or evidence["checkpoint"].get("parent_head_unchanged") is not True
+                    or evidence["original"].get("parent_head") != evidence.get("base_commit")
+                    or evidence["checkpoint"].get("parent_head") != observation.get("head_before")):
+                check = {**check, "matched": False, "status": "unverified",
+                         "reasons": check["reasons"] + ["gitlink_evidence_parent_head_not_bound"]}
+            if check["matched"]:
+                matched += 1
+                qualified_gitlinks.append({"path": path, **check})
+            elif check["status"] == "mismatch":
+                mismatches.append({"path": path, "reasons": check["reasons"], "expected": want_index, "actual": have,
+                                   "gitlink_qualification": check})
+            else:
+                unverified.append({"path": path, "reason": "submodule_worktree_not_validated",
+                                   "expected": want_index, "actual": have, "gitlink_qualification": check})
             continue
         elif (path in observation.get("expected_checkout_unverified", {})
               or want is None or want.get("error") or want.get("unstable_during_read")
@@ -116,6 +139,7 @@ def compare_tracked_tree(observation: dict) -> dict:
         "expected_tracked_files": len(expected), "compared_paths": len(names),
         "matched_existing_files": matched, "verified_absent_paths": absent,
         "mismatches": mismatches, "unverified": unverified,
+        "qualified_gitlinks": qualified_gitlinks,
         "oracle_scope": "The archived patch encodes git diff --binary BASE HEAD; expected_tree is the historical submitted committed tree.",
         "claim_scope": "Committed HEAD tree identity and, separately, literal working-tree bytes against an isolated checkout using the expected tree's .gitattributes, plus Git modes, symlinks, and deletions.",
         "expected_checkout_policy": "Use only expected-tree attributes, disable inherited/system/global Git configuration, refuse external content filters, and never normalize actual replay bytes.",
@@ -313,7 +337,7 @@ print(json.dumps(result,ensure_ascii=True))
 
 
 def validate_submission_state(runtime: Container, patch: Path, out: Path, *,
-                              base_commit: str | None = None) -> dict:
+                              base_commit: str | None = None, gitlink_baseline: dict | None = None) -> dict:
     """Collect and save independently checkable evidence in a new directory.
 
     This executes the collector inside an already-running replay container. It
@@ -344,6 +368,11 @@ def validate_submission_state(runtime: Container, patch: Path, out: Path, *,
         observation = json.loads(process.stdout)
     finally:
         runtime._control(["rm", "-rf", "--", remote], check=False)
+    gitlinks = [path for path, row in observation.get("expected", {}).items() if row["mode"] == "160000"]
+    if gitlinks and gitlink_baseline is not None:
+        actual_gitlinks = collect_gitlink_state(runtime, gitlinks, out / "gitlink_checkpoint")
+        observation["gitlink_evidence"] = {"base_commit": base_commit, "original": gitlink_baseline,
+                                           "checkpoint": actual_gitlinks}
     observation_path = out / "observation.json"
     observation_path.write_text(json.dumps(observation, ensure_ascii=True, indent=2) + "\n")
     report = compare_tracked_tree(observation)

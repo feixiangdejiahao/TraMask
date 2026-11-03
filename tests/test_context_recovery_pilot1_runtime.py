@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import context_recovery_pilot1_runtime as runtime
+from eviweave.replay import container
 
 
 CHECKPOINT = {"image_id": "sha256:" + "d" * 64, "head": "a" * 40}
@@ -90,7 +91,7 @@ def test_original_short_task_and_verifier_revisions_require_git_resolution(plan,
     def git(command, **kwargs):
         commands.append(command)
         return SimpleNamespace(returncode=0, stdout=(BASE + "\n").encode(), stderr=b"")
-    monkeypatch.setattr(runtime.Container, "_docker", git)
+    monkeypatch.setattr(container.Container, "docker", git)
     plan["mode"] = "verifier"
     assert runtime.validate_plan(plan)["base_commit"] == BASE
     assert len(commands) == 2
@@ -101,7 +102,7 @@ def test_short_revision_does_not_bypass_ambiguous_object_check(plan, monkeypatch
     inputs = Path(plan["input_directory"])
     (inputs / "task.toml").write_text('[metadata]\nbase_commit_hash="' + BASE[:7] +
                                     '"\n[environment]\ndocker_image="fixture:image"\n')
-    monkeypatch.setattr(runtime.Container, "_docker", lambda *args, **kwargs:
+    monkeypatch.setattr(container.Container, "docker", lambda *args, **kwargs:
                         SimpleNamespace(returncode=128, stdout=b"", stderr=b"ambiguous"))
     with pytest.raises(ValueError, match="plan_base_differs"):
         runtime.validate_plan(plan)
@@ -131,6 +132,33 @@ def test_cache_is_a_fresh_validation_reference_and_checks_raw_identity(plan, tmp
     with pytest.raises(ValueError, match="raw_input_mismatch"):
         runtime.replay_screen("S001", run=run, checkpoint_index=cache)
     assert not (run / "cases/S001/checkpoint.json").exists()
+
+
+def test_step_a_requires_fresh_observations_and_passes_collection_option(plan, tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    row = {"screen_id": "S001", "trial": "fixture__one", "base_commit": BASE, "image": "fixture:base",
+           "task_directory": plan["task_directory"], "input_directory": plan["input_directory"]}
+    (run / "screening_order.json").write_text(json.dumps({"trials": [row]}))
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"checkpoints": [{"trial": row["trial"]}]}))
+    with pytest.raises(ValueError, match="requires_chronological_observations"):
+        runtime.replay_screen("S001", run=run, checkpoint_index=cache, collect_validation_tests=True)
+    assert not (run / "cases/S001/checkpoint.json").exists()
+
+    def replay(case, inputs, out, **options):
+        assert options == {"collect_validation_tests": True}
+        assert inputs == plan["input_directory"]
+        out.mkdir(parents=True)
+        reference = {**CHECKPOINT, "state_validation_passed": True}
+        (out / "checkpoint_reference.json").write_text(json.dumps(reference))
+        return {"study_checkpoint": reference, "state_validation_passed": True,
+                "step_a": {"status": "complete", "current_tests": 2}}
+
+    monkeypatch.setattr(runtime, "replay_case", replay)
+    result = runtime.replay_screen("S001", run=run, checkpoint_index=tmp_path / "unused-cache.json",
+                                   collect_validation_tests=True, fresh=True)
+    assert result["source"] == "fresh_replay" and result["step_a"]["current_tests"] == 2
 
 
 @pytest.fixture
@@ -315,6 +343,65 @@ def test_validate_uses_fresh_clone_preserves_pointer_and_records_result(plan, tm
     assert (case_dir / "checkpoint_validation/qualification.json").is_file()
     with pytest.raises(FileExistsError):
         runtime.validate_screen("S001", run=run)
+
+
+@pytest.mark.parametrize("matched", [True, False])
+def test_saved_replay_qualification_is_fresh_append_only_and_gates_activation(plan, tmp_path, monkeypatch, matched):
+    run = tmp_path / "requalification"
+    previous = run / "cases/S001/replay_attempt_001"
+    (previous / "validation").mkdir(parents=True)
+    row = {"screen_id": "S001", "trial": "fixture__one", "base_commit": BASE, "image": "fixture:base",
+           "input_directory": plan["input_directory"], "task_directory": plan["task_directory"]}
+    runtime._write_new(run / "screening_order.json", {"trials": [row]})
+    source_image = "sha256:" + "e" * 64
+    runtime._write_new(previous / "plan.json", {
+        "case_identity": {"id": "S001", "image": row["image"], "base_commit": BASE},
+        "source_inputs": {name: runtime._receipt(Path(plan["input_directory"]) / name) for name in runtime.INPUT_NAMES},
+        "action_ids": ["s1_c0"]})
+    runtime._write_new(previous / "checkpoint.json", {**CHECKPOINT, "source_image": row["image"],
+        "source_base_commit": BASE, "source_image_id": source_image, "after_execution_records": 1})
+    runtime._write_new(previous / "summary.json", {"actions_executed": 1})
+    runtime._write_new(previous / "checkpoint_reference.json", {**CHECKPOINT, "state_validation_passed": False})
+    runtime._write_new(previous / "validation/report.json", {"submission_state_status": "unverified"})
+    runtime._write_new(previous / "validation/observation.json", {"expected": {"module": {"mode": "160000"}}})
+    runtime._write_new(previous / "completion.json", {"receipts": [runtime._receipt(path) for path in sorted(previous.rglob("*.json"))]})
+    old_bytes = {path: path.read_bytes() for path in previous.rglob("*") if path.is_file()}
+    calls = []
+    class FakeContainer:
+        def __init__(self, image, output, head):
+            calls.append((image, head))
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+    baseline = {"fixture": "fresh original evidence"}
+    def collect(container, paths, out):
+        assert paths == ["module"]
+        return baseline
+    def validate(container, patch, out, *, base_commit, gitlink_baseline):
+        assert base_commit == BASE and gitlink_baseline is baseline
+        out.mkdir(parents=True)
+        (out / "observation.json").write_text("{}\n")
+        report = json.loads((tmp_path / "report.json").read_text())
+        report["index_tree_matches_submitted_commit"] = matched
+        runtime._write_new(out / "report.json", report)
+        return report
+    monkeypatch.setattr(runtime, "Container", FakeContainer)
+    monkeypatch.setattr(runtime, "collect_gitlink_state", collect)
+    monkeypatch.setattr(runtime, "validate_submission_state", validate)
+    result = runtime.qualify_saved_replay("S001", run=run)
+    assert result["passed"] is matched
+    assert calls == [(source_image, BASE), (CHECKPOINT["image_id"], CHECKPOINT["head"])]
+    assert old_bytes == {path: path.read_bytes() for path in previous.rglob("*") if path.is_file()}
+    canonical = previous.parent / "checkpoint_validation/qualification.json"
+    assert canonical.exists() is matched
+    assert (previous.parent / "checkpoint.json").exists() is matched
+    assert (previous.parent / "checkpoint_qualification_attempt_001/qualification.json").is_file()
+    if matched:
+        plan["checkpoint_validation"] = str(canonical)
+        assert runtime.validate_plan(plan)["checkpoint"] == CHECKPOINT
+    with pytest.raises(FileExistsError):
+        runtime.qualify_saved_replay("S001", run=run)
 
 
 def test_explicit_new_replay_attempt_preserves_prior_failure(plan, tmp_path, monkeypatch):

@@ -14,8 +14,9 @@ import tomllib
 
 from tramask_pilot.runtime import Container
 from tramask_pilot.submission_state import validate_submission_state
+from tramask_pilot.gitlink_state import collect_gitlink_state
 from tramask_rerun.runtime import _checkpoint, _environment, _path, _run, _timeout
-from tramask_rerun.replay_v02 import INPUT_NAMES, replay_case, resolve_task_base_commit
+from tramask_rerun.replay_v02 import INPUT_NAMES, inspect_attempt, replay_case, resolve_task_base_commit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -416,7 +417,7 @@ def execute_plan(plan, out, *, base_directory=None):
 
 
 def replay_screen(screen_id, *, run=DEFAULT_RUN, checkpoint_index=DEFAULT_CHECKPOINTS,
-                  attempt="replay_attempt_001"):
+                  attempt="replay_attempt_001", collect_validation_tests=False, fresh=False):
     """Cache metadata requires fresh validation; it carries no experimental labels."""
     if not isinstance(screen_id, str) or not re.fullmatch(r"S[0-9]{3,}", screen_id):
         raise ValueError("invalid_screen_id")
@@ -432,7 +433,7 @@ def replay_screen(screen_id, *, run=DEFAULT_RUN, checkpoint_index=DEFAULT_CHECKP
     if pointer.exists():
         raise FileExistsError(pointer)
     inputs = {name: _receipt(Path(case["input_directory"]) / name) for name in INPUT_NAMES}
-    entries = _read(checkpoint_index)["checkpoints"]
+    entries = [] if fresh else _read(checkpoint_index)["checkpoints"]
     cached = [entry for entry in entries if entry["trial"] == case["trial"]]
     if len(cached) > 1:
         raise ValueError("duplicate_cached_trial")
@@ -440,6 +441,8 @@ def replay_screen(screen_id, *, run=DEFAULT_RUN, checkpoint_index=DEFAULT_CHECKP
               "input_directory": case["input_directory"], "task_directory": case["task_directory"],
               "raw_inputs": inputs, "fresh_validation_required": True}
     if cached:
+        if collect_validation_tests:
+            raise ValueError("step_a_requires_chronological_observations; use fresh=True or a new collected replay attempt")
         cached = cached[0]
         if cached["base_commit"] != case["base_commit"] or cached["image"] != case["image"]:
             raise ValueError("cached_checkpoint_identity_mismatch")
@@ -451,8 +454,9 @@ def replay_screen(screen_id, *, run=DEFAULT_RUN, checkpoint_index=DEFAULT_CHECKP
         attempt_directory = destination / attempt
         if attempt_directory.exists():
             raise FileExistsError("Replay attempt already exists; inspect it before choosing a new attempt")
+        replay_options = {"collect_validation_tests": True} if collect_validation_tests else {}
         replay = replay_case({"id": screen_id, "image": case["image"], "base_commit": case["base_commit"]},
-                             case["input_directory"], attempt_directory)
+                             case["input_directory"], attempt_directory, **replay_options)
         checkpoint = replay.get("study_checkpoint")
         if not checkpoint:
             raise RuntimeError("Replay produced no complete checkpoint reference; inspect " + str(attempt_directory))
@@ -460,6 +464,8 @@ def replay_screen(screen_id, *, run=DEFAULT_RUN, checkpoint_index=DEFAULT_CHECKP
             raise RuntimeError("Replay checkpoint state validation did not pass; no usable pointer written: " + str(attempt_directory))
         result.update(_checkpoint(checkpoint), source="fresh_replay", replay_attempt=str(attempt_directory),
                       replay_checkpoint_reference=_receipt(attempt_directory / "checkpoint_reference.json"))
+        if collect_validation_tests:
+            result['step_a'] = replay['step_a']
     _write_new(pointer, result)
     return result
 
@@ -499,4 +505,90 @@ def validate_screen(screen_id, *, run=DEFAULT_RUN):
     except Exception as error:
         qualification.update(passed=False, error_type=type(error).__name__, error=str(error))
     _write_new(out / "qualification.json", qualification)
+    return qualification
+
+
+def qualify_saved_replay(screen_id, *, run=DEFAULT_RUN, replay_attempt="replay_attempt_001",
+                         qualification_attempt="checkpoint_qualification_attempt_001"):
+    """Freshly qualify a completed, saved replay without changing its evidence.
+
+    Initialized gitlinks are compared with the immutable original image used by
+    that replay. Only a newly computed full validation can activate the usual
+    checkpoint pointer and qualification consumed by ``validate_plan``.
+    """
+    if not isinstance(screen_id, str) or not re.fullmatch(r"S[0-9]{3,}", screen_id):
+        raise ValueError("invalid_screen_id")
+    for value, pattern in ((replay_attempt, r"replay_attempt_[0-9]{3,}"),
+                           (qualification_attempt, r"checkpoint_qualification_attempt_[0-9]{3,}")):
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+            raise ValueError("explicit_attempt_directory_required")
+    run = Path(run).resolve(strict=True)
+    rows = [row for row in _read(run / "screening_order.json")["trials"] if row["screen_id"] == screen_id]
+    if len(rows) != 1:
+        raise ValueError("screen_id_must_identify_one_trial")
+    case = rows[0]
+    destination = run / "cases" / screen_id
+    pointer_path = destination / "checkpoint.json"
+    standard_qualification = destination / "checkpoint_validation/qualification.json"
+    if pointer_path.exists() or standard_qualification.parent.exists():
+        raise FileExistsError("A checkpoint activation already exists; never overwrite it")
+    previous = destination / replay_attempt
+    if inspect_attempt(previous)["status"] != "complete":
+        raise ValueError("saved_replay_must_have_verified_complete_receipts")
+    plan = _read(previous / "plan.json")
+    inputs = {name: _receipt(Path(case["input_directory"]) / name) for name in INPUT_NAMES}
+    if plan["case_identity"] != {"id": screen_id, "image": case["image"], "base_commit": case["base_commit"]}:
+        raise ValueError("saved_replay_identity_differs_from_screening_row")
+    for name in INPUT_NAMES:
+        if any(inputs[name][key] != plan["source_inputs"][name][key] for key in ("sha256", "bytes")):
+            raise ValueError("saved_replay_raw_input_changed")
+    saved = _read(previous / "checkpoint.json")
+    checkpoint = _checkpoint(saved)
+    summary = _read(previous / "summary.json")
+    if (saved.get("source_image") != case["image"] or saved.get("source_base_commit") != case["base_commit"]
+            or summary.get("actions_executed") != len(plan["action_ids"])
+            or saved.get("after_execution_records") != len(plan["action_ids"])):
+        raise ValueError("saved_checkpoint_not_bound_to_complete_replay")
+    original_image = _checkpoint({"image_id": saved["source_image_id"], "head": case["base_commit"]})
+    old_observation = _read(previous / "validation/observation.json")
+    gitlinks = [path for path, row in old_observation.get("expected", {}).items() if row["mode"] == "160000"]
+    out = destination / qualification_attempt
+    out.mkdir(parents=True, exist_ok=False)
+    _write_new(out / "request.json", {"screen_id": screen_id, "checkpoint": checkpoint,
+        "original_image": original_image, "base_commit": case["base_commit"], "raw_inputs": inputs,
+        "replay_completion": _receipt(previous / "completion.json"),
+        "prior_checkpoint": _receipt(previous / "checkpoint.json"),
+        "prior_validation": _receipt(previous / "validation/report.json"), "gitlinks": gitlinks,
+        "code": [_receipt(Path(__file__)), _receipt(ROOT / "src/tramask_pilot/submission_state.py"),
+                 _receipt(ROOT / "src/tramask_pilot/gitlink_state.py")]})
+    qualification = {"screen_id": screen_id, "trial": case["trial"], "checkpoint": checkpoint,
+                     "base_commit": case["base_commit"], "model_patch": inputs["model.patch"], "passed": False}
+    try:
+        baseline = None
+        if gitlinks:
+            with Container(original_image["image_id"], out / "original_container", case["base_commit"]) as container:
+                baseline = collect_gitlink_state(container, gitlinks, out / "original_gitlinks")
+        with Container(checkpoint["image_id"], out / "checkpoint_container", checkpoint["head"]) as container:
+            report = validate_submission_state(container, Path(inputs["model.patch"]["path"]), out / "validation",
+                                               base_commit=case["base_commit"], gitlink_baseline=baseline)
+        qualification["validation_report"] = _receipt(out / "validation/report.json")
+        qualification["validation_observation"] = _receipt(out / "validation/observation.json")
+        qualification["passed"] = _state_valid(report, checkpoint, case["base_commit"], inputs["model.patch"]["sha256"])
+        inspect_attempt(previous)
+        if any(_receipt(inputs[name]["path"]) != inputs[name] for name in INPUT_NAMES):
+            raise ValueError("raw_input_changed_during_qualification")
+        if qualification["passed"]:
+            pointer = {"screen_id": screen_id, "trial": case["trial"], "base_commit": case["base_commit"],
+                "input_directory": case["input_directory"], "task_directory": case["task_directory"],
+                "raw_inputs": inputs, **checkpoint, "source": "qualified_saved_replay",
+                "fresh_validation_required": True, "replay_attempt": str(previous),
+                "replay_checkpoint_reference": _receipt(previous / "checkpoint_reference.json"),
+                "qualification_attempt": str(out), "fresh_validation_report": qualification["validation_report"]}
+            _write_new(pointer_path, pointer)
+            qualification["checkpoint_reference"] = _receipt(pointer_path)
+    except Exception as error:
+        qualification.update(passed=False, error_type=type(error).__name__, error=str(error))
+    _write_new(out / "qualification.json", qualification)
+    if qualification["passed"]:
+        _write_new(standard_qualification, qualification)
     return qualification
