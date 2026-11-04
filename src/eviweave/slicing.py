@@ -8,17 +8,19 @@ import posixpath
 import re
 
 from .anchors import SUFFIXES, STRINGS
-from .artifacts import read_json, read_manifest, reference_path, relative_references, write_json
+from .artifacts import read_json, read_manifest, reference_path, relative_references, resolve_references, write_json
 from .blobs import BlobStore
 from .evidence import SourceGraph, IDENTS, MEMBERS
 from .pre_slice import merge_ranges
 from .targets import targets_from_collection, read_target_source
 from .history import materials_from_manifest
-from .material_entries import select_material_entries
+from .material_entries import select_material_entries, MaterialConnections
 from .slice_frontier import matching_statements, validation_groups, attached_comments, source_syntax
 from .source_text import decode_material
 from .shell import interpreter_entry
 from .trajectory import TrajectoryGraph,SOURCE_USES
+from .slice_behavior import (connect_calls, source_behavior, execution_context, material_links,
+                             select_exported_behavior, write_behavior_graph, read_behavior_graph)
 
 
 def source_role(path,event):
@@ -416,7 +418,7 @@ class ContextProgram:
                 calls.append({'site':[source,nid],'callee':[target,scope],'call_range':[start,end],
                               'parameters':parameters,'arguments':mapping,'kind':kind,'basis':'static_resolution',
                               'bound_receiver':receiver})
-        return {'entries':[list(e) for e in sorted(entries)],'files':files,'calls':calls,
+        result = {'entries':[list(e) for e in sorted(entries)],'files':files,'calls':calls,
                 'version_alternatives':[{'site':[source,nid],'range':[start,end],'kind':kind,
                                          'callees':[list(c) for c in sorted(callees)]}
                                         for (source,nid,start,end,kind),callees in sorted(self.version_alternatives.items()) if (source,nid) in selected],
@@ -424,6 +426,8 @@ class ContextProgram:
                 'unresolved':sorted(self.unresolved),'execution':self.context['execution'],
                 'unresolved_versions':self.context['unresolved_versions'],
                 'unresolved_bytecode_sources':self.context['unresolved_bytecode_sources']}
+        connect_calls(result, self)
+        return result
 
     def embedded(self,view):
         """Literal program inputs: retain bytes plus separately parsed slices."""
@@ -474,6 +478,7 @@ class TrajectorySlicer:
         self.source_contents={};self.store=BlobStore(self.trajectory.path.parent/'blobs')
         self.documents={str(self.manifest_path):self.manifest,str(self.trajectory.path):self.trajectory.data}
         self.material_refs={};self.code_versions=defaultdict(list)
+        self.execution_contexts = {}
         for identity,material in self.trajectory.materials.items():
             if 'source' in material:self.material_refs[material['source']]=identity
             if material['kind'] in {'file','code_input'}:self.code_versions[material['sha256']].append(identity)
@@ -537,6 +542,7 @@ class TrajectorySlicer:
             if material is None:
                 file,=view.pop('files')
                 view['static_slice']={k:file[k] for k in ('nodes','context_nodes','ranges')};view['issues']=file['issues']
+                view['_source_key'] = [graph.source['path'], hashlib.sha256(graph.raw).hexdigest()]
             else:
                 view.update(material=material,**self.episode([material],[f['material'] for f in view['files']],False))
             rows.append({'group':row['group'],'view':view})
@@ -575,8 +581,18 @@ class TrajectorySlicer:
                 view=row['view'];inputs=[f['material'] for f in view['files']]
                 view.update(source=source,mode='program',consumer=event,basis='static_dependencies_in_observed_IO_context',
                             **self.episode([event],inputs,False))
+                self.attach_execution(view, program)
                 results.append(row)
         return results
+
+    def attach_execution(self, view, program):
+        execution = view['execution']
+        if execution not in self.execution_contexts:
+            self.execution_contexts[execution] = execution_context(self.trajectory, execution)
+        context = self.execution_contexts[execution]
+        view['material_links'] = material_links(view, program, context, self.trajectory.materials)
+        # The full inventory is shared per execution, never copied per view.
+        view['execution_context'] = execution
 
     def static(self,source,path,raw,digest,start,end):
         if PurePosixPath(path).suffix not in SUFFIXES:
@@ -629,6 +645,7 @@ class TrajectorySlicer:
             work=(key,root,criterion['node'])
             if work not in self.views:
                 result=program.slice(root,criterion['node']);result['embedded_inputs']=program.embedded(result)
+                self.attach_execution(result, program)
                 self.views[work]=result
             result=self.views[work];roots=[m['material'] for m in result['files']]
             results.append({**result,**self.episode([event],roots,expand_trajectory),
@@ -637,13 +654,36 @@ class TrajectorySlicer:
         if not contexts:
             view=self.static(source,path,raw,digest,start,end)
             if source in self.material_refs:
-                material=self.material_refs[source];view.update(material=material,**self.episode([material],[],expand_trajectory))
+                material=self.material_refs[source]
+                inputs = []
+                if PurePosixPath(path).suffix in SUFFIXES and view['criterion'] is not None:
+                    program = ContextProgram(trajectory.materials, trajectory.static_context(material), self.cache,
+                                             self.program_source)
+                    criterion = view['criterion']
+                    view = program.slice(material, criterion['node'])
+                    view.update(source=source, criterion=criterion, mode='static_program', reason='no_observed_consumer')
+                    view['embedded_inputs'] = program.embedded(view)
+                    inputs = [file['material'] for file in view['files']]
+                view.update(material=material,**self.episode([material],inputs,expand_trajectory))
             results.append(view)
         return results
 
 
 def slice_location(manifest_path,source,start,end,*,consumer=None,base=None):
-    return TrajectorySlicer(manifest_path).location(source,start,end,consumer=consumer,base=base)
+    slicer = TrajectorySlicer(manifest_path)
+    views = slicer.location(source,start,end,consumer=consumer,base=base)
+    for view in views:
+        for file in view.get('files', []):
+            info = slicer.trajectory.materials[file['material']]
+            graph = slicer.cache[info['path'], info['sha256']]
+            file['source'] = str(slicer.trajectory.path) + '#/materials/' + file['material']
+            file['behavior'] = source_behavior(graph, file['nodes'] + file['context_nodes'])
+        if 'execution_context' in view:
+            view['execution_context'] = slicer.execution_contexts[view['execution_context']]
+        if view.get('static_slice') is not None:
+            path, digest, _ = slicer.source(view['source'])
+            view['behavior'] = source_behavior(slicer.cache[path,digest], view['static_slice']['nodes'])
+    return views
 
 
 def slice_targets(manifest_path,out):
@@ -651,6 +691,11 @@ def slice_targets(manifest_path,out):
     out=Path(out);out.mkdir(parents=True)
     slicer=TrajectorySlicer(manifest_path)
     materials=materials_from_manifest(slicer.manifest_path,slicer.manifest,slicer.trajectory.data)
+    actions=[{'id':m['action_id'],'command':m['text'],'expected':m['expected']}
+             for m in materials if m['kind']=='command']
+    connections=MaterialConnections(materials,actions,root='/app')
+    command_actions={m['source']:m['action_id'] for m in materials if m['kind']=='command'}
+    used_materials=set();execution_materials={}
     targets=targets_from_collection(slicer.manifest_path,slicer.manifest,materials,slicer.trajectory.data)
     write_json(out/'targets.json',relative_references(targets,out))
     units_by_source=defaultdict(list)
@@ -658,12 +703,55 @@ def slice_targets(manifest_path,out):
         if unit['anchors']:units_by_source[unit['source'],unit.get('inline'),unit.get('write')].append((index,unit))
     local_queries={(row['source'],row.get('inline'),row.get('write')):row['points'] for row in targets['local_queries']}
     pending=[];closures={};work_views={};group_count=0;matched_count=0;view_count=0
+    graph_files = {}; graph_origins = {}; context_files = {}
     paths=set();action_ids=set()
 
-    def save(source,by_node,row):
+    def graph_reference(path, digest, origin):
+        key = path, digest
+        if key not in graph_files:
+            graph_files[key] = 'graphs/' + f'{len(graph_files):06}.json.gz'
+            graph_origins[key] = origin
+        return graph_files[key]
+
+    def save(source,by_node,row,action,root_graph):
         nonlocal group_count,view_count
         group=row['group'];view=row['view']
         entries=view.pop('entries') if view['mode'] in {'program','static_program'} else None
+        source_views=[];owners=set() if action is None else {action}
+        if view['execution'] is not None:
+            owners.add(slicer.trajectory.events[view['execution']]['action'])
+        for file in view.get('files', []):
+            info = slicer.trajectory.materials[file['material']]
+            graph=slicer.cache[info['path'],info['sha256']]
+            source_views.append((graph,file['ranges']))
+            producer=info['producer']
+            if producer is not None:
+                event=slicer.trajectory.events[producer]
+                owners.add(producer if event['kind']=='action' else event['action'])
+            origin = str(slicer.trajectory.path) + '#/materials/' + file['material']
+            file['source'] = origin
+            file['graph'] = graph_reference(info['path'], info['sha256'], origin)
+        if 'static_slice' in view:
+            path, digest = view.pop('_source_key')
+            source_views.append((slicer.cache[path,digest],view['static_slice']['ranges']))
+            view['graph'] = graph_reference(path, digest, source)
+        view['candidate_material_links']=connections.links(source_views,actions=owners)
+        used_materials.update(link['material'] for link in view['candidate_material_links'])
+        execution=view['execution']
+        if execution is not None and execution not in execution_materials:
+            if execution not in slicer.execution_contexts:
+                slicer.execution_contexts[execution]=execution_context(slicer.trajectory,execution)
+            links=connections.observed_links(slicer.execution_contexts[execution],slicer.trajectory.materials,
+                                             str(slicer.trajectory.path))
+            execution_materials[execution]=links
+            used_materials.update(link['material'] for link in links)
+        if 'execution_context' in view:
+            execution = view.pop('execution_context')
+            if execution not in context_files:
+                filename = 'contexts/' + str(len(context_files)) + '.json'
+                write_json(out / filename, slicer.execution_contexts[execution])
+                context_files[execution] = filename
+            view['execution_context_ref'] = context_files[execution]
         if 'trajectory_criterion' in view:
             closure=view.pop('trajectory_criterion');signature=hashlib.sha256(json.dumps(closure,sort_keys=True).encode()).hexdigest()
             if signature not in closures:
@@ -675,7 +763,8 @@ def slice_targets(manifest_path,out):
             filename='views/'+str(len(work_views))+'.json'
             write_json(out/filename,relative_references(view,out));work_views[signature]=filename
         selected=[by_node[n] for n in group['matches']]
-        result={'source':source,'ports':selected,'group':group,'views':[work_views[signature]]}
+        result={'source':source,'graph':root_graph,
+                'ports':selected,'group':group,'views':[work_views[signature]]}
         if entries is not None:result['program_entries']=entries
         write_json(out/'slices'/f'{group_count:06}.json',relative_references(result,out))
         group_count+=1;view_count+=1
@@ -689,6 +778,7 @@ def slice_targets(manifest_path,out):
         key=path,digest
         if key not in slicer.cache:slicer.cache[key]=SourceGraph({'id':str(source),'path':path,'raw':raw})
         graph=slicer.cache[key]
+        root_graph=graph_reference(path, digest, source)
         query_points=local_queries.get((reference,inline,write),[])
         ports,unmapped=matching_statements(graph,units,query_points)
         if unmapped:pending.append({'source':source,'reason':'criterion_not_mapped','locations':unmapped,'issues':graph.issues})
@@ -699,12 +789,12 @@ def slice_targets(manifest_path,out):
         by_node={p['node']:p for p in ports}
         if command:action_ids.add(Path(reference).parent.name)
         references=slicer.command_references(unit,digest) if command else [reference]
+        action=command_actions[reference] if command else None
         if references:
             for ref in references:
-                for row in slicer.grouped_locations(ref,ports):save(source,by_node,row)
+                for row in slicer.grouped_locations(ref,ports):save(source,by_node,row,action,root_graph)
         else:
-            for row in slicer.static_groups(source,graph,ports):save(source,by_node,row)
-    actions=[{'id':m['action_id'],'command':m['text'],'expected':m['expected']} for m in materials if m['kind']=='command']
+            for row in slicer.static_groups(source,graph,ports):save(source,by_node,row,action,root_graph)
     file_materials={str(slicer.trajectory.path)+'#/materials/'+identity:m
                     for identity,m in slicer.trajectory.materials.items() if m['kind']=='file'}
     files=[{'source':source,'path':m['path']} for source,m in file_materials.items()]
@@ -716,13 +806,93 @@ def slice_targets(manifest_path,out):
                       or m['kind']=='file' and (m['path'],m['sha256']) in selected_files}
     carriers['records']=[r['id'] for r in targets['records'] if r['source'] in selected_sources]
     write_json(out/'material_entries.json',relative_references(carriers,out))
-    for index,((path,digest),graph) in enumerate(slicer.cache.items()):
-        write_json(out/'graphs'/f'{index:06}.json',{'path':path,'sha256':digest,'nodes':graph.export_nodes(),'issues':graph.issues})
+    write_behavior_graph(out/'candidate_materials.json.gz',{
+        'documents':relative_references([connections.documents[m] for m in sorted(used_materials)],out),
+        'executions':execution_materials})
+    for (path,digest), graph in slicer.cache.items():
+        key = path, digest
+        if key not in graph_files:
+            material = next(m for m in slicer.code_versions[digest] if slicer.trajectory.materials[m]['path'] == path)
+            graph_reference(path, digest, str(slicer.trajectory.path) + '#/materials/' + material)
+        write_behavior_graph(out / graph_files[key], {
+            'path':path, 'sha256':digest, 'origin':relative_references({'source':graph_origins[key]},out)['source'],
+            'nodes':graph.export_nodes(), 'issues':graph.issues,
+            'behavior':source_behavior(graph, [node['id'] for node in graph.nodes]),
+        })
     summary={'entry_groups':group_count,'matched_statements':matched_count,'views':view_count,'source_graphs':len(slicer.cache),
              'shared_views':len(work_views),'shared_episodes':len(closures),'pending_roots':pending,
              'material_entries':'material_entries.json',
+             'candidate_materials':'candidate_materials.json.gz',
+             'linked_candidate_materials':len(used_materials),
+             'shared_material_executions':len(execution_materials),
              'material_entry_counts':{key:len(carriers[key]) for key in ('actions','files','records')},
-             'trajectory':str(slicer.trajectory.path),'retained_B_records':len(targets['records']),
+             'trajectory':str(slicer.trajectory.path),'manifest':str(slicer.manifest_path),'retained_B_records':len(targets['records']),
+             'shared_execution_contexts': len(context_files),
              'trajectory_mode':'criteria_on_shared_graph','new_llm_calls':0}
     write_json(out/'summary.json',relative_references(summary,out))
     return summary
+
+
+class SliceEvidenceReader:
+    """Reuse the trajectory and source facts when preparing multiple LLM inputs."""
+
+    def __init__(self, directory):
+        self.directory = Path(directory).resolve()
+        self.summary = resolve_references(read_json(self.directory / 'summary.json'), self.directory)
+        self.trajectory = TrajectoryGraph(self.summary['trajectory'])
+        self.graphs, self.episodes = {}, {}
+        pool=read_behavior_graph(self.directory/self.summary['candidate_materials'])
+        self.candidate_documents={d['id']:d for d in resolve_references(pool['documents'],self.directory)}
+        self.execution_materials=pool['executions']
+
+    def graph(self, reference):
+        if reference not in self.graphs:
+            self.graphs[reference] = read_behavior_graph(self.directory / reference)
+        return self.graphs[reference]
+
+    def read(self, view_path):
+        directory, trajectory = self.directory, self.trajectory
+        view = resolve_references(read_json(directory / view_path), directory)
+        files = view.get('files', [])
+        if 'static_slice' in view:
+            graph = self.graph(view['graph'])
+            selected = view['static_slice']
+            files = [{'path': graph['path'], 'graph': view['graph'],
+                      'nodes': selected['nodes'], 'context_nodes': selected['context_nodes'], 'ranges': selected['ranges']}]
+        sources = []
+        for file in files:
+            graph = self.graph(file['graph'])
+            origin = (file['source'] if 'source' in file else
+                      resolve_references({'source': graph['origin']}, directory)['source'])
+            facts = select_exported_behavior(graph['behavior'], file['nodes'] + file['context_nodes'])
+            sources.append({**file, 'source': origin, 'behavior': facts, 'issues': graph['issues']})
+        view['behavior_sources'] = sources
+        if view['execution'] is not None:
+            view['candidate_material_links'].extend(self.execution_materials[view['execution']])
+        selected={link['material'] for link in view['candidate_material_links']}
+        view['candidate_materials']=[self.candidate_documents[m] for m in sorted(selected)]
+        if 'execution_context_ref' in view:
+            view['execution_context'] = read_json(directory / view['execution_context_ref'])
+        if 'trajectory_ref' in view:
+            reference = view['trajectory_ref']
+            if reference not in self.episodes:
+                criterion = read_json(directory / reference)
+                self.episodes[reference] = trajectory.slice(criterion['seeds'], inputs=criterion['inputs'])
+            view['trajectory'] = self.episodes[reference]
+            view['events'] = [{'id': event, **trajectory.events[event]} for event in view['trajectory']['events']]
+            view['materials'] = [{**trajectory.materials[m], 'material': m,
+                                  'source': str(trajectory.path) + '#/materials/' + m}
+                                 for m in view['trajectory']['materials']]
+        alternatives = {m for alternative in view.get('version_alternatives', []) for m, _ in alternative['callees']}
+        view['alternative_sources'] = [{'material': m, **trajectory.materials[m],
+                                        'source': str(trajectory.path) + '#/materials/' + m}
+                                       for m in sorted(alternatives)]
+        view['complete_history'] = str(directory / 'targets.json')
+        view['material_entries'] = str(directory / 'material_entries.json')
+        view['collection'] = self.summary['manifest']
+        return view
+
+
+def read_slice_evidence(directory, view_path):
+    """Read one view; sources remain readable through B/D's source APIs."""
+    return SliceEvidenceReader(directory).read(view_path)

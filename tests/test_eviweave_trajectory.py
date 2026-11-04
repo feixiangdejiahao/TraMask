@@ -171,6 +171,22 @@ def test_failed_attempt_and_outputs_are_retained(tmp_path):
     assert graph.events['s1']['original']!=graph.events['s1']['replay_output']
 
 
+def test_source_slice_carries_recorded_and_replay_action_observations(tmp_path):
+    _,out,result=recorded(tmp_path,{'probe.py':'print("actual-value")\n'},'python3 -B probe.py')
+    assert result['returncode']==0
+    graph=TrajectoryGraph(out/'trajectory.json')
+    source,a,b=source_ref(out,'/app/probe.py','print(')
+    view,=slice_location(out/'manifest.json',source,a,b)
+    materials=[graph.materials[m] for m in view['trajectory']['materials']]
+    store=BlobStore(out/'blobs')
+    recorded_output,=[m for m in materials if m['kind']=='recorded_output']
+    replay_output,=[m for m in materials if m['kind']=='action_output']
+    assert store.read(recorded_output['sha256'])==b'original-output'
+    assert store.read(replay_output['sha256'])==b'actual-value\n'
+    assert recorded_output['producer']==replay_output['producer']=='s1'
+    assert {'recorded_observation','replay_observation'}<={kind for _,_,kind in view['trajectory']['edges']}
+
+
 def test_timeout_reaps_real_process_exits_and_keeps_the_trace(tmp_path):
     _,out,result=recorded(tmp_path,{},"python3 -c 'import os\nwhile True: os.getpid()'",timeout=0.1)
     assert result['timed_out'] and result['returncode']==-1
@@ -303,8 +319,9 @@ def test_unexecuted_source_slice_keeps_its_graph_for_later_matching(tmp_path):
     source=str(out/'trajectory.json')+'#/materials/'+identity
     a=code.index('second == 4');view,=slicer.location(source,a,a+len('second == 4'),expand_trajectory=False)
     path,digest,_=slicer.source(source);nodes=slicer.cache[path,digest].export_nodes()
-    assert view['execution'] is None and view['static_slice']['nodes']
-    assert set(view['static_slice']['nodes'])<={n['id'] for n in nodes}
+    file, = view['files']
+    assert view['execution'] is None and file['nodes']
+    assert set(file['nodes'])<={n['id'] for n in nodes}
 
 
 def test_before_each_setup_is_joined_with_its_test(tmp_path):

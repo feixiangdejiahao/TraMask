@@ -40,7 +40,7 @@ def public_materials(case, directory):
                 key = action['id'] + ':' + field
                 tools[key] = action['expected'][field]
                 materials.append({'source': str(tool_file) + '#/' + key, 'text': tools[key],
-                                  'kind': 'output', 'action_id': action['id']})
+                                  'kind': 'output', 'action_id': action['id'],'origin':'original'})
     write_json(tool_file, tools)
     submitted = {}
     inventory = read_json(FR / 'public_workspace_v3/cases' / case['screen_id'] / 'inventory.json')

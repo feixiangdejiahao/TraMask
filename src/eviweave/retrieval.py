@@ -347,6 +347,7 @@ def observed_action_jobs(actions, rules, changed_paths):
     jobs = []
     for action in actions:
         command, cwd, roles, paths = action['command'], '/app', set(), set()
+        modules=set()
         docs = heredocs(command)
         for segment in segments(command, docs):
             doc = next((d for d in docs if segment['start'] <= d['header_end'] < segment['end']), None)
@@ -385,6 +386,7 @@ def observed_action_jobs(actions, rules, changed_paths):
                 module = argv[argv.index('-m') + 1]
                 if module not in {'pip', 'venv', 'ensurepip', 'compileall', 'build'}:
                     roles.add('module_execution')
+                    modules.add(module)
             if executable in {'cat', 'tee', 'echo', 'printf'} and any(a in {'>', '>>'} for a in argv):
                 if any(test_path(p) for p in paths) or (doc is not None and re.search(
                         r'(?m)(?:def\s+test_|func\s+Test|#\[test\]|\b(?:it|test|describe)\s*\()', doc['body'])):
@@ -401,7 +403,8 @@ def observed_action_jobs(actions, rules, changed_paths):
                 if structured or names & observed_words or any(t in command + output for t in tokens) or related_module or code_read or data_read:
                     roles.add('source_or_data_read')
         if roles:
-            jobs.append({'action_id': action['id'], 'roles': sorted(roles), 'paths': sorted(paths)})
+            jobs.append({'action_id': action['id'], 'roles': sorted(roles), 'paths': sorted(paths),
+                         'modules':sorted(modules)})
     return jobs
 
 

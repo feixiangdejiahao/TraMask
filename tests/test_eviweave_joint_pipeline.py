@@ -236,6 +236,47 @@ def test_deleted_unexecuted_helper_recovers_latin1_test_caller(tmp_path):
     assert any(len(v['calls'])>=2 and any(materials[c['site'][0]]['path']=='/app/test_case.py' for c in v['calls']) for v in static)
 
 
+def test_deleted_executed_script_matches_and_links_its_inputs_and_old_implementation(tmp_path):
+    code = '''import json
+from pathlib import Path
+from impl import operation
+context = json.loads(Path('context.json').read_text())
+assert operation(context['start']) == 4
+print('historical-context-pass')
+'''
+    command = ("printf '{\"start\":3}\\n' >context.json\n"
+               "cat >gone.py <<'PY'\n" + code + "PY\n"
+               "python3 -B gone.py\n"
+               "printf 'def operation(value): return value + 2\\n' >impl.py\n"
+               "rm gone.py context.json\n")
+    out, destination, summary = run_pipeline(
+        tmp_path, {'impl.py': 'def operation(value): return value + 1\n'}, command,
+        'Preserve `operation()` behavior.')
+    from eviweave.blobs import BlobStore
+    from eviweave.trajectory import TrajectoryGraph
+    graph, store = TrajectoryGraph(out / 'trajectory.json'), BlobStore(out / 'blobs')
+    assert '/app/gone.py' not in graph.data['submitted']
+    assert '/app/context.json' not in graph.data['submitted']
+    targets = read_json(destination / 'targets.json')
+    assert any(u['path'] == '/app/gone.py' for u in targets['units'])
+    views = [read_json(p) for p in (destination / 'views').glob('*.json')]
+    executed = [v for v in views if v['mode'] == 'program'
+                and any(f['path'] == '/app/gone.py' for f in v['files'])]
+    assert summary['matched_statements'] and executed
+    for view in executed:
+        text = '\n'.join(store.read(graph.materials[f['material']]['sha256'])[a:b].decode()
+                         for f in view['files'] for a, b in f['ranges'])
+        assert 'return value + 1' in text and 'return value + 2' not in text
+        episode = read_json(destination / view['trajectory_ref'])
+        closure = graph.slice(episode['seeds'], inputs=episode['inputs'])
+        assert any(graph.materials[m]['path'] == '/app/context.json'
+                   and store.read(graph.materials[m]['sha256']) == b'{"start":3}\n'
+                   for m in closure['materials'])
+        assert any(graph.events[e]['kind'] == 'stream_write'
+                   and b'historical-context-pass' in store.read(graph.events[e]['data'])
+                   for e in closure['events'])
+
+
 def test_multiple_fixture_versions_remain_alternatives(tmp_path):
     first='import pytest\n@pytest.fixture(autouse=True)\ndef ready(): return 3\n'
     second=first.replace('return 3','return 9')

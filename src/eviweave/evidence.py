@@ -85,6 +85,8 @@ class SourceGraph:
         self.call_sites=defaultdict(list)
         self.issues = []
         self.header_scopes={};self.components={};self.slice_cache={}
+        self.behavior_index = None
+        self.relation_index = None
         if source_error is not None:
             self.issues.append({'kind':'source_encoding_error','source':source['id'],'reason':source_error})
             return
@@ -120,7 +122,7 @@ class SourceGraph:
             return [self.text(node)]
         if node.type in STRINGS or node.type in {'type_annotation', 'predefined_type', 'pointer_type', 'qualified_type'}:
             return []
-        if node.type in MEMBERS:
+        if node.type in MEMBERS | {'subscript', 'subscript_expression', 'index_expression'}:
             return []
         return [name for child in node.named_children for name in self._names(child)]
 
@@ -223,6 +225,35 @@ class SourceGraph:
         # Rust control expressions are wrapped as expression statements.
         if node.type == 'expression_statement' and len(node.named_children) == 1 and node.named_children[0].type in CONTROL:
             return self._emit(node.named_children[0], scope, incoming, controls)
+        if node.type in {'if_statement', 'if_expression', 'elif_clause'}:
+            # Each condition has a false continuation; the condition itself
+            # must not survive a final else when every branch exits. Python's
+            # elif/else are sibling alternatives, unlike nested JS/Go/Rust ifs.
+            branches = [node, *node.children_by_field_name('alternative')]
+            tails, false_path = set(), set(incoming)
+            branch_controls = controls
+            for branch in branches:
+                if branch != node and branch.type != 'elif_clause':
+                    tails.update(self._emit(branch, scope, false_path, branch_controls))
+                    false_path = set()
+                    continue
+                body = branch.child_by_field_name('consequence')
+                holes = [(body.start_byte, body.end_byte)]
+                holes.extend((a.start_byte, a.end_byte) for a in branch.children_by_field_name('alternative'))
+                identity = self._atom(branch, scope, false_path, branch_controls, 'control',
+                                      _subtract(branch.start_byte, branch.end_byte, holes))
+                for child in branch.named_children:
+                    if child != body and child not in branch.children_by_field_name('alternative'):
+                        self._scan(self.nodes[identity], child)
+                branch_controls = (*branch_controls, identity)
+                tails.update(self._emit(body, scope, {identity}, branch_controls))
+                false_path = {identity}
+            return tails | false_path
+        if node.type == 'else_clause':
+            identity = self._atom(node, scope, incoming, controls, 'control',
+                                  _subtract(node.start_byte, node.end_byte,
+                                            [(c.start_byte, c.end_byte) for c in node.named_children]))
+            return self._emit_block(node, scope, {identity}, (*controls, identity))
         if node.type in CONTROL:
             blocks = [c for c in node.named_children if c.type in BLOCKS | CONTROL
                       or c.type in {'case_clause', 'match_block', 'switch_body'}]
@@ -273,8 +304,10 @@ class SourceGraph:
         identity = self._atom(node, scope, incoming, controls)
         self._scan(self.nodes[identity], node)
         if node.type=='defer_statement':self.scopes[scope]['cleanup'].add(identity)
-        if node.type in {'return_statement', 'return_expression', 'raise_statement', 'throw_statement'}:
-            self.nodes[identity]['kind'] = 'return' if node.type.startswith('return') else 'raise'
+        terminal = (node.named_children[0] if node.type == 'expression_statement' and
+                    len(node.named_children) == 1 else node)
+        if terminal.type in {'return_statement', 'return_expression', 'raise_statement', 'throw_statement'}:
+            self.nodes[identity]['kind'] = 'return' if terminal.type.startswith('return') else 'raise'
             self.scopes[scope]['returns'].add(identity)
             return set()
         return {identity}

@@ -70,13 +70,14 @@ class Container:
 
 
 @contextmanager
-def open_container(image, head, output, *, cpus=2, memory='8g', pids_limit=1024, trace_commands=False):
+def open_container(image, head, output, *, cpus=2, memory='8g', pids_limit=1024, trace_commands=False,
+                   network='none'):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     image_id = Container.docker(['image', 'inspect', '--format', '{{.Id}}', image]).stdout.decode().strip()
     name = 'eviweave-' + uuid.uuid4().hex[:16]
     tracing=['--cap-add','SYS_PTRACE'] if trace_commands else []
-    Container.docker(['run', '--detach', '--init', '--name', name, '--network', 'none',
+    Container.docker(['run', '--detach', '--init', '--name', name, '--network', network,
                       '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
                       *tracing,
                       '--cpus', str(cpus), '--memory', memory, '--pids-limit', str(pids_limit),
@@ -87,7 +88,7 @@ def open_container(image, head, output, *, cpus=2, memory='8g', pids_limit=1024,
         assert actual == head, f'Expected HEAD {head}, got {actual}'
         runtime.control(['mkdir', '-p', runtime.scratch])
         write_json(output / 'container.json', {'name': name, 'image_id': image_id, 'head': head,
-                                             'network': 'none', 'host_mounts': []})
+                                             'network': network, 'host_mounts': []})
         yield runtime
     finally:
         Container.docker(['rm', '-f', name])

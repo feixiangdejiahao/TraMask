@@ -21,9 +21,10 @@ CHANNEL = ROOT / 'results/behavioral_masking/20261102_validation_channels_n88_r0
 OLD = ROOT / 'results/behavioral_masking/20261102_validation_structural_n88_r01'
 
 
-def original_sources(case):
+def original_sources(case,*,actions=None):
     originals = {}
-    actions, _ = resolve_submission_actions(read_json(Path(case['input_directory']) / 'trajectory.json'))
+    if actions is None:
+        actions, _ = resolve_submission_actions(read_json(Path(case['input_directory']) / 'trajectory.json'))
     for index, entry in enumerate(commands(actions)['source_literals']):
         originals[f"H:{entry['action_id']}:{index:04}"] = (entry['path'], entry['content'].encode())
     for action in actions:

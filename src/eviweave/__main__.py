@@ -1,4 +1,4 @@
-"""Research CLI for replay, historical material, syntax targets and baselines."""
+"""Research CLI for replay, slicing, behavior comparison and test baselines."""
 import argparse
 import json
 from pathlib import Path
@@ -33,6 +33,25 @@ def main():
     slicing.add_argument('--start',type=int)
     slicing.add_argument('--end',type=int)
     slicing.add_argument('--consumer',help='Restrict to one observed read/code-input event')
+    evidence = commands.add_parser('slice-evidence', help='Read a shared slice with behavior and original-material references')
+    evidence.add_argument('--directory', type=Path, required=True, help='Output directory of a batch slice run')
+    evidence.add_argument('--view', required=True, help='View path relative to that directory, e.g. views/0.json')
+    evidence.add_argument('--out', type=Path, required=True)
+    comparison=commands.add_parser('compare',help='Align behavior roles and cluster queries from current slices')
+    comparison.add_argument('--directory',type=Path,required=True,help='Output directory of a new batch slice run')
+    comparison.add_argument('--out',type=Path,required=True)
+    comparison.add_argument('--partitions',nargs='+',choices=['ports','relations','flow','boundary'],default=['ports'])
+    alignment=commands.add_parser('align',help='Align two concrete members and extract their behavior differences')
+    alignment.add_argument('--directory',type=Path,required=True,help='The batch slice directory used by compare')
+    alignment.add_argument('--left',nargs=3,required=True,metavar=('VIEW','SOURCE','OPERATION'))
+    alignment.add_argument('--right',nargs=3,required=True,metavar=('VIEW','SOURCE','OPERATION'))
+    alignment.add_argument('--out',type=Path,required=True)
+    candidate=commands.add_parser('candidate-materials',help='Read materials attached to a cluster candidate')
+    candidate.add_argument('--directory',type=Path,required=True)
+    candidate.add_argument('--classes',type=int,nargs=2,required=True)
+    candidate.add_argument('--members',type=int,nargs=2)
+    candidate.add_argument('--partition',choices=['ports','relations','flow','boundary'],default='ports')
+    candidate.add_argument('--out',type=Path,required=True)
     baseline = commands.add_parser('baseline', help='Run a retained test on its submitted checkpoint')
     baseline.add_argument('--manifest', type=Path, required=True)
     baseline.add_argument('--test-id', required=True)
@@ -43,6 +62,34 @@ def main():
     baseline.add_argument('--build', action='append', default=[])
     baseline.add_argument('--env', action='append', default=[], metavar='NAME=VALUE')
     args = parser.parse_args()
+    if args.action=='compare':
+        from .comparison import compare_slices
+        summary=compare_slices(args.directory,args.out,modes=args.partitions)
+        print(json.dumps(summary,ensure_ascii=False))
+        return 0
+    if args.action=='align':
+        from .comparison import load_slice_comparison
+        from .artifacts import write_json
+        comparison,_,_=load_slice_comparison(args.directory)
+        left,right=[(int(row[0]),*row[1:]) for row in (args.left,args.right)]
+        packet=comparison.align(left,right)
+        write_json(args.out,packet)
+        print(json.dumps({'output':str(args.out),'changed_relations':len(packet['difference']['addresses'])}))
+        return 0
+    if args.action=='candidate-materials':
+        from .behavior_clusters import read_candidate_materials
+        from .artifacts import write_json
+        packet=read_candidate_materials(args.directory,args.classes,member_views=args.members,partition=args.partition)
+        write_json(args.out,packet)
+        print(json.dumps({'output':str(args.out),'materials':len(packet['candidate_materials'])}))
+        return 0
+    if args.action == 'slice-evidence':
+        from .slicing import read_slice_evidence
+        from .artifacts import write_json
+        packet = read_slice_evidence(args.directory, args.view)
+        write_json(args.out, packet)
+        print(json.dumps({'output': str(args.out), 'sources': len(packet['behavior_sources'])}))
+        return 0
     if args.action=='slice':
         from .slicing import slice_targets,slice_location
         if args.source is None:

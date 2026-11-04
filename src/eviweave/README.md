@@ -1,6 +1,6 @@
 # EviWeave 学术原型
 
-当前实现步骤 A/B/D/F：在 replay 中保存历史版本及实际输入输出，将材料整理为候选列表，定位匹配点，再恢复对应历史执行环境中的程序切片与轨迹关系。[完整架构与后续实现顺序](ARCHITECTURE.md)覆盖设计稿 A–L。
+当前实现步骤 A/B/D/F/G 及行为比较：在 replay 中保存历史版本及实际输入输出，整理材料、定位匹配点、恢复切片，再对齐端口、提取行为差异并构建聚类查询。[完整架构与后续实现顺序](ARCHITECTURE.md)覆盖设计稿 A–L。
 
 ## 单独使用 replay
 
@@ -76,7 +76,7 @@ context = read_context(selected["source"])
 
 `rank_lexical` 返回全部记录的顺序。示例读取其中一条；后续分析的候选仍是全量 `records`，包括名称未命中、语法错误和输出材料。`anchors.rank_units` 提供匹配单元的全部 `anchors` 位置，作为优先切片的提示，不作为材料淘汰规则。相同函数文本出现在不同文件或历史来源中时分别保留。
 
-reasoning 和普通模型回复不进入材料列表。B 读取 UTF-8 文本，以及按源码声明编码的 Python 文本；二进制 fixture 继续保存在 A 的 blob 中。处理只读取本地文件，不调用 LLM 或重新 replay，也不建立独立索引。
+reasoning 和普通模型回复不进入材料列表。B 读取 UTF-8 文本，以及按源码声明编码的 Python 文本；内部材料目录同时保留二进制 fixture／输出的来源及解码失败原因，原始字节仍由 A 持有。不可解码材料不进入文本窗口，后续仍能按来源回读。处理只读取本地文件，不调用 LLM 或重新 replay，也不建立独立索引。
 
 需要保存候选输入时，可以显式导出到一个新 JSON 文件：
 
@@ -138,7 +138,63 @@ PYTHONPATH=src .venv/bin/python -m eviweave slice \
   --out /absolute/new-slicing-directory
 ```
 
-`targets.json` 保留 D 的完整输入及 B 材料；`slices/` 保存匹配点与入口对应，`views/` 保存程序切片，`graphs/` 保存共享源码图，`episodes/` 保存材料和执行关系的切片起点。需要完整关系闭包时，将对应 episode 的 `seeds` 与 `inputs` 传给 `TrajectoryGraph.slice`。`summary.json` 列出未降到语句的入口与数据材料。未命中或不能解析的材料继续可回读。
+`targets.json` 保留 D 的完整输入及 B 材料；`slices/` 保存匹配点与入口对应，`views/` 保存程序切片，`graphs/*.json.gz` 无损保存每个源码版本共享的依赖图和行为信息，`contexts/` 保存每次执行共享的 IO 清单，`episodes/` 保存轨迹切片起点。`summary.json` 列出未降到语句的入口与数据材料，并引用完整 A 采集结果。未命中、不能解析及二进制材料仍能从这些来源回读。
+
+行为信息包括表达式输入输出、定义版本、词法共享单元、条件、return/await/yield、显式成员/下标读写及未知调用效果。跨文件调用连接实参端口、形参、返回位置和条件性的效果。callback 传入、generator 创建和 async 调用不被解释成函数体已经执行；动态对象身份和未解析语言的内部关系继续标为未知，并保留原文。
+
+读取一份适合交给后续分析/LLM 的证据包：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m eviweave slice-evidence \
+  --directory /absolute/new-slicing-directory \
+  --view views/0.json \
+  --out /absolute/evidence.json
+```
+
+证据包展开所选节点的行为关系、轨迹事件和材料来源；`alternative_sources` 保留不能唯一绑定的版本，`complete_history`、`material_entries` 和 `collection` 分别提供完整 B、独立材料及 A 的入口。源码和数据通过来源引用读取，不做字符截断，不把未知关系作为删除依据。
+
+每份新切片还携带 `candidate_material_links`，读取后通过 `candidate_materials` 展开相应输入、输出、fixture 和 snapshot。共享池 `candidate_materials.json.gz` 保存材料及按执行共享的实际 IO 连接；路径／模块候选、实际读写、原始输出和 replay 输出分别标记。原始临时文件即使已从最终仓库删除，仍可按历史版本取得。[连接算法与 88 条核验](../../research/material_connections_20261105/README.md)。
+
+归档聚类入口同样导出成员附件，查询扩展保留这些引用。读取某个类对及其两个具体成员：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m eviweave candidate-materials \
+  --directory /absolute/cluster-run/cases/S010 \
+  --classes 202 202 --members 124 128 --out /tmp/candidate.json
+```
+
+## 从切片进行行为比较
+
+```bash
+PYTHONPATH=src .venv/bin/python -m eviweave compare \
+  --directory /absolute/new-slice-run --out /absolute/new-comparison-run
+```
+
+默认采用 `ports` 分区，将条件变体保留在类成员中；`--partitions relations flow boundary` 可显式选择已有实验分区。输出包括 `memberships.json.gz`（原始成员）、`cluster_pairs.json.gz`（类查询）、`difference_profiles.json.gz`（按端口地址表示的共享事实及其成员）、`candidate_materials.json.gz`（材料、执行组及成员连接）和 `summary.json`。多个文件的投影共用原切片的 view ID；源码输入继续作为材料视图保留。
+
+类查询直接通过索引建立，不先枚举全部具体切片对。同一程序版本只解析一次，关系索引共享；执行附件继续按 execution 存储。读取候选材料时使用上述 `candidate-materials`，非默认分区通过 `--partition relations` 等显式指定。
+
+需要比较具体成员时，从 memberships 取出 `(view_id, graph_reference, operation_id)`：
+
+```python
+from eviweave.comparison import load_slice_comparison
+
+comparison, views, view_paths = load_slice_comparison(slice_directory)
+result = comparison.align(left_member, right_member)
+```
+
+`result` 包含端口角色对应、增删端口、联合关系差异和源码编辑。重复比较复用同一个 `comparison`。命令行也可用 `align --directory <slice-dir> --left <view> <graph> <operation> --right <view> <graph> <operation> --out <json>`。完整使用与核验见[整合记录](../../research/comparison_integration_20261105/README.md)。
+
+批量读取时复用 `SliceEvidenceReader`，避免每个切片重复解析轨迹和共享图：
+
+```python
+from eviweave.slicing import SliceEvidenceReader
+
+reader = SliceEvidenceReader(slicing_directory)
+packet = reader.read("views/0.json")
+```
+
+`behavior_sources` 中普通来源可用 `history.read_context` 读取完整文本、`read_source_bytes` 读取原始字节；命令字面量来源使用 `targets.read_target_source`。这些原文是行为近似的可回读依据，不由摘要替代。直接读取压缩图使用 `slice_behavior.read_behavior_graph`。
 
 写入磁盘的 targets、slices、views 和 summary 中，来源相对于 slicing 输出目录。回读已保存的入口可调用 `read_target_source(unit, base=slicing_output)`；用已保存的来源重新切片时，向 `TrajectorySlicer.location` 传入相同的 `base`。
 

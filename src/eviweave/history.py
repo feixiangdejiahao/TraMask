@@ -45,15 +45,17 @@ def read_context(source, *, base=None):
     return text
 
 
-def read_source_bytes(source, *, base=None):
-    """Read the original bytes of an A file source, including undecodable files."""
+def read_source_bytes(source, *, base=None, documents=None):
+    """Read original A bytes; a batch may share its parsed source documents."""
     if base is not None:source=reference_path(source,base)
     filename, _, fragment = source.partition('#')
     path = Path(filename)
     if not fragment:
         return path.read_bytes()
     collection, index = fragment.removeprefix('/').split('/')
-    entry = read_json(path)[collection][index if collection=='materials' else int(index)]
+    if documents is None:documents={}
+    if path not in documents:documents[path]=read_json(path)
+    entry = documents[path][collection][index if collection=='materials' else int(index)]
     return BlobStore(path.parent / 'blobs').read(entry['sha256'])
 
 
@@ -85,8 +87,8 @@ def materials_from_manifest(manifest_path, manifest, trajectory):
             try:
                 raw = BlobStore(manifest_path.parent / 'blobs').read(entry['sha256'])
                 text, error = decode_material(entry['path'], raw)
-            except UnicodeDecodeError:
-                continue
+            except UnicodeDecodeError as failure:
+                text,error=None,str(failure)
             material = {'source': source, 'text': text, 'kind': 'file',
                         'path': entry['path'], 'sha256': entry['sha256']}
             if error is not None:
@@ -102,22 +104,23 @@ def materials_from_manifest(manifest_path, manifest, trajectory):
         for field in ('output', 'output_head', 'output_tail'):
             if field in expected:
                 materials.append({'source': str(expected_path) + '#/' + field,
-                                  'text': expected[field], 'kind': 'output', 'action_id': action_id})
+                                  'text': expected[field], 'kind': 'output', 'action_id': action_id,
+                                  'origin':'original'})
         output = (directory / 'output.bin').resolve()
-        try:
-            text = output.read_bytes().decode('utf-8')
-        except UnicodeDecodeError:
-            continue
-        materials.append({'source': str(output), 'text': text, 'kind': 'output', 'action_id': action_id})
+        replay_output={'source':str(output),'kind':'output','action_id':action_id,'origin':'replay'}
+        try:replay_output['text']=output.read_bytes().decode('utf-8')
+        except UnicodeDecodeError as failure:
+            replay_output.update(text=None,source_error=str(failure))
+        materials.append(replay_output)
     if trajectory is not None:
         graph_path=Path(manifest['trajectory'])
         for identity,entry in trajectory['materials'].items():
             if entry['kind'] not in {'stream','code_input'}:continue
             source=str(graph_path)+'#/materials/'+identity
             raw=BlobStore(graph_path.parent/'blobs').read(entry['sha256'])
-            try:text=raw.decode('utf-8')
-            except UnicodeDecodeError:continue
-            material={'source':source,'text':text,'kind':'output','action_id':None}
+            material={'source':source,'kind':'output','action_id':None,'origin':'replay'}
+            try:material['text']=raw.decode('utf-8')
+            except UnicodeDecodeError as failure:material.update(text=None,source_error=str(failure))
             if entry['kind']=='code_input':material.update(kind='file',path=entry['path'],sha256=entry['sha256'])
             materials.append(material)
     return materials

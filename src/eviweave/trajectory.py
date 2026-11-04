@@ -195,7 +195,8 @@ class Trajectory:
                                 'returncode':result['returncode'],'timed_out':result['timed_out'],'ordinal':len(self.events)}
         output=(directory.parent/'output.bin').read_bytes();digest=self.blob(output)
         aggregate=self.material({'path':'<replay-output:'+action_id+'>','sha256':digest,'bytes':len(output),
-                                 'source':replay_output,'origin':'replay'},kind='action_output')
+                                 'source':replay_output,'origin':'replay'},action_id,kind='action_output')
+        self.edge(action_id,aggregate,'replay_observation')
         for event in channels['stdout']['write']:self.edge(self.events[event]['material'],aggregate,'stdout_contribution')
         for field in ('output','output_head','output_tail'):
             if field not in action['expected']:continue
@@ -328,6 +329,14 @@ class TrajectoryGraph:
                 event=self.events[node];context.add(event['action'])
                 if event['execution'] in self.events:context.add(event['execution'])
         context-=nodes;nodes.update(context)
+        if direction=='both':
+            # An action groups the recorded and replay observations. Keep that
+            # context without claiming one source-level call produced the
+            # entire command's output.
+            actions=[node for node in nodes if node in self.events and self.events[node]['kind']=='action']
+            for action in actions:
+                nodes.update(material for material,kind in self.after[action]
+                             if kind in {'recorded_observation','replay_observation'})
         return {'events':sorted(n for n in nodes if n in self.events),
                 'materials':sorted(n for n in nodes if n in self.materials),
                 'context_events':sorted(context),

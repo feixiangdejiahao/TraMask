@@ -24,15 +24,18 @@ def snapshot_paths(runtime, paths):
 
 
 def run_in_checkpoint(checkpoint, command, out, *, workdir='/app', env=None,
-                      build_commands=(), timeout=120, source_paths=()):
+                      build_commands=(), timeout=120, source_paths=(), files=()):
     out = Path(out).resolve()
     out.mkdir(parents=True)
     plan = {'checkpoint': checkpoint, 'command': command, 'workdir': workdir,
             'env': env or {}, 'build_commands': list(build_commands),
-            'timeout': timeout, 'source_paths': list(source_paths)}
+            'timeout': timeout, 'source_paths': list(source_paths),
+            'files': [{'source':str(source),'destination':destination} for source,destination in files]}
     write_json(out / 'plan.json', plan)
     result = {'status': 'completed', 'checkpoint': checkpoint, 'builds': [], 'execution': None}
     with open_container(checkpoint['image_id'], checkpoint['head'], out / 'container') as runtime:
+        for source, destination in files:
+            runtime.copy_to(source, destination)
         before = snapshot_paths(runtime, list(source_paths))
         for index, build in enumerate(build_commands):
             record = runtime.run(build, 'build_' + str(index), workdir=workdir, env=env, timeout=timeout)
