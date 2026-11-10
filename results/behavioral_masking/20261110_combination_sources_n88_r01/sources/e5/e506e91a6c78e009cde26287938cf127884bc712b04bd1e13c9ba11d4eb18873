@@ -1,0 +1,1712 @@
+diff --git a/docs/config_file.md b/docs/config_file.md
+index 5afd652..01b31f0 100644
+--- a/docs/config_file.md
++++ b/docs/config_file.md
+@@ -66,10 +66,12 @@ Chrome, Chrome Canary, Chromium, Firefox, IE, Opera, PhantomJS, Safari, Safari T
+     test_page:               [String]  string (or array of string) paths to the pages to use to run tests
+     growl:                   [Boolean] enables growl / native notifications (false)
+     bail_on_uncaught_error:  [Boolean] whether process should exit with error status when there are top level uncaught errors (via `window.onerror`) (true)
++    bail_on_test_failure:    [Boolean|Number] bail on the Nth test failure (true means 1) (false)
+ 
+ ### Config-level options:
+ 
+     custom_browser_socket_events    [Object]  an object containing keys corresponding to event names that point to handler functions, which are to be added to the browser socket
++    bail_on_test_failure         [Boolean|Number]  bail on the Nth test failure (true means 1) (false)
+     browser_disconnect_timeout   [Number]  timeout to error after disconnect in seconds (10s)
+     browser_reconnect_limit      [Number]  number of browser reconnects to allow (3)
+     browser_start_timeout        [Number]  timeout to error after browser start in seconds (30s)
+diff --git a/lib/app.js b/lib/app.js
+index f6af276..d3692de 100644
+--- a/lib/app.js
++++ b/lib/app.js
+@@ -35,6 +35,7 @@ module.exports = class App extends EventEmitter {
+     this.timeoutID = undefined;
+     this.testSuiteTimedOut = null;
+     this.testSuiteTimedOut = false;
++    this.abortRunnersCalled = false;
+ 
+     this.reportFileName = this.config.get('report_file');
+ 
+@@ -69,6 +70,9 @@ module.exports = class App extends EventEmitter {
+ 
+       return Bluebird.using(Reporter.with(this, this.stdoutStream, this.reportFileName), reporter => {
+         this.reporter = reporter;
++        this.reporter.on('test-failure', () => {
++          this.abortRunners();
++        });
+ 
+         return Bluebird.using(this.fileWatch(), () => {
+           return Bluebird.using(this.getServer(), () => {
+@@ -153,6 +157,8 @@ module.exports = class App extends EventEmitter {
+       return Bluebird.resolve();
+     }
+ 
++    this.resetBailState();
++
+     log.info('Running tests...');
+ 
+     this.reporter.onStart('testem', { launcherId: 0 });
+@@ -430,6 +436,12 @@ module.exports = class App extends EventEmitter {
+     if (!this.reporter) {
+       return new Error('Failed to initialize.');
+     }
++    if (typeof this.reporter.hasBailed === 'function' && this.reporter.hasBailed()) {
++      let bailReport = this.reporter.getBailReport();
++      let e = new Error(`Bailed out due to "${this.reporter.bailReason}" after ${bailReport.testsRanBeforeBail} tests.`);
++      e.hideFromReporter = true;
++      return e;
++    }
+     if (!this.reporter.hasPassed()) {
+       let e = new Error('Not all tests passed.');
+       e.hideFromReporter = true;
+@@ -441,6 +453,36 @@ module.exports = class App extends EventEmitter {
+     return null;
+   }
+ 
++  abortRunners() {
++    if (this.abortRunnersCalled) {
++      return Bluebird.resolve();
++    }
++    this.abortRunnersCalled = true;
++
++    if (this.server) {
++      this.server.broadcastAbort();
++    }
++
++    return Bluebird.all(this.runners.map(runner => {
++      if (typeof runner.abort === 'function') {
++        return runner.abort();
++      }
++      return Bluebird.resolve();
++    }));
++  }
++
++  resetBailState() {
++    this.abortRunnersCalled = false;
++
++    if (this.reporter && typeof this.reporter.resetBailState === 'function') {
++      this.reporter.resetBailState();
++    }
++
++    if (this.server) {
++      this.server.resetAbort();
++    }
++  }
++
+   stopRunners() {
+     return Bluebird.each(this.runners, runner => {
+       if (typeof runner.stop === 'function') {
+diff --git a/lib/config.js b/lib/config.js
+index a5513b7..21fb0e8 100644
+--- a/lib/config.js
++++ b/lib/config.js
+@@ -521,6 +521,7 @@ Config.prototype.defaults = {
+   parallel: 1,
+   reporter: 'tap',
+   bail_on_uncaught_error: true,
++  bail_on_test_failure: false,
+   browser_start_timeout: 30,
+   browser_disconnect_timeout: 10,
+   browser_reconnect_limit: 3,
+diff --git a/lib/reporters/dot_reporter.js b/lib/reporters/dot_reporter.js
+index fb89bbb..2f94c31 100644
+--- a/lib/reporters/dot_reporter.js
++++ b/lib/reporters/dot_reporter.js
+@@ -5,9 +5,10 @@ const printf = require('printf');
+ const displayutils = require('../utils/displayutils');
+ 
+ module.exports = class DotReporter {
+-  constructor(silent, out) {
++  constructor(silent, out, config, app) {
+     this.out = out || process.stdout;
+     this.silent = silent;
++    this.app = app;
+     this.stoppedOnError = null;
+     this.id = 1;
+     this.total = 0;
+@@ -39,6 +40,19 @@ module.exports = class DotReporter {
+     }
+   }
+ 
++  reset() {
++    this.stoppedOnError = null;
++    this.id = 1;
++    this.total = 0;
++    this.pass = 0;
++    this.skipped = 0;
++    this.todo = 0;
++    this.results = [];
++    this.startTime = new Date();
++    this.endTime = null;
++    this.currentLineChars = 0;
++  }
++
+   display(prefix, result) {
+     if (this.silent) {
+       return;
+diff --git a/lib/reporters/tap_reporter.js b/lib/reporters/tap_reporter.js
+index 9d4fac7..d38e236 100644
+--- a/lib/reporters/tap_reporter.js
++++ b/lib/reporters/tap_reporter.js
+@@ -3,9 +3,10 @@
+ const displayutils = require('../utils/displayutils');
+ 
+ module.exports = class TapReporter {
+-  constructor(silent, out, config) {
++  constructor(silent, out, config, app) {
+     this.out = out || process.stdout;
+     this.silent = silent;
++    this.app = app;
+     this.quietLogs = !!config.get('tap_quiet_logs');
+     this.failsOnly = !!config.get('tap_failed_tests_only');
+     this.strictSpecCompliance = !!config.get('tap_strict_spec_compliance');
+@@ -38,6 +39,18 @@ module.exports = class TapReporter {
+     }
+   }
+ 
++  reset() {
++    this.stoppedOnError = null;
++    this.id = 1;
++    this.total = 0;
++    this.pass = 0;
++    this.skipped = 0;
++    this.todo = 0;
++    this.results = [];
++    this.errors = [];
++    this.logs = [];
++  }
++
+   summaryDisplay() {
+     return displayutils.summaryDisplay.call(this);
+   }
+diff --git a/lib/reporters/teamcity_reporter.js b/lib/reporters/teamcity_reporter.js
+index 7d24cae..d5868ef 100644
+--- a/lib/reporters/teamcity_reporter.js
++++ b/lib/reporters/teamcity_reporter.js
+@@ -42,9 +42,10 @@ function runDurationAttribute(result) {
+ }
+ 
+ module.exports = class TeamcityReporter {
+-  constructor(silent, out) {
++  constructor(silent, out, config, app) {
+     this.out = out || process.stdout;
+     this.silent = silent;
++    this.app = app;
+     this.stoppedOnError = null;
+     this.id = 1;
+     this.total = 0;
+@@ -70,12 +71,23 @@ module.exports = class TeamcityReporter {
+     }
+   }
+ 
++  reset() {
++    this.stoppedOnError = null;
++    this.id = 1;
++    this.total = 0;
++    this.pass = 0;
++    this.skipped = 0;
++    this.startTime = new Date();
++    this.endTime = null;
++  }
++
+   finish() {
+     if (this.silent) {
+       return;
+     }
+     this.endTime = new Date();
+     this.out.write('\n\n');
++    this.displayBail();
+     this.out.write(teamcityLine('testSuiteFinished', {
+       name: 'testem.suite',
+       duration: Math.round((this.endTime - this.startTime)),
+@@ -83,6 +95,37 @@ module.exports = class TeamcityReporter {
+     this.out.write('\n\n');
+   }
+ 
++  displayBail() {
++    let app = this.app;
++    if (!app || !app.reporter || typeof app.reporter.hasBailed !== 'function' || !app.reporter.hasBailed()) {
++      return;
++    }
++
++    let report = app.reporter.getBailReport();
++    let bailReason = app.reporter.bailReason;
++    let failures = app.reporter.failures;
++
++    this.out.write(teamcityLine('message', {
++      text: `Bail out! ${bailReason}`,
++      status: 'ERROR'
++    }));
++    this.out.write(teamcityLine('buildStatisticValue', {
++      key: 'bailedTests',
++      value: failures
++    }));
++    this.out.write(teamcityLine('buildStatisticValue', {
++      key: 'testsBeforeBail',
++      value: report.testsRanBeforeBail
++    }));
++    this.out.write(teamcityLine('buildStatisticValue', {
++      key: 'suppressedAfterBail',
++      value: app.reporter.suppressedAfterBail
++    }));
++    this.out.write(teamcityLine('buildProblem', {
++      description: `Bail out! ${bailReason}`
++    }));
++  }
++
+   _display(prefix, result) {
+     if (this.silent) {
+       return;
+diff --git a/lib/reporters/xunit_reporter.js b/lib/reporters/xunit_reporter.js
+index b64d037..1ae66c2 100644
+--- a/lib/reporters/xunit_reporter.js
++++ b/lib/reporters/xunit_reporter.js
+@@ -4,8 +4,9 @@ var XmlDom = require('@xmldom/xmldom');
+ var indent = require('../utils/strutils').indent;
+ 
+ module.exports = class XUnitReporter {
+-  constructor(silent, out, config) {
++  constructor(silent, out, config, app) {
+     this.out = out || process.stdout;
++    this.app = app;
+     this.excludeStackTraces = config.get('xunit_exclude_stack');
+     this.silent = silent;
+     this.stoppedOnError = null;
+@@ -36,6 +37,18 @@ module.exports = class XUnitReporter {
+     }
+   }
+ 
++  reset() {
++    this.stoppedOnError = null;
++    this.id = 1;
++    this.total = 0;
++    this.pass = 0;
++    this.skipped = 0;
++    this.todo = 0;
++    this.results = [];
++    this.startTime = new Date();
++    this.endTime = null;
++  }
++
+   finish() {
+     if (this.silent) {
+       return;
+@@ -54,9 +67,38 @@ module.exports = class XUnitReporter {
+     rootNode.setAttribute('skipped', `${this.skipped}`);
+     rootNode.setAttribute('todo', `${this.todo}`);
+     rootNode.setAttribute('failures', `${this.failures()}`);
++    if (this.hasBailed()) {
++      rootNode.setAttribute('errors', `${this.errors()}`);
++    }
+     rootNode.setAttribute('timestamp', new Date().toString());
+     rootNode.setAttribute('time', `${this.duration() }`);
+ 
++    if (this.hasBailed()) {
++      let bailReport = this.app.reporter.getBailReport();
++      let bailReason = this.app.reporter.bailReason;
++      let failures = this.app.reporter.failures;
++
++      let errorNode = doc.createElement('error');
++      errorNode.setAttribute('message', `Bail out! ${bailReason}`);
++      rootNode.appendChild(errorNode);
++
++      let propertiesNode = doc.createElement('properties');
++      this.appendProperty(doc, propertiesNode, 'bailReason', bailReason);
++      this.appendProperty(doc, propertiesNode, 'testsBeforeBail', bailReport.testsRanBeforeBail);
++      this.appendProperty(doc, propertiesNode, 'suppressedAfterBail', this.app.reporter.suppressedAfterBail);
++      rootNode.appendChild(propertiesNode);
++
++      let systemOut = doc.createElement('system-out');
++      let summary = [
++        `Bail out! ${bailReason} (${failures} failures)`,
++        '# bailed',
++        `# ran before bail ${bailReport.testsRanBeforeBail}`,
++        `# suppressed ${this.app.reporter.suppressedAfterBail}`
++      ].join('\n');
++      systemOut.appendChild(doc.createCDATASection(summary));
++      rootNode.appendChild(systemOut);
++    }
++
+     for (var i = 0, len = this.results.length; i < len; i++) {
+       var testcaseNode = this.getTestResultNode(doc, this.results[i]);
+       rootNode.appendChild(testcaseNode);
+@@ -64,6 +106,17 @@ module.exports = class XUnitReporter {
+     return doc.documentElement.toString();
+   }
+ 
++  appendProperty(document, propertiesNode, name, value) {
++    var propertyNode = document.createElement('property');
++    propertyNode.setAttribute('name', name);
++    propertyNode.setAttribute('value', value);
++    propertiesNode.appendChild(propertyNode);
++  }
++
++  hasBailed() {
++    return this.app && this.app.reporter && typeof this.app.reporter.hasBailed === 'function' && this.app.reporter.hasBailed();
++  }
++
+   display() {
+     // As the output is XML, the XUnitReporter can only write its results after all
+     // tests have finished.
+@@ -127,6 +180,13 @@ module.exports = class XUnitReporter {
+     return this.total - this.pass - this.skipped - this.todo;
+   }
+ 
++  errors() {
++    if (this.hasBailed()) {
++      return 1;
++    }
++    return 0;
++  }
++
+   duration() {
+     const endTime = this.endTime ? this.endTime.getTime() : 0;
+     const startTime = this.startTime.getTime();
+diff --git a/lib/runners/browser_test_runner.js b/lib/runners/browser_test_runner.js
+index d940b32..fd4f27e 100644
+--- a/lib/runners/browser_test_runner.js
++++ b/lib/runners/browser_test_runner.js
+@@ -23,6 +23,7 @@ module.exports = class BrowserTestRunner {
+     this.pendingTimer = undefined;
+     this.onProcessExitTimer = undefined;
+     this.exitRequested = false;
++    this.aborted = false;
+   }
+ 
+   start(onFinish) {
+@@ -32,6 +33,7 @@ module.exports = class BrowserTestRunner {
+ 
+     this.finished = false;
+     this.pending = true;
++    this.aborted = false;
+ 
+     return new Bluebird.Promise(resolve => {
+       this.onFinish = resolve;
+@@ -51,6 +53,19 @@ module.exports = class BrowserTestRunner {
+     }).asCallback(onFinish);
+   }
+ 
++  abort() {
++    if (this.aborted) {
++      return Bluebird.resolve();
++    }
++    this.aborted = true;
++
++    if (this.socket) {
++      this.socket.emit('abort-tests');
++    }
++
++    return Bluebird.resolve();
++  }
++
+   stop(cb) {
+     if (this.socket) {
+       this.socket.emit('stop-run');
+@@ -157,6 +172,9 @@ module.exports = class BrowserTestRunner {
+   }
+ 
+   reportResults(err, code, browserProcess) {
++    if (this.aborted) {
++      return;
++    }
+     browserProcess = browserProcess || this.process;
+ 
+     let result = toResult(this.launcherId, err, code, browserProcess, this.config, this.currentTestContext);
+@@ -165,6 +183,9 @@ module.exports = class BrowserTestRunner {
+   }
+ 
+   onTestsStart(testData) {
++    if (this.aborted) {
++      return;
++    }
+     if (testData) {
+       Object.assign(testData, {
+         launcherId: this.launcherId,
+@@ -179,6 +200,9 @@ module.exports = class BrowserTestRunner {
+   }
+ 
+   onTestResult(result) {
++    if (this.aborted) {
++      return;
++    }
+     let errItems = (result.items || [])
+       .filter(item => !item.passed);
+ 
+@@ -207,6 +231,9 @@ module.exports = class BrowserTestRunner {
+   }
+ 
+   onTestMetadata(tag, metadata) {
++    if (this.aborted) {
++      return;
++    }
+     this.reporter.reportMetadata(tag, metadata);
+   }
+ 
+@@ -223,6 +250,9 @@ module.exports = class BrowserTestRunner {
+   }
+ 
+   onAllTestResults() {
++    if (this.aborted) {
++      return;
++    }
+     log.info(`Browser ${this.name()} finished all tests.`, this.singleRun);
+     this.onEnd();
+   }
+@@ -232,6 +262,9 @@ module.exports = class BrowserTestRunner {
+   }
+ 
+   onGlobalError(msg, url, line) {
++    if (this.aborted) {
++      return;
++    }
+     let message = `${msg} at ${url}, line ${line}\n`;
+     this.logs.push(
+       new LogEntry('error', message, this.currentTestContext)
+@@ -262,7 +295,7 @@ module.exports = class BrowserTestRunner {
+ 
+   onDisconnect() {
+     this.socket = null;
+-    if (this.finished) { return; }
++    if (this.finished || this.aborted) { return; }
+ 
+     this.pending = true;
+     this.disconnectCount += 1;
+@@ -282,7 +315,7 @@ module.exports = class BrowserTestRunner {
+     if (this.finished) { return; }
+ 
+     this.onProcessExitTimer = setTimeout(() => {
+-      if (this.finished) {
++      if (this.finished || this.aborted) {
+         return;
+       }
+ 
+@@ -298,7 +331,7 @@ module.exports = class BrowserTestRunner {
+     let browserProcess = this.process;
+     this.process = null;
+ 
+-    if (this.finished) { return; }
++    if (this.finished || this.aborted) { return; }
+ 
+     this.reportResults(err, 0, browserProcess);
+   }
+diff --git a/lib/runners/process_test_runner.js b/lib/runners/process_test_runner.js
+index 3fea836..3db55cb 100644
+--- a/lib/runners/process_test_runner.js
++++ b/lib/runners/process_test_runner.js
+@@ -9,11 +9,13 @@ class ProcessTestRunner {
+     this.reporter = reporter;
+     this.launcherId = this.launcher.id;
+     this.finished = false;
++    this.aborted = false;
+   }
+ 
+   start(onFinish) {
+     this.onStart();
+     this.finished = false;
++    this.aborted = false;
+ 
+     return new Bluebird.Promise((resolve, reject) => {
+       this.onFinish = resolve;
+@@ -25,6 +27,22 @@ class ProcessTestRunner {
+     }).asCallback(onFinish);
+   }
+ 
++  abort() {
++    if (this.aborted) {
++      return Bluebird.resolve();
++    }
++    this.aborted = true;
++
++    if (this.process) {
++      let killPromise = this.process.kill();
++      this.finish();
++      return killPromise;
++    }
++
++    this.finish();
++    return Bluebird.resolve();
++  }
++
+   exit() {
+     if (!this.process) {
+       return Bluebird.resolve();
+@@ -42,6 +60,10 @@ class ProcessTestRunner {
+   }
+ 
+   onProcessError(err, stdout, stderr) {
++    if (this.aborted) {
++      this.finish(null, 0, stdout, stderr);
++      return;
++    }
+     this.lastErr = err;
+     this.lastStderr = stderr;
+     this.finish(err, 0, stdout, stderr);
+@@ -67,8 +89,10 @@ class ProcessTestRunner {
+     var runnerProcess = this.process;
+     this.process = null;
+ 
+-    var result = toResult(this.launcherId, err, code, runnerProcess);
+-    this.reporter.report(this.launcher.name, result);
++    if (!this.aborted) {
++      var result = toResult(this.launcherId, err, code, runnerProcess);
++      this.reporter.report(this.launcher.name, result);
++    }
+     this.onEnd();
+ 
+     this.onFinish();
+diff --git a/lib/runners/tap_process_test_runner.js b/lib/runners/tap_process_test_runner.js
+index 9eb0318..9aabb13 100644
+--- a/lib/runners/tap_process_test_runner.js
++++ b/lib/runners/tap_process_test_runner.js
+@@ -12,12 +12,14 @@ class TapProcessTestRunner {
+     this.reporter = reporter;
+     this.launcherId = this.launcher.id;
+     this.finished = false;
++    this.aborted = false;
+     log.info(this.launcher.name);
+   }
+ 
+   start(onFinish) {
+     this.onStart();
+     this.finished = false;
++    this.aborted = false;
+ 
+     this.tapConsumer = new TapConsumer();
+     this.tapConsumer.on('test-result', this.onTestResult.bind(this));
+@@ -33,6 +35,22 @@ class TapProcessTestRunner {
+     }).asCallback(onFinish);
+   }
+ 
++  abort() {
++    if (this.aborted) {
++      return Bluebird.resolve();
++    }
++    this.aborted = true;
++
++    if (this.process) {
++      let killPromise = this.process.kill();
++      this.wrapUp();
++      return killPromise;
++    }
++
++    this.wrapUp();
++    return Bluebird.resolve();
++  }
++
+   exit() {
+     if (!this.process) {
+       return Bluebird.resolve();
+@@ -42,6 +60,9 @@ class TapProcessTestRunner {
+   }
+ 
+   onTestResult(test) {
++    if (this.aborted) {
++      return;
++    }
+     test.launcherId = this.launcherId;
+     this.reporter.report(this.launcher.name, test);
+   }
+@@ -67,6 +88,10 @@ class TapProcessTestRunner {
+   }
+ 
+   onProcessError(err) {
++    if (this.aborted) {
++      this.wrapUp();
++      return;
++    }
+     var result = toResult(this.launcherId, err, 0, this.process);
+     this.reporter.report(this.launcher.name, result);
+     this.wrapUp();
+diff --git a/lib/server/index.js b/lib/server/index.js
+index fd914e4..bc8c080 100644
+--- a/lib/server/index.js
++++ b/lib/server/index.js
+@@ -35,6 +35,7 @@ class Server extends EventEmitter {
+     // Workaround https://github.com/joyent/node/issues/9066
+     this.sockets = {};
+     this.nextSocketId = 0;
++    this.abortBroadcast = false;
+   }
+ 
+   start(callback) {
+@@ -66,6 +67,21 @@ class Server extends EventEmitter {
+     }).asCallback(callback);
+   }
+ 
++  broadcastAbort() {
++    if (this.abortBroadcast) {
++      return;
++    }
++    this.abortBroadcast = true;
++
++    if (this.io) {
++      this.io.emit('abort-tests');
++    }
++  }
++
++  resetAbort() {
++    this.abortBroadcast = false;
++  }
++
+   stop(callback) {
+     if (this.server && !this.stopped) {
+       this.stopped = true;
+diff --git a/lib/utils/displayutils.js b/lib/utils/displayutils.js
+index 6c4703f..74ad274 100644
+--- a/lib/utils/displayutils.js
++++ b/lib/utils/displayutils.js
+@@ -98,6 +98,24 @@ function resultString(id, prefix, result, quietLogs, strictSpecCompliance, logPr
+ 
+ exports.resultString = resultString;
+ 
++function bailLines() {
++  let app = this.app;
++  if (!app || !app.reporter || typeof app.reporter.hasBailed !== 'function' || !app.reporter.hasBailed()) {
++    return [];
++  }
++
++  let report = app.reporter.getBailReport();
++  let lines = [
++    `Bail out! ${app.reporter.bailReason} (${app.reporter.failures} failures)`,
++    '# bailed',
++    `# ran before bail ${report.testsRanBeforeBail}`,
++    `# suppressed ${app.reporter.suppressedAfterBail}`
++  ];
++  return lines;
++}
++
++exports.bailLines = bailLines;
++
+ function summaryDisplay() {
+   let lines = [
+     '1..' + this.total,
+@@ -108,6 +126,8 @@ function summaryDisplay() {
+     '# fail  ' + (this.total - this.pass - this.skipped - this.todo)
+   ];
+ 
++  lines = lines.concat(bailLines.call(this));
++
+   if (this.pass + this.skipped + this.todo === this.total) {
+     lines.push('');
+     lines.push('# ok');
+diff --git a/lib/utils/reporter.js b/lib/utils/reporter.js
+index e46d948..7ba9c30 100644
+--- a/lib/utils/reporter.js
++++ b/lib/utils/reporter.js
+@@ -1,6 +1,7 @@
+ 'use strict';
+ 
+ const Bluebird = require('bluebird');
++const EventEmitter = require('events').EventEmitter;
+ const log = require('npmlog');
+ 
+ const reporters = require('../reporters');
+@@ -31,19 +32,31 @@ function setupReporter(name, out, config, app) {
+ }
+ 
+ 
+-class Reporter {
++class Reporter extends EventEmitter {
+   constructor(app, stdout, path) {
++    super();
+     this.total = 0;
+     this.passed = 0;
+     this.skipped = 0;
+     this.todo = 0;
+ 
++    this._bailed = false;
++    this.bailReason = null;
++    this.bailLauncher = null;
++    this.failures = 0;
++    this.failuresByLauncher = {};
++    this.failedTests = [];
++    this.testsRanBeforeBail = 0;
++    this.suppressedAfterBail = 0;
++
+     if (path) {
+       this.reportFile = new ReportFile(path);
+     }
+ 
+     let config = app.config;
+ 
++    this.bailOnTestFailure = this.parseBailOnTestFailure(config);
++
+     if (path && config.get('xunit_intermediate_output') && config.get('reporter') === 'xunit') {
+       this.reporters = [
+         setupReporter('tap', stdout, config, app),
+@@ -67,6 +80,25 @@ class Reporter {
+     }
+   }
+ 
++  parseBailOnTestFailure(config) {
++    let value = config.get('bail_on_test_failure');
++
++    if (value === false || value === undefined || value === null) {
++      return 0;
++    }
++
++    if (value === true) {
++      return 1;
++    }
++
++    if (typeof value === 'number' && Number.isInteger(value) && value >= 1) {
++      return value;
++    }
++
++    log.warn('bail_on_test_failure', `Invalid value ${JSON.stringify(value)}. Defaulting to false.`);
++    return 0;
++  }
++
+   testStarted(name, data) {
+     this.reporters.forEach(reporter => {
+       if (reporter.testStarted) {
+@@ -88,9 +120,46 @@ class Reporter {
+   }
+ 
+   hasPassed() {
++    if (this.hasBailed()) {
++      return false;
++    }
+     return this.total <= ((this.passed || 0) + (this.skipped || 0) + (this.todo || 0));
+   }
+ 
++  hasBailed() {
++    return this._bailed;
++  }
++
++  isBailFailure(result) {
++    return !result.passed && !result.skipped && !result.todo;
++  }
++
++  getBailReport() {
++    return {
++      testsRanBeforeBail: this.testsRanBeforeBail,
++      bailLauncher: this.bailLauncher,
++      failuresByLauncher: this.failuresByLauncher,
++      failedTests: this.failedTests
++    };
++  }
++
++  resetBailState() {
++    this._bailed = false;
++    this.bailReason = null;
++    this.bailLauncher = null;
++    this.failures = 0;
++    this.failuresByLauncher = {};
++    this.failedTests = [];
++    this.testsRanBeforeBail = 0;
++    this.suppressedAfterBail = 0;
++
++    this.reporters.forEach(reporter => {
++      if (typeof reporter.reset === 'function') {
++        reporter.reset();
++      }
++    });
++  }
++
+   report(name, result) {
+     this.total++;
+     if (result.skipped) {
+@@ -101,9 +170,31 @@ class Reporter {
+       this.todo++;
+     }
+ 
++    if (this._bailed) {
++      this.suppressedAfterBail++;
++      return;
++    }
++
++    let failure = this.isBailFailure(result);
++    if (failure) {
++      this.failures++;
++      this.failuresByLauncher[name] = (this.failuresByLauncher[name] || 0) + 1;
++      if (result.name) {
++        this.failedTests.push(result.name);
++      }
++    }
++
+     this.reporters.forEach(reporter => {
+       reporter.report(name, result);
+     });
++
++    if (failure && this.bailOnTestFailure > 0 && this.failures >= this.bailOnTestFailure) {
++      this.bailReason = result.name;
++      this.bailLauncher = name;
++      this.testsRanBeforeBail = this.total;
++      this._bailed = true;
++      this.emit('test-failure', name, result);
++    }
+   }
+ }
+ 
+diff --git a/public/testem/jasmine2_adapter.js b/public/testem/jasmine2_adapter.js
+index 59f45f7..a293fd5 100644
+--- a/public/testem/jasmine2_adapter.js
++++ b/public/testem/jasmine2_adapter.js
+@@ -7,7 +7,7 @@
+ 
+  */
+ 
+-/* globals emit, jasmine */
++/* globals emit, jasmine, Testem */
+ /* exported jasmine2Adapter */
+ 'use strict';
+ 
+@@ -20,14 +20,31 @@ function jasmine2Adapter() {
+     pending: 0,
+     tests: []
+   };
++  var allTestResultsSignaled = false;
++
++  function aborted() {
++    return typeof Testem !== 'undefined' && Testem.aborted;
++  }
++
++  function signalAllTestResults() {
++    if (!allTestResultsSignaled) {
++      allTestResultsSignaled = true;
++      emit('all-test-results');
++    }
++  }
+ 
+   function Jasmine2AdapterReporter() {
+ 
+     this.jasmineStarted = function() {
+-      emit('tests-start');
++      if (!aborted()) {
++        emit('tests-start');
++      }
+     };
+ 
+     this.specStarted = function(spec) {
++      if (aborted()) {
++        return;
++      }
+       var currentTest = {
+         name: spec.fullName
+       };
+@@ -35,6 +52,9 @@ function jasmine2Adapter() {
+     };
+ 
+     this.specDone = function(spec) {
++      if (aborted()) {
++        return;
++      }
+ 
+       var test = {
+         passed: 0,
+@@ -77,7 +97,11 @@ function jasmine2Adapter() {
+     };
+ 
+     this.jasmineDone = function() {
+-      emit('all-test-results');
++      if (aborted()) {
++        signalAllTestResults();
++      } else {
++        emit('all-test-results');
++      }
+     };
+ 
+   }
+diff --git a/public/testem/mocha_adapter.js b/public/testem/mocha_adapter.js
+index c816fd5..b2eb0c9 100644
+--- a/public/testem/mocha_adapter.js
++++ b/public/testem/mocha_adapter.js
+@@ -7,7 +7,7 @@ Testem`s adapter for Mocha. It works by monkey-patching `Runner.prototype.emit`.
+ 
+ */
+ 
+-/* globals mocha, emit, Mocha */
++/* globals mocha, emit, Mocha, Testem */
+ /* globals module */
+ /* exported mochaAdapter */
+ 'use strict';
+@@ -25,6 +25,7 @@ function mochaAdapter() {
+   var Runner;
+   var ended = false;
+   var waiting = 0;
++  var allTestResultsSignaled = false;
+ 
+   try {
+     Runner = mocha.Runner || Mocha.Runner;
+@@ -32,6 +33,17 @@ function mochaAdapter() {
+     console.error('Testem: failed to register adapter for mocha.');
+   }
+ 
++  function aborted() {
++    return typeof Testem !== 'undefined' && Testem.aborted;
++  }
++
++  function signalAllTestResults() {
++    if (!allTestResultsSignaled) {
++      allTestResultsSignaled = true;
++      emit('all-test-results');
++    }
++  }
++
+   function getFullName(test) {
+     var name = '';
+     while (test) {
+@@ -49,9 +61,13 @@ function mochaAdapter() {
+   Runner.prototype.emit = function(evt, test, err) {
+     var name = getFullName(test);
+     if (evt === 'start') {
+-      emit('tests-start', { name: name });
++      if (!aborted()) {
++        emit('tests-start', { name: name });
++      }
+     } else if (evt === 'end') {
+-      if (waiting === 0) {
++      if (aborted()) {
++        signalAllTestResults();
++      } else if (waiting === 0) {
+         emit('all-test-results');
+       }
+       ended = true;
+@@ -59,6 +75,12 @@ function mochaAdapter() {
+       waiting++;
+       _setTimeout(function() {
+         waiting--;
++        if (aborted()) {
++          if (ended && waiting === 0) {
++            signalAllTestResults();
++          }
++          return;
++        }
+         if (test.state === 'passed') {
+           testPass(test);
+         } else if (test.pending) {
+@@ -69,7 +91,9 @@ function mochaAdapter() {
+         }
+       }, 0);
+     } else if (evt === 'fail') {
+-      testFail(test, err);
++      if (!aborted()) {
++        testFail(test, err);
++      }
+     }
+ 
+     oEmit.apply(this, arguments);
+diff --git a/public/testem/qunit_adapter.js b/public/testem/qunit_adapter.js
+index bb4ab9b..0046236 100644
+--- a/public/testem/qunit_adapter.js
++++ b/public/testem/qunit_adapter.js
+@@ -14,7 +14,7 @@ Testem's QUnit adapter. Works by using QUnit's hooks:
+ 
+ */
+ 
+-/* globals QUnit, emit */
++/* globals QUnit, emit, Testem */
+ /* exported qunitAdapter */
+ 'use strict';
+ 
+@@ -30,6 +30,28 @@ function qunitAdapter() {
+   };
+   var currentTest;
+   var id = 1;
++  var allTestResultsSignaled = false;
++
++  function aborted() {
++    return typeof Testem !== 'undefined' && Testem.aborted;
++  }
++
++  function clearQUnitQueue() {
++    if (QUnit.config && QUnit.config.queue) {
++      QUnit.config.queue.length = 0;
++    }
++    if (QUnit.queue) {
++      QUnit.queue.length = 0;
++    }
++  }
++
++  function signalAllTestResults() {
++    if (!allTestResultsSignaled) {
++      allTestResultsSignaled = true;
++      clearQUnitQueue();
++      emit('all-test-results');
++    }
++  }
+ 
+   function lineNumber(e) {
+     return e.line || e.lineNumber;
+@@ -52,6 +74,9 @@ function qunitAdapter() {
+   }
+ 
+   QUnit.log(function(params, e) {
++    if (aborted() || !currentTest) {
++      return;
++    }
+     if (e) {
+       currentTest.items.push({
+         passed: params.result,
+@@ -81,6 +106,9 @@ function qunitAdapter() {
+ 
+   });
+   QUnit.testStart(function(params) {
++    if (aborted()) {
++      return;
++    }
+     currentTest = {
+       id: id++,
+       name: (params.module ? params.module + ': ' : '') + params.name,
+@@ -89,6 +117,9 @@ function qunitAdapter() {
+     emit('tests-start', currentTest);
+   });
+   QUnit.testDone(function(params) {
++    if (aborted()) {
++      return;
++    }
+     currentTest.failed = params.failed;
+     currentTest.passed = params.passed;
+     currentTest.skipped = params.skipped;
+@@ -112,6 +143,11 @@ function qunitAdapter() {
+     emit('test-result', currentTest);
+   });
+   QUnit.done(function(params) {
++    if (aborted()) {
++      clearQUnitQueue();
++      signalAllTestResults();
++      return;
++    }
+     results.runDuration = params.runtime;
+     emit('all-test-results');
+   });
+diff --git a/public/testem/testem_client.js b/public/testem/testem_client.js
+index 84d34a1..86f9271 100644
+--- a/public/testem/testem_client.js
++++ b/public/testem/testem_client.js
+@@ -123,6 +123,7 @@ if (typeof TestemConfig === 'undefined') {
+ var Testem = {
+   emitMessageQueue: [],
+   afterTestsQueue: [],
++  aborted: false,
+   console: {},
+ 
+   // The maximum depth beyond which decycle will truncate an emitted event
+@@ -142,7 +143,7 @@ var Testem = {
+     return match ? match[1] : null;
+   },
+   emitMessage: function() {
+-    if (this._noConnectionRequired) {
++    if (this._noConnectionRequired || this.aborted) {
+       return;
+     }
+     var args = new Array(arguments.length);
+@@ -264,6 +265,9 @@ var Testem = {
+         case 'stop-run':
+           self.emit('after-tests-complete');
+           break;
++        case 'abort-tests':
++          self.handleAbortTests();
++          break;
+         default:
+           if (type && type.indexOf('testem:') === 0) {
+             self.emit(type, message.data);
+@@ -304,6 +308,14 @@ var Testem = {
+       handlers.splice(j, 1);
+     }
+   },
++  handleAbortTests: function() {
++    this.aborted = true;
++    this.emitMessageQueue = [];
++    this.emit('abort-tests');
++    if (this.iframe) {
++      this.emitMessageToIframe(new Message(this, ['after-tests-complete']));
++    }
++  },
+   runAfterTests: function() {
+     if (Testem.afterTestsQueue.length) {
+       var afterTestsCallback = Testem.afterTestsQueue.shift();
+diff --git a/public/testem/testem_connection.js b/public/testem/testem_connection.js
+index 5bee5de..59bec92 100644
+--- a/public/testem/testem_connection.js
++++ b/public/testem/testem_connection.js
+@@ -197,6 +197,9 @@ function initSocket(id) {
+   socket.on('stop-run', function() {
+     sendMessageToParent('stop-run');
+   });
++  socket.on('abort-tests', function() {
++    sendMessageToParent('abort-tests');
++  });
+   socket.on('*', function(event) {
+     if (event.data && event.data[0].indexOf('testem:') === 0) {
+       var eventName = event.data[0];
+diff --git a/testem.js b/testem.js
+index c65f903..5c7f5a4 100755
+--- a/testem.js
++++ b/testem.js
+@@ -34,6 +34,7 @@ program
+   .option('-T, --timeout [sec]', 'timeout a browser after [sec] seconds', null)
+   .option('-P, --parallel [num]', 'number of browsers to run in parallel, defaults to 1', Number)
+   .option('-b, --bail_on_uncaught_error', 'Bail on any uncaught errors')
++  .option('--bail_on_test_failure [n]', 'Bail on the Nth test failure', parseBailOnTestFailure)
+   .option('-R, --reporter [reporter]', 'Test reporter to use [tap|dot|xunit|teamcity]')
+   .option('--cwd [path]', 'directory to use as root')
+   .option('--config_dir [path]', 'directory to use as root for resolving configs, if different than cwd')
+@@ -68,6 +69,20 @@ program.on('--help', () => {
+   console.log();
+ });
+ 
++function parseBailOnTestFailure(value) {
++  if (value === true || value === 'true') {
++    return true;
++  }
++  if (value === 'false') {
++    return false;
++  }
++  let parsed = parseInt(value, 10);
++  if (!isNaN(parsed)) {
++    return parsed;
++  }
++  return value;
++}
++
+ main();
+ function main() {
+   program.parse(process.argv);
+diff --git a/tests/app_tests.js b/tests/app_tests.js
+index 38d3f29..99485ca 100644
+--- a/tests/app_tests.js
++++ b/tests/app_tests.js
+@@ -332,4 +332,59 @@ describe('App', function() {
+       expect(tryAttachCalled).to.be.true();
+     });
+   });
++
++
++  describe('bail', function() {
++    beforeEach(function() {
++      config = new Config('ci', {});
++    });
++
++    it('getExitCode returns a bail-specific error', function() {
++      config.config.bail_on_test_failure = 1;
++      app = new App(config, function() {});
++      let stream = new (require('stream').PassThrough)();
++      let Reporter = require('../lib/utils/reporter');
++      app.reporter = new Reporter(app, stream);
++      app.reporter.reporters = [new FakeReporter()];
++      app.reporter.report('chrome', { name: 'it fails', passed: false });
++
++      let err = app.getExitCode();
++      expect(err).to.be.an.instanceof(Error);
++      expect(err.message).to.include('it fails');
++      expect(err.message).to.include('1');
++      expect(err.hideFromReporter).to.be.true();
++    });
++
++    it('abortRunners broadcasts and aborts all runners once', function() {
++      app = new App(config, function() {});
++      let broadcast = sandbox.spy();
++      app.server = { broadcastAbort: broadcast };
++      let runner1 = { abort: sandbox.spy(function() { return Bluebird.resolve(); }) };
++      let runner2 = { abort: sandbox.spy(function() { return Bluebird.resolve(); }) };
++      app.runners = [runner1, runner2];
++
++      return app.abortRunners().then(function() {
++        return app.abortRunners();
++      }).then(function() {
++        expect(broadcast).to.have.been.calledOnce();
++        expect(runner1.abort).to.have.been.calledOnce();
++        expect(runner2.abort).to.have.been.calledOnce();
++      });
++    });
++
++    it('resetBailState resets abort tracking and server broadcast state', function() {
++      app = new App(config, function() {});
++      let resetAbort = sandbox.spy();
++      app.server = { resetAbort: resetAbort };
++      app.abortRunnersCalled = true;
++      app.reporter = { resetBailState: sandbox.spy() };
++
++      app.resetBailState();
++
++      expect(app.abortRunnersCalled).to.be.false();
++      expect(resetAbort).to.have.been.calledOnce();
++      expect(app.reporter.resetBailState).to.have.been.calledOnce();
++    });
++  });
++
+ });
+diff --git a/tests/ci/reporter_tests.js b/tests/ci/reporter_tests.js
+index 220aaef..285f4de 100644
+--- a/tests/ci/reporter_tests.js
++++ b/tests/ci/reporter_tests.js
+@@ -1213,4 +1213,72 @@ describe('test reporters', function() {
+     });
+ 
+   });
++
++
++  describe('bail output', function() {
++    function makeApp(config) {
++      const app = {
++        config: config,
++        reporter: null,
++        on: function() {},
++        emit: function() {},
++        server: { resetAbort: function() {} }
++      };
++      return app;
++    }
++
++    function bailedReporter(ReporterClass, config) {
++      const stream = new PassThrough();
++      const app = makeApp(config);
++      const Reporter = require('../../lib/utils/reporter');
++      const reporter = new Reporter(app, stream);
++      app.reporter = reporter;
++      reporter.reporters = [new ReporterClass(false, stream, config, app)];
++      reporter.report('chrome', { name: 'pass one', passed: true });
++      reporter.report('chrome', { name: 'fail one', passed: false, error: { message: 'boom' } });
++      reporter.report('chrome', { name: 'late pass', passed: true });
++      reporter.finish();
++      return stream.read().toString();
++    }
++
++    it('tap writes a bail out and summary', function() {
++      const config = new Config('ci', { bail_on_test_failure: 1 });
++      let output = bailedReporter(TapReporter, config);
++      assert.match(output, /Bail out! fail one/);
++      assert.match(output, /# bailed/);
++      assert.match(output, /# ran before bail 2/);
++      assert.match(output, /# suppressed 1/);
++    });
++
++    it('dot writes a bail out and summary', function() {
++      const config = new Config('ci', { bail_on_test_failure: 1 });
++      let output = bailedReporter(DotReporter, config);
++      assert.match(output, /Bail out! fail one/);
++      assert.match(output, /# bailed/);
++      assert.match(output, /# ran before bail 2/);
++      assert.match(output, /# suppressed 1/);
++    });
++
++    it('teamcity writes bail messages and statistics', function() {
++      const config = new Config('ci', { bail_on_test_failure: 1 });
++      let output = bailedReporter(TeamcityReporter, config);
++      assert.match(output, /##teamcity\[message text='Bail out! fail one' status='ERROR'\]/);
++      assert.match(output, /##teamcity\[buildStatisticValue key='bailedTests' value='1'\]/);
++      assert.match(output, /##teamcity\[buildStatisticValue key='testsBeforeBail' value='2'\]/);
++      assert.match(output, /##teamcity\[buildStatisticValue key='suppressedAfterBail' value='1'\]/);
++      assert.match(output, /##teamcity\[buildProblem description='Bail out! fail one'\]/);
++    });
++
++    it('xunit adds bail error, errors attribute, properties, and system-out', function() {
++      const config = new Config('ci', { bail_on_test_failure: 1 });
++      let output = bailedReporter(XUnitReporter, config);
++      assert.match(output, /errors="1"/);
++      assert.match(output, /<error message="Bail out! fail one"\/>/);
++      assert.match(output, /<property name="bailReason" value="fail one"\/>/);
++      assert.match(output, /<property name="testsBeforeBail" value="2"\/>/);
++      assert.match(output, /<property name="suppressedAfterBail" value="1"\/>/);
++      assert.match(output, /<system-out><!\[CDATA\[Bail out! fail one/);
++    });
++  });
++
+ });
+diff --git a/tests/client_tests.js b/tests/client_tests.js
+index 1be2f26..7b102f3 100644
+--- a/tests/client_tests.js
++++ b/tests/client_tests.js
+@@ -107,4 +107,33 @@ describe('Testem Client', function() {
+     });
+     Testem.runAfterTests();
+   });
++
++
++  it('handleAbortTests sets aborted and blocks further emitMessage', function() {
++    Testem.aborted = false;
++    Testem._isIframeReady = true;
++    let messages = [];
++    Testem.iframe = {
++      contentWindow: {
++        postMessage: function() {}
++      }
++    };
++    Testem.emitMessageToIframe = function(message) {
++      messages.push(message.emitArgs[0]);
++    };
++    let abortedEvents = 0;
++    Testem.on('abort-tests', function() {
++      abortedEvents++;
++    });
++
++    Testem.handleAbortTests();
++
++    expect(Testem.aborted).to.be.true();
++    expect(abortedEvents).to.equal(1);
++    expect(messages).to.deep.equal(['after-tests-complete']);
++
++    Testem.emitMessage('test-result', { name: 'late' });
++    expect(messages).to.deep.equal(['after-tests-complete']);
++  });
++
+ });
+diff --git a/tests/config_tests.js b/tests/config_tests.js
+index 174cf88..bd3e7d6 100644
+--- a/tests/config_tests.js
++++ b/tests/config_tests.js
+@@ -677,3 +677,20 @@ describe('getTemplateData', function() {
+   });
+ 
+ });
++
++
++describe('bail_on_test_failure', function() {
++  it('defaults to false', function() {
++    let config = new Config('ci', {});
++    expect(config.get('bail_on_test_failure')).to.be.false();
++  });
++
++  it('allows true and positive integers', function() {
++    let config = new Config('ci', { bail_on_test_failure: true });
++    expect(config.get('bail_on_test_failure')).to.be.true();
++
++    config = new Config('ci', { bail_on_test_failure: 3 });
++    expect(config.get('bail_on_test_failure')).to.equal(3);
++  });
++});
++
+diff --git a/tests/mocha_adapter_tests.js b/tests/mocha_adapter_tests.js
+index c5e1e71..13151cd 100644
+--- a/tests/mocha_adapter_tests.js
++++ b/tests/mocha_adapter_tests.js
+@@ -361,4 +361,36 @@ describe('mochaAdapter', function() {
+       });
+     });
+   });
++
++
++  describe('when aborted', function() {
++    let abortedGlobals;
++
++    beforeEach(function() {
++      abortedGlobals = {};
++      replaceGlobals({ Testem: { aborted: true } }, abortedGlobals);
++      mochaAdapter();
++    });
++
++    afterEach(function() {
++      restoreGlobals(abortedGlobals);
++    });
++
++    it('suppresses events and signals all-test-results once', function() {
++      let runner = new Runner();
++      runner.emit('start', {}, null);
++      runner.emit('test end', { state: 'passed', title: 'x' }, null);
++
++      let deferred = _setTimeout.lastCall.args[0];
++      deferred();
++
++      runner.emit('end', {}, null);
++
++      expect(_emit).not.to.have.been.calledWith('tests-start');
++      expect(_emit).not.to.have.been.calledWith('test-result');
++      expect(_emit).to.have.been.calledWith('all-test-results');
++      expect(_emit).to.have.been.calledOnce();
++    });
++  });
++
+ });
+diff --git a/tests/runners/browser_test_runner_tests.js b/tests/runners/browser_test_runner_tests.js
+index 00b20be..4386d5e 100644
+--- a/tests/runners/browser_test_runner_tests.js
++++ b/tests/runners/browser_test_runner_tests.js
+@@ -528,4 +528,37 @@ describe('browser test runner', function() {
+       runner.finish();
+     });
+   });
++
++
++  describe('abort', function() {
++    let runner, reporter, socket, config;
++
++    beforeEach(function() {
++      reporter = new FakeReporter();
++      config = new Config('ci', { reporter: reporter });
++      let launcher = new Launcher('ci', { protocol: 'browser' }, config);
++      runner = new BrowserTestRunner(launcher, reporter, 1, true, config);
++      socket = new FakeSocket();
++      runner.socket = socket;
++    });
++
++    it('is idempotent and emits abort-tests via the socket', function() {
++      let emit = sinon.spy(socket, 'emit');
++      return Bluebird.all([runner.abort(), runner.abort()]).then(function() {
++        expect(emit).to.have.been.calledWith('abort-tests');
++        expect(emit).to.have.been.calledOnce();
++        expect(runner.aborted).to.be.true();
++      });
++    });
++
++    it('suppresses subsequent results and errors', function() {
++      runner.abort();
++      runner.onTestResult({ name: 'late', failed: 1 });
++      runner.onGlobalError('boom', 'url', 1);
++      runner.onProcessError(new Error('boom'));
++
++      expect(reporter.total).to.equal(0);
++    });
++  });
++
+ });
+diff --git a/tests/runners/process_test_runner_tests.js b/tests/runners/process_test_runner_tests.js
+index 47f0250..2c46ad2 100644
+--- a/tests/runners/process_test_runner_tests.js
++++ b/tests/runners/process_test_runner_tests.js
+@@ -147,4 +147,46 @@ describe('ProcessTestRunner', function() {
+       done();
+     });
+   });
++
++
++  describe('abort', function() {
++    let runner, reporter;
++
++    beforeEach(function() {
++      reporter = new FakeReporter();
++      let settings = { protocol: 'process' };
++      let config = new Config('ci', { reporter: reporter });
++      let launcher = new Launcher('proc', settings, config);
++      runner = new ProcessTestRunner(launcher, reporter);
++      runner.process = {
++        kill: function() { return Promise.resolve(); }
++      };
++      runner.onStart = function() {};
++      runner.onEnd = function() {};
++      runner.onFinish = function() {};
++    });
++
++    it('is idempotent and finishes without reporting results', function(done) {
++      let killCount = 0;
++      runner.process.kill = function() {
++        killCount++;
++        return Promise.resolve();
++      };
++      runner.abort().then(function() {
++        return runner.abort();
++      }).then(function() {
++        expect(killCount).to.equal(1);
++        expect(runner.finished).to.be.true();
++        expect(reporter.total).to.equal(0);
++        done();
++      }).catch(done);
++    });
++
++    it('suppresses process errors after abort', function() {
++      runner.abort();
++      runner.onProcessError(new Error('killed'));
++      expect(reporter.total).to.equal(0);
++    });
++  });
++
+ });
+diff --git a/tests/runners/tap_process_test_runner_tests.js b/tests/runners/tap_process_test_runner_tests.js
+index 5f9de54..d6f18b3 100644
+--- a/tests/runners/tap_process_test_runner_tests.js
++++ b/tests/runners/tap_process_test_runner_tests.js
+@@ -391,4 +391,47 @@ describe('tap process test runner', function() {
+       });
+     });
+   });
++
++
++  describe('abort', function() {
++    let runner, reporter;
++
++    beforeEach(function() {
++      reporter = new FakeReporter();
++      let settings = { protocol: 'tap' };
++      let config = new Config('ci', { reporter: reporter });
++      let launcher = new Launcher('tap-proc', settings, config);
++      runner = new TapProcessTestRunner(launcher, reporter);
++      runner.process = {
++        kill: function() { return Promise.resolve(); }
++      };
++      runner.onStart = function() {};
++      runner.onEnd = function() {};
++      runner.onFinish = function() {};
++    });
++
++    it('is idempotent and wraps up without reporting results', function(done) {
++      let killCount = 0;
++      runner.process.kill = function() {
++        killCount++;
++        return Promise.resolve();
++      };
++      runner.abort().then(function() {
++        return runner.abort();
++      }).then(function() {
++        expect(killCount).to.equal(1);
++        expect(runner.finished).to.be.true();
++        expect(reporter.total).to.equal(0);
++        done();
++      }).catch(done);
++    });
++
++    it('suppresses test results and process errors after abort', function() {
++      runner.abort();
++      runner.onTestResult({ name: 'late', failed: 1 });
++      runner.onProcessError(new Error('killed'));
++      expect(reporter.total).to.equal(0);
++    });
++  });
++
+ });
+diff --git a/tests/server_tests.js b/tests/server_tests.js
+index ea3e825..f9d0ce5 100644
+--- a/tests/server_tests.js
++++ b/tests/server_tests.js
+@@ -586,6 +586,33 @@ describe('Server', function() {
+       });
+     });
+   });
++
++  describe('broadcastAbort', function() {
++    it('is idempotent and can be reset', function() {
++      let server = new Server(new Config('ci', {}));
++      let emits = 0;
++      server.io = {
++        emit: function(evt) {
++          if (evt === 'abort-tests') {
++            emits++;
++          }
++        }
++      };
++      server.broadcastAbort();
++      server.broadcastAbort();
++      expect(emits).to.equal(1);
++      server.resetAbort();
++      server.broadcastAbort();
++      expect(emits).to.equal(2);
++    });
++
++    it('tolerates uninitialized io', function() {
++      let server = new Server(new Config('ci', {}));
++      expect(function() {
++        server.broadcastAbort();
++      }).to.not.throw();
++    });
++  });
+ });
+ 
+ function middleware(app) {
+diff --git a/tests/utils/reporter_tests.js b/tests/utils/reporter_tests.js
+index c76efa8..dcb83dc 100644
+--- a/tests/utils/reporter_tests.js
++++ b/tests/utils/reporter_tests.js
+@@ -1,6 +1,7 @@
+ 'use strict';
+ 
+ const Bluebird = require('bluebird');
++const log = require('npmlog');
+ const expect = require('chai').expect;
+ const sinon = require('sinon');
+ const tmp = require('tmp');
+@@ -379,4 +380,105 @@ describe('Reporter', function() {
+       expect(reporter.hasTests()).to.be.true();
+     });
+   });
++
++
++  describe('bail_on_test_failure', function() {
++    function bailApp(value) {
++      return {
++        config: {
++          get: function(key) {
++            switch (key) {
++              case 'reporter':
++                return new FakeReporter();
++              case 'bail_on_test_failure':
++                return value;
++            }
++          }
++        }
++      };
++    }
++
++    it('defaults to disabled when no value is provided', function() {
++      let reporter = new Reporter(mockApp(), stream);
++      expect(reporter.bailOnTestFailure).to.equal(0);
++      expect(reporter.hasBailed()).to.be.false();
++    });
++
++    it('treats true as a threshold of one', function() {
++      let reporter = new Reporter(bailApp(true), stream);
++      expect(reporter.bailOnTestFailure).to.equal(1);
++    });
++
++    it('treats a positive integer as the threshold', function() {
++      let reporter = new Reporter(bailApp(3), stream);
++      expect(reporter.bailOnTestFailure).to.equal(3);
++    });
++
++    [0, -1, 1.5, '2'].forEach(function(value) {
++      it('logs a warning and defaults to false for ' + JSON.stringify(value), function() {
++        sandbox.spy(log, 'warn');
++        let reporter = new Reporter(bailApp(value), stream);
++        expect(reporter.bailOnTestFailure).to.equal(0);
++        expect(log.warn).to.have.been.calledWith('bail_on_test_failure', sinon.match.any);
++      });
++    });
++
++    it('bails on the Nth non-skipped non-todo failure', function() {
++      let reporter = new Reporter(bailApp(2), stream);
++      let events = [];
++      reporter.on('test-failure', function(name, result) {
++        events.push({ name: name, result: result });
++      });
++
++      reporter.report('chrome', { name: 'pass', passed: true });
++      reporter.report('chrome', { name: 'skip', skipped: true });
++      reporter.report('chrome', { name: 'todo', passed: false, todo: true });
++      reporter.report('chrome', { name: 'fail one', passed: false });
++      expect(reporter.hasBailed()).to.be.false();
++
++      reporter.report('chrome', { name: 'fail two', passed: false });
++      expect(reporter.hasBailed()).to.be.true();
++      expect(reporter.bailReason).to.equal('fail two');
++      expect(events).to.have.length(1);
++      expect(events[0].name).to.equal('chrome');
++      expect(events[0].result.name).to.equal('fail two');
++    });
++
++    it('gates subsequent results from sub-reporters', function() {
++      let reporter = new Reporter(bailApp(1), stream);
++      let subReporter = reporter.reporters[0];
++      reporter.report('chrome', { name: 'fail', passed: false });
++      reporter.report('chrome', { name: 'late', passed: true });
++
++      expect(subReporter.results.map(function(r) { return r.result.name; }))
++        .to.deep.equal(['fail']);
++      expect(reporter.suppressedAfterBail).to.equal(1);
++    });
++
++    it('exposes bail state through getBailReport', function() {
++      let reporter = new Reporter(bailApp(1), stream);
++      reporter.report('chrome', { name: 'first fail', passed: false });
++      reporter.report('chrome', { name: 'second fail', passed: false });
++
++      let report = reporter.getBailReport();
++      expect(report.testsRanBeforeBail).to.equal(1);
++      expect(report.bailLauncher).to.equal('chrome');
++      expect(report.failuresByLauncher).to.deep.equal({ chrome: 1 });
++      expect(report.failedTests).to.deep.equal(['first fail']);
++    });
++
++    it('resetBailState clears all bail state', function() {
++      let reporter = new Reporter(bailApp(1), stream);
++      reporter.report('chrome', { name: 'fail', passed: false });
++      expect(reporter.hasBailed()).to.be.true();
++
++      reporter.resetBailState();
++      expect(reporter.hasBailed()).to.be.false();
++      expect(reporter.bailReason).to.be.null();
++      expect(reporter.getBailReport().bailLauncher).to.be.null();
++      expect(reporter.getBailReport().failuresByLauncher).to.deep.equal({});
++      expect(reporter.getBailReport().failedTests).to.deep.equal([]);
++    });
++  });
++
+ });

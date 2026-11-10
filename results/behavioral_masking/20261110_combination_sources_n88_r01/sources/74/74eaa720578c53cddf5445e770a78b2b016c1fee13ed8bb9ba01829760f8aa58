@@ -1,0 +1,267 @@
+// Package embedfs provides a read-only in-memory filesystem used to back
+// //go:embed directives in the interpreter.
+package embedfs
+
+import (
+	"errors"
+	"io"
+	"io/fs"
+	"path"
+	"sort"
+	"strings"
+	"time"
+)
+
+// FS is a read-only in-memory filesystem built from //go:embed directives.
+// It implements fs.FS, fs.ReadFileFS and fs.ReadDirFS.
+type FS struct {
+	files *fileMap
+}
+
+// fileMap holds the contents of the filesystem. It is kept behind a pointer
+// so that FS values remain comparable, like the standard embed.FS type.
+type fileMap struct {
+	files map[string][]byte
+}
+
+var (
+	_ fs.FS         = (*FS)(nil)
+	_ fs.ReadFileFS = (*FS)(nil)
+	_ fs.ReadDirFS  = (*FS)(nil)
+)
+
+// New returns a read-only filesystem containing the given files.
+// The keys of files are slash-separated paths relative to the filesystem root.
+func New(files map[string][]byte) FS {
+	return FS{files: &fileMap{files: files}}
+}
+
+// Open opens the named file or directory for reading.
+func (f FS) Open(name string) (fs.File, error) {
+	if name == "" {
+		name = "."
+	}
+	if !fs.ValidPath(name) && name != "." {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	name = path.Clean(name)
+	isDir, ok := f.lookup(name)
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	if isDir {
+		return &embedDir{name: name, entries: f.readDir(name)}, nil
+	}
+	return &embedFile{name: name, data: append([]byte(nil), f.files.files[name]...)}, nil
+}
+
+// ReadFile reads the named file and returns its contents. A fresh copy is
+// returned on every call.
+func (f FS) ReadFile(name string) ([]byte, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrInvalid}
+	}
+	name = path.Clean(name)
+	isDir, ok := f.lookup(name)
+	if !ok {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrNotExist}
+	}
+	if isDir {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: errors.New("is a directory")}
+	}
+	return append([]byte(nil), f.files.files[name]...), nil
+}
+
+// ReadDir reads the named directory and returns a list of directory entries
+// sorted by filename.
+func (f FS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name == "" {
+		name = "."
+	}
+	if !fs.ValidPath(name) && name != "." {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrInvalid}
+	}
+	name = path.Clean(name)
+	isDir, ok := f.lookup(name)
+	if !ok {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrNotExist}
+	}
+	if !isDir {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: errors.New("not a directory")}
+	}
+	return f.readDir(name), nil
+}
+
+func (f FS) lookup(name string) (isDir, ok bool) {
+	name = strings.TrimSuffix(name, "/")
+	if name == "." {
+		// The root directory always exists, even for a zero-value FS.
+		return true, true
+	}
+	if f.files == nil || f.files.files == nil {
+		return false, false
+	}
+	if _, ok := f.files.files[name]; ok {
+		return false, true
+	}
+	prefix := name + "/"
+	for p := range f.files.files {
+		if strings.HasPrefix(p, prefix) {
+			return true, true
+		}
+	}
+	return false, false
+}
+
+func (f FS) readDir(name string) []fs.DirEntry {
+	if f.files == nil || f.files.files == nil {
+		return nil
+	}
+	prefix := ""
+	if name != "." {
+		prefix = name + "/"
+	}
+	type entry struct {
+		base  string
+		isDir bool
+	}
+	m := map[string]entry{}
+	for p := range f.files.files {
+		if !strings.HasPrefix(p, prefix) {
+			continue
+		}
+		rest := p[len(prefix):]
+		if rest == "" {
+			continue
+		}
+		base, sub, _ := strings.Cut(rest, "/")
+		e, ok := m[base]
+		if !ok {
+			e = entry{base: base}
+		}
+		if sub != "" {
+			e.isDir = true
+		}
+		m[base] = e
+	}
+	names := make([]string, 0, len(m))
+	for base := range m {
+		names = append(names, base)
+	}
+	sort.Strings(names)
+	entries := make([]fs.DirEntry, len(names))
+	for i, base := range names {
+		e := m[base]
+		entries[i] = &embedDirEntry{name: e.base, isDir: e.isDir, size: 0}
+	}
+	return entries
+}
+
+type embedFile struct {
+	name   string
+	data   []byte
+	offset int64
+}
+
+func (f *embedFile) Close() error { return nil }
+
+func (f *embedFile) Read(p []byte) (int, error) {
+	if f.offset >= int64(len(f.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data[f.offset:])
+	f.offset += int64(n)
+	return n, nil
+}
+
+func (f *embedFile) Stat() (fs.FileInfo, error) {
+	return &embedFileInfo{name: f.name, size: int64(len(f.data))}, nil
+}
+
+func (f *embedFile) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		// offset unchanged
+	case io.SeekCurrent:
+		offset += f.offset
+	case io.SeekEnd:
+		offset += int64(len(f.data))
+	default:
+		return 0, &fs.PathError{Op: "seek", Path: f.name, Err: fs.ErrInvalid}
+	}
+	if offset < 0 || offset > int64(len(f.data)) {
+		return 0, &fs.PathError{Op: "seek", Path: f.name, Err: fs.ErrInvalid}
+	}
+	f.offset = offset
+	return offset, nil
+}
+
+type embedDir struct {
+	name    string
+	entries []fs.DirEntry
+	offset  int
+}
+
+func (d *embedDir) Close() error { return nil }
+
+func (d *embedDir) Read([]byte) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: d.name, Err: errors.New("is a directory")}
+}
+
+func (d *embedDir) Stat() (fs.FileInfo, error) {
+	return &embedFileInfo{name: d.name, isDir: true}, nil
+}
+
+func (d *embedDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	if n <= 0 {
+		d.offset = 0
+		res := make([]fs.DirEntry, len(d.entries))
+		copy(res, d.entries)
+		return res, nil
+	}
+	if d.offset >= len(d.entries) {
+		return nil, io.EOF
+	}
+	res := d.entries[d.offset:]
+	if n < len(res) {
+		res = res[:n]
+	}
+	d.offset += len(res)
+	return res, nil
+}
+
+type embedDirEntry struct {
+	name  string
+	isDir bool
+	size  int64
+}
+
+func (e *embedDirEntry) Name() string { return e.name }
+func (e *embedDirEntry) IsDir() bool  { return e.isDir }
+func (e *embedDirEntry) Type() fs.FileMode {
+	if e.isDir {
+		return fs.ModeDir
+	}
+	return 0
+}
+func (e *embedDirEntry) Info() (fs.FileInfo, error) {
+	return &embedFileInfo{name: e.name, isDir: e.isDir, size: e.size}, nil
+}
+
+type embedFileInfo struct {
+	name  string
+	isDir bool
+	size  int64
+}
+
+func (i *embedFileInfo) Name() string { return i.name }
+func (i *embedFileInfo) Size() int64  { return i.size }
+func (i *embedFileInfo) Mode() fs.FileMode {
+	if i.isDir {
+		return fs.ModeDir
+	}
+	return 0
+}
+func (i *embedFileInfo) ModTime() time.Time { return time.Time{} }
+func (i *embedFileInfo) IsDir() bool        { return i.isDir }
+func (i *embedFileInfo) Sys() interface{}   { return nil }

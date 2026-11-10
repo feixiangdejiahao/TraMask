@@ -1,0 +1,640 @@
+diff --git a/crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs b/crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs
+index 6130dae..84bef4b 100644
+--- a/crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs
++++ b/crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs
+@@ -1,16 +1,23 @@
+-use std::cell;
++use std::{cell, collections::HashSet};
+ 
+-use lightningcss::{selector::Component, visit_types, visitor::Visit};
++use lightningcss::{
++    printer::PrinterOptions,
++    selector::{Combinator, Component},
++    visit_types,
++    visitor::Visit,
++};
+ use oxvg_ast::{
+     element::Element,
+     get_attribute, has_attribute, remove_attribute, set_attribute,
+     visitor::{Context, Info, PrepareOutcome, Visitor},
+ };
+ use oxvg_collections::{
++    atom::Atom,
+     attribute::{path, presentation::LengthPercentage, uncategorised::Radius, AttrId},
+     element::ElementId,
+ };
+ use oxvg_path::{command::Data, convert, Path};
++use oxvg_serialize::ToValue as _;
+ #[cfg(feature = "serde")]
+ use serde::{Deserialize, Serialize};
+ 
+@@ -72,21 +79,23 @@ impl<'input, 'arena> Visitor<'input, 'arena> for ConvertShapeToPath {
+         context.query_has_stylesheet(document);
+         let mut state = State {
+             options: self,
+-            referenced_shapes: ReferencedShapes::empty(),
++            root: document.clone(),
++            protected: HashSet::new(),
++            fallback: ReferencedShapes::empty(),
+         };
+         for styles in &context.query_has_stylesheet_result {
+             styles.borrow_mut().0.visit(&mut state)?;
+         }
+-        if !state.referenced_shapes.contains(ReferencedShapes::Path) {
+-            state.start_with_context(document, context)?;
+-        }
++        state.start_with_context(document, context)?;
+         Ok(PrepareOutcome::skip)
+     }
+ }
+ 
+-struct State<'o> {
++struct State<'o, 'input, 'arena> {
+     options: &'o ConvertShapeToPath,
+-    referenced_shapes: ReferencedShapes,
++    root: Element<'input, 'arena>,
++    protected: HashSet<usize>,
++    fallback: ReferencedShapes,
+ }
+ 
+ bitflags! {
+@@ -102,7 +111,328 @@ bitflags! {
+     }
+ }
+ 
+-impl<'input> lightningcss::visitor::Visitor<'input> for State<'_> {
++fn shape_bit(name: &str) -> Option<ReferencedShapes> {
++    match name {
++        "rect" => Some(ReferencedShapes::Rect),
++        "line" => Some(ReferencedShapes::Line),
++        "polyline" => Some(ReferencedShapes::Polyline),
++        "polygon" => Some(ReferencedShapes::Polygon),
++        "circle" => Some(ReferencedShapes::Circle),
++        "ellipse" => Some(ReferencedShapes::Ellipse),
++        _ => None,
++    }
++}
++
++fn is_supported_component(component: &Component<'_>) -> bool {
++    matches!(
++        component,
++        Component::LocalName(_)
++            | Component::ExplicitUniversalType
++            | Component::ExplicitAnyNamespace
++            | Component::ExplicitNoNamespace
++            | Component::DefaultNamespace(_)
++            | Component::Namespace(..)
++            | Component::ID(_)
++            | Component::Class(_)
++            | Component::AttributeInNoNamespaceExists { .. }
++            | Component::AttributeInNoNamespace { .. }
++    )
++}
++
++#[derive(Clone, Copy)]
++enum TypeMode {
++    /// Match against the element's actual local-name.
++    Real,
++    /// Match the anchor slot as if the element were already a `path`.
++    AsPath,
++    /// Match other slots as they will be after the rewrite: `path` type
++    /// selectors are ignored (they may match once converted shapes become
++    /// paths), while other type selectors are enforced.
++    IgnorePath,
++}
++
++fn compound_matches<'input>(
++    element: &Element<'input, '_>,
++    compound: &[Component<'input>],
++    mode: TypeMode,
++) -> bool {
++    for component in compound {
++        match component {
++            Component::LocalName(name) => {
++                let selector_name = name.lower_name.as_ref();
++                let matches = match mode {
++                    TypeMode::Real => element.local_name().as_str() == selector_name,
++                    TypeMode::AsPath => selector_name == "path",
++                    TypeMode::IgnorePath => {
++                        selector_name == "path"
++                            || element.local_name().as_str() == selector_name
++                    }
++                };
++                if !matches {
++                    return false;
++                }
++            }
++            Component::ID(ident) => {
++                if get_attribute!(element, Id).is_none_or(|id| id.0.as_str() != ident.as_ref()) {
++                    return false;
++                }
++            }
++            Component::Class(ident) => {
++                if !element.has_class(ident.as_ref()) {
++                    return false;
++                }
++            }
++            Component::AttributeInNoNamespaceExists { local_name, .. } => {
++                let local_name: Atom<'_> = Atom::from(local_name.0.to_string());
++                if element.get_attribute_local(&local_name).is_none() {
++                    return false;
++                }
++            }
++            Component::AttributeInNoNamespace {
++                local_name,
++                operator,
++                value,
++                case_sensitivity,
++                ..
++            } => {
++                let attr_name: Atom<'_> = Atom::from(local_name.0.to_string());
++                let Some(attr) = element.get_attribute_local(&attr_name) else {
++                    return false;
++                };
++                let value_str = attr
++                    .value()
++                    .to_value_string(PrinterOptions::default())
++                    .unwrap_or_default();
++                if !operator.eval_str(
++                    &value_str,
++                    value,
++                    case_sensitivity.to_unconditional(false),
++                ) {
++                    return false;
++                }
++            }
++            // Universal selectors and namespace prefixes are ignored: changing a
++            // shape's local-name never affects whether those components match.
++            _ => {}
++        }
++    }
++    true
++}
++
++fn matches_slot<'input>(
++    element: &Element<'input, '_>,
++    compounds: &[Vec<Component<'input>>],
++    combinators: &[Combinator],
++    slot: usize,
++    anchor_mode: TypeMode,
++    other_mode: TypeMode,
++) -> bool {
++    if !compound_matches(element, &compounds[slot], anchor_mode) {
++        return false;
++    }
++    matches_right(element, compounds, combinators, slot, other_mode)
++        && matches_left(element, compounds, combinators, slot, other_mode)
++}
++
++fn matches_right<'input>(
++    element: &Element<'input, '_>,
++    compounds: &[Vec<Component<'input>>],
++    combinators: &[Combinator],
++    slot: usize,
++    other_mode: TypeMode,
++) -> bool {
++    if slot == 0 {
++        return true;
++    }
++    let next = slot - 1;
++    match combinators[slot - 1] {
++        Combinator::Child => element.children_iter().any(|child| {
++            compound_matches(&child, &compounds[next], other_mode)
++                && matches_right(&child, compounds, combinators, next, other_mode)
++        }),
++        Combinator::Descendant => element.breadth_first().any(|descendant| {
++            compound_matches(&descendant, &compounds[next], other_mode)
++                && matches_right(&descendant, compounds, combinators, next, other_mode)
++        }),
++        Combinator::NextSibling => element.next_element_sibling().is_some_and(|sibling| {
++            compound_matches(&sibling, &compounds[next], other_mode)
++                && matches_right(&sibling, compounds, combinators, next, other_mode)
++        }),
++        Combinator::LaterSibling => {
++            let mut sibling = element.next_element_sibling();
++            while let Some(current) = sibling {
++                if compound_matches(&current, &compounds[next], other_mode)
++                    && matches_right(&current, compounds, combinators, next, other_mode)
++                {
++                    return true;
++                }
++                sibling = current.next_element_sibling();
++            }
++            false
++        }
++        _ => false,
++    }
++}
++
++fn matches_left<'input>(
++    element: &Element<'input, '_>,
++    compounds: &[Vec<Component<'input>>],
++    combinators: &[Combinator],
++    slot: usize,
++    other_mode: TypeMode,
++) -> bool {
++    if slot + 1 == compounds.len() {
++        return true;
++    }
++    let next = slot + 1;
++    match combinators[slot] {
++        Combinator::Child => element.parent_element().is_some_and(|parent| {
++            compound_matches(&parent, &compounds[next], other_mode)
++                && matches_left(&parent, compounds, combinators, next, other_mode)
++        }),
++        Combinator::Descendant => {
++            let mut ancestor = element.parent_element();
++            while let Some(current) = ancestor {
++                if compound_matches(&current, &compounds[next], other_mode)
++                    && matches_left(&current, compounds, combinators, next, other_mode)
++                {
++                    return true;
++                }
++                ancestor = current.parent_element();
++            }
++            false
++        }
++        Combinator::NextSibling => element.previous_element_sibling().is_some_and(|sibling| {
++            compound_matches(&sibling, &compounds[next], other_mode)
++                && matches_left(&sibling, compounds, combinators, next, other_mode)
++        }),
++        Combinator::LaterSibling => {
++            let mut sibling = element.previous_element_sibling();
++            while let Some(current) = sibling {
++                if compound_matches(&current, &compounds[next], other_mode)
++                    && matches_left(&current, compounds, combinators, next, other_mode)
++                {
++                    return true;
++                }
++                sibling = current.previous_element_sibling();
++            }
++            false
++        }
++        _ => false,
++    }
++}
++
++fn elements_at_slot<'input, 'arena>(
++    root: &Element<'input, 'arena>,
++    compounds: &[Vec<Component<'input>>],
++    combinators: &[Combinator],
++    slot: usize,
++    anchor_mode: TypeMode,
++    other_mode: TypeMode,
++) -> Vec<Element<'input, 'arena>> {
++    root.breadth_first()
++        .filter(|element| {
++            matches_slot(
++                element,
++                compounds,
++                combinators,
++                slot,
++                anchor_mode,
++                other_mode,
++            )
++        })
++        .collect()
++}
++
++fn analyze_selector<'input>(
++    root: &Element<'input, '_>,
++    selector: &lightningcss::selector::Selector<'input>,
++    protected: &mut HashSet<usize>,
++    fallback: &mut ReferencedShapes,
++) {
++    let mut iter = selector.iter();
++    let mut compounds: Vec<Vec<Component<'input>>> = Vec::new();
++    let mut combinators: Vec<Combinator> = Vec::new();
++    loop {
++        compounds.push(iter.by_ref().cloned().collect());
++        match iter.next_sequence() {
++            Some(combinator) => combinators.push(combinator),
++            None => break,
++        }
++    }
++
++    let supported_combinator = |combinator: &Combinator| {
++        matches!(
++            combinator,
++            Combinator::Child
++                | Combinator::Descendant
++                | Combinator::NextSibling
++                | Combinator::LaterSibling
++        )
++    };
++    if !combinators.iter().all(supported_combinator)
++        || !compounds
++            .iter()
++            .all(|compound| compound.iter().all(is_supported_component))
++    {
++        for compound in &compounds {
++            for component in compound {
++                if let Component::LocalName(name) = component {
++                    if let Some(bit) = shape_bit(&name.lower_name) {
++                        fallback.insert(bit);
++                    }
++                    if name.lower_name.as_ref() == "path" {
++                        fallback.insert(ReferencedShapes::Path);
++                    }
++                }
++            }
++        }
++        return;
++    }
++
++    for (slot, compound) in compounds.iter().enumerate() {
++        for component in compound {
++            let Component::LocalName(name) = component else {
++                continue;
++            };
++            let lower = name.lower_name.as_ref();
++            if shape_bit(lower).is_some() {
++                // A currently-matching shape occupies this slot. Converting it
++                // would break the selector, so protect every such element.
++                for element in elements_at_slot(
++                    root,
++                    &compounds,
++                    &combinators,
++                    slot,
++                    TypeMode::Real,
++                    TypeMode::Real,
++                ) {
++                    if element.local_name().as_str() == lower {
++                        protected.insert(element.id());
++                    }
++                }
++            }
++            if lower == "path" {
++                // A shape would newly occupy this slot after being converted to
++                // a path, creating a match that did not exist before.
++                for element in elements_at_slot(
++                    root,
++                    &compounds,
++                    &combinators,
++                    slot,
++                    TypeMode::AsPath,
++                    TypeMode::IgnorePath,
++                ) {
++                    if shape_bit(element.local_name().as_str()).is_some() {
++                        protected.insert(element.id());
++                    }
++                }
++            }
++        }
++    }
++}
++
++impl<'input> lightningcss::visitor::Visitor<'input> for State<'_, 'input, '_> {
+     type Error = JobsError<'input>;
+ 
+     fn visit_types(&self) -> lightningcss::visitor::VisitTypes {
+@@ -113,32 +443,17 @@ impl<'input> lightningcss::visitor::Visitor<'input> for State<'_> {
+         &mut self,
+         selector: &mut lightningcss::selector::Selector<'input>,
+     ) -> Result<(), Self::Error> {
+-        let mut iter = selector.iter();
+-        loop {
+-            for token in &mut iter {
+-                let Component::LocalName(name) = token else {
+-                    continue;
+-                };
+-                match &*name.lower_name.0 {
+-                    "rect" => self.referenced_shapes.insert(ReferencedShapes::Rect),
+-                    "line" => self.referenced_shapes.insert(ReferencedShapes::Line),
+-                    "polyline" => self.referenced_shapes.insert(ReferencedShapes::Polyline),
+-                    "polygon" => self.referenced_shapes.insert(ReferencedShapes::Polygon),
+-                    "circle" => self.referenced_shapes.insert(ReferencedShapes::Circle),
+-                    "ellipse" => self.referenced_shapes.insert(ReferencedShapes::Ellipse),
+-                    "path" => self.referenced_shapes.insert(ReferencedShapes::Path),
+-                    _ => {}
+-                }
+-            }
+-            if iter.next_sequence().is_none() {
+-                break;
+-            }
+-        }
++        analyze_selector(
++            &self.root,
++            selector,
++            &mut self.protected,
++            &mut self.fallback,
++        );
+         Ok(())
+     }
+ }
+ 
+-impl<'input, 'arena> Visitor<'input, 'arena> for State<'_> {
++impl<'input, 'arena> Visitor<'input, 'arena> for State<'_, 'input, 'arena> {
+     type Error = JobsError<'input>;
+ 
+     fn element(
+@@ -154,32 +469,54 @@ impl<'input, 'arena> Visitor<'input, 'arena> for State<'_> {
+             ..convert::Options::default()
+         };
+         let convert_arcs = options.convert_arcs;
++        let protected = self.protected.contains(&element.id());
++        let blocked = self.fallback.contains(ReferencedShapes::Path);
+ 
+         match name {
+-            ElementId::Rect if !self.referenced_shapes.contains(ReferencedShapes::Rect) => {
++            ElementId::Rect
++                if !blocked
++                    && !self.fallback.contains(ReferencedShapes::Rect)
++                    && !protected =>
++            {
+                 ConvertShapeToPath::rect_to_path(element, path_options, context.info);
+             }
+-            ElementId::Line if !self.referenced_shapes.contains(ReferencedShapes::Line) => {
++            ElementId::Line
++                if !blocked
++                    && !self.fallback.contains(ReferencedShapes::Line)
++                    && !protected =>
++            {
+                 ConvertShapeToPath::line_to_path(element, path_options, context.info);
+             }
+-            ElementId::Polyline if !self.referenced_shapes.contains(ReferencedShapes::Polyline) => {
++            ElementId::Polyline
++                if !blocked
++                    && !self.fallback.contains(ReferencedShapes::Polyline)
++                    && !protected =>
++            {
+                 ConvertShapeToPath::poly_to_path(element, path_options, false, context.info);
+             }
+-            ElementId::Polygon if !self.referenced_shapes.contains(ReferencedShapes::Polygon) => {
++            ElementId::Polygon
++                if !blocked
++                    && !self.fallback.contains(ReferencedShapes::Polygon)
++                    && !protected =>
++            {
+                 ConvertShapeToPath::poly_to_path(element, path_options, true, context.info);
+             }
+             ElementId::Circle
+-                if convert_arcs && !self.referenced_shapes.contains(ReferencedShapes::Circle) =>
++                if convert_arcs
++                    && !blocked
++                    && !self.fallback.contains(ReferencedShapes::Circle)
++                    && !protected =>
+             {
+                 ConvertShapeToPath::circle_to_path(element, path_options, context.info);
+             }
+-
+             ElementId::Ellipse
+-                if convert_arcs && !self.referenced_shapes.contains(ReferencedShapes::Circle) =>
++                if convert_arcs
++                    && !blocked
++                    && !self.fallback.contains(ReferencedShapes::Ellipse)
++                    && !protected =>
+             {
+                 ConvertShapeToPath::ellipse_to_path(element, path_options, context.info);
+             }
+-
+             _ => {}
+         }
+         Ok(())
+@@ -497,5 +834,146 @@ fn convert_shape_to_path() -> anyhow::Result<()> {
+         ),
+     )?);
+ 
++
++    Ok(())
++}
++
++
++#[test]
++#[allow(clippy::too_many_lines)]
++fn preserve_structure_dependent_selector_matches() -> anyhow::Result<()> {
++    use crate::test_config;
++
++    // A structural selector only protects the specific relationship it matches;
++    // unrelated shapes in the same document are still optimised.
++    let out = test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++    <style>g > rect { fill: red }</style>
++    <g><rect width="10" height="10"/></g>
++    <rect width="30" height="30"/>
++</svg>"#
++        ),
++    )?;
++    assert!(out.contains(r#"<rect width="10" height="10"/>"#), "matched rect preserved: {out}");
++    assert!(out.contains(r#"<path d="M0 0H30V30H0Z"/>"#), "unrelated rect converted: {out}");
++
++    // A selector mentioning `path` only blocks shapes that would newly match it.
++    let out = test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++    <style>g > path { fill: blue }</style>
++    <g><rect width="10" height="10"/></g>
++    <rect width="30" height="30"/>
++</svg>"#
++        ),
++    )?;
++    assert!(out.contains(r#"<rect width="10" height="10"/>"#), "rect that would newly match preserved: {out}");
++    assert!(out.contains(r#"<path d="M0 0H30V30H0Z"/>"#), "unrelated rect converted (path selector): {out}");
++
++    // A simple type selector protects every matching shape.
++    let out = test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++    <style>rect { fill: red }</style>
++    <rect width="10" height="10"/>
++    <rect width="30" height="30"/>
++</svg>"#
++        ),
++    )?;
++    assert!(out.contains(r#"<rect width="10" height="10"/>"#), "all rects preserved for simple selector: {out}");
++    assert!(out.contains(r#"<rect width="30" height="30"/>"#), "all rects preserved for simple selector: {out}");
++
++    // Compound selectors still scope protection to elements matching the full relationship.
++    let out = test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++    <style>rect.foo { fill: red }</style>
++    <rect class="foo" width="10" height="10"/>
++    <rect width="30" height="30"/>
++</svg>"#
++        ),
++    )?;
++    assert!(out.contains(r#"<rect class="foo" width="10" height="10"/>"#), "matched compound preserved: {out}");
++    assert!(out.contains(r#"<path d="M0 0H30V30H0Z"/>"#), "unmatched rect converted (compound): {out}");
++
++    // A shape used as an anchor (ancestor) is protected too.
++    let out = test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++    <style>rect path { fill: red }</style>
++    <rect width="10" height="10"><path d="M0 0"/></rect>
++    <rect width="30" height="30"/>
++</svg>"#
++        ),
++    )?;
++    assert!(out.contains(r#"<rect width="10" height="10">"#), "anchor rect preserved: {out}");
++    assert!(out.contains(r#"<path d="M0 0H30V30H0Z"/>"#), "unrelated rect converted (anchor): {out}");
++
++    // Sibling relationships are taken into account.
++    let out = test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++    <style>rect + path { fill: red }</style>
++    <rect width="10" height="10"/><path d="M0 0"/>
++    <rect width="30" height="30"/>
++</svg>"#
++        ),
++    )?;
++    assert!(out.contains(r#"<rect width="10" height="10"/>"#), "sibling anchor rect preserved: {out}");
++    assert!(out.contains(r#"<path d="M0 0H30V30H0Z"/>"#), "unrelated rect converted (sibling): {out}");
++
++
++    // Different shape types are independent: a `circle` selector does not
++    // protect ellipses, and vice versa.
++    let out = test_config(
++        r#"{ "convertShapeToPath": { "convertArcs": true } }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++    <style>circle { fill: red }</style>
++    <circle cx="5" cy="5" r="5"/>
++    <ellipse cx="5" cy="5" rx="5" ry="5"/>
++</svg>"#
++        ),
++    )?;
++    assert!(out.contains(r#"<circle cx="5" cy="5" r="5"/>"#), "circle preserved: {out}");
++    assert!(out.contains("<path"), "unrelated ellipse converted: {out}");
++
++    // Selectors with unsupported components fall back to protecting every shape
++    // of the referenced type.
++    let out = test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++    <style>rect:hover { fill: red }</style>
++    <rect width="10" height="10"/>
++    <rect width="30" height="30"/>
++</svg>"#
++        ),
++    )?;
++    assert!(out.contains(r#"<rect width="10" height="10"/>"#), "fallback rect preserved: {out}");
++    assert!(out.contains(r#"<rect width="30" height="30"/>"#), "fallback rect preserved: {out}");
++
++    // Converting either sibling would let `path + path` newly match, so both
++    // siblings are protected.
++    let out = test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++    <style>path + path { fill: red }</style>
++    <rect width="10" height="10"/>
++    <rect width="20" height="20"/>
++</svg>"#
++        ),
++    )?;
++    assert!(out.contains(r#"<rect width="10" height="10"/>"#), "first sibling rect preserved: {out}");
++    assert!(out.contains(r#"<rect width="20" height="20"/>"#), "second sibling rect preserved: {out}");
++
+     Ok(())
+ }

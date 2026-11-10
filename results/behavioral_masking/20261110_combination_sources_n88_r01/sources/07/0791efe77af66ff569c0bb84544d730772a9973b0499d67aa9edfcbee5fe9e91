@@ -1,0 +1,1391 @@
+diff --git a/crates/oxvg_optimiser/src/jobs/collapse_groups.rs b/crates/oxvg_optimiser/src/jobs/collapse_groups.rs
+index 0932c08..5170dc5 100644
+--- a/crates/oxvg_optimiser/src/jobs/collapse_groups.rs
++++ b/crates/oxvg_optimiser/src/jobs/collapse_groups.rs
+@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
+ #[cfg(feature = "wasm")]
+ use tsify::Tsify;
+ 
+-use crate::error::JobsError;
++use crate::{error::JobsError, utils::implicated::Implicated};
+ 
+ #[cfg_attr(feature = "wasm", derive(Tsify))]
+ #[cfg_attr(feature = "napi", napi(object))]
+@@ -45,15 +45,26 @@ impl<'input, 'arena> Visitor<'input, 'arena> for CollapseGroups {
+ 
+     fn prepare(
+         &self,
+-        _document: &Element<'input, 'arena>,
+-        _context: &mut Context<'input, 'arena, '_>,
++        document: &Element<'input, 'arena>,
++        context: &mut Context<'input, 'arena, '_>,
+     ) -> Result<PrepareOutcome, Self::Error> {
+-        Ok(if self.0 {
+-            PrepareOutcome::none
+-        } else {
+-            PrepareOutcome::skip
+-        })
++        if !self.0 {
++            return Ok(PrepareOutcome::skip);
++        }
++        context.query_has_stylesheet(document);
++        let implicated = Implicated::collect(document, &context.query_has_stylesheet_result)?;
++        let state = State { implicated };
++        state.start_with_context(document, context)?;
++        Ok(PrepareOutcome::skip)
+     }
++}
++
++struct State<'input, 'arena> {
++    implicated: Implicated<'input, 'arena>,
++}
++
++impl<'input, 'arena> Visitor<'input, 'arena> for State<'input, 'arena> {
++    type Error = JobsError<'input>;
+ 
+     fn exit_element(
+         &self,
+@@ -72,11 +83,38 @@ impl<'input, 'arena> Visitor<'input, 'arena> for CollapseGroups {
+         }
+ 
+         move_attributes_to_child(element);
+-        flatten_when_all_attributes_moved(element);
++        if !flatten_would_affect_implicated(element, &self.implicated) {
++            flatten_when_all_attributes_moved(element);
++        }
+         Ok(())
+     }
+ }
+ 
++fn flatten_would_affect_implicated<'input, 'arena>(
++    element: &Element<'input, 'arena>,
++    implicated: &Implicated<'input, 'arena>,
++) -> bool {
++    if implicated.contains(element) {
++        log::debug!("collapse_groups: not flattening: implicated group");
++        return true;
++    }
++    if element.children_iter().any(|child| implicated.contains(&child)) {
++        log::debug!("collapse_groups: not flattening: implicated child");
++        return true;
++    }
++    // Removing `element` shifts all following siblings, so an implicated
++    // following sibling may stop matching structural pseudo-classes.
++    let mut sibling = element.next_element_sibling();
++    while let Some(s) = sibling {
++        if implicated.contains(&s) {
++            log::debug!("collapse_groups: not flattening: implicated next sibling");
++            return true;
++        }
++        sibling = s.next_element_sibling();
++    }
++    false
++}
++
+ impl Default for CollapseGroups {
+     fn default() -> Self {
+         Self(true)
+@@ -495,3 +533,38 @@ fn collapse_groups() -> anyhow::Result<()> {
+ 
+     Ok(())
+ }
++
++
++#[test]
++fn collapse_groups_preserves_implicated_has() -> anyhow::Result<()> {
++    use crate::test_config;
++
++    insta::assert_snapshot!(test_config(
++        r#"{ "collapseGroups": true }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++  <style>g:has(> path) { fill: red }</style>
++  <g id="a"><path d="M1 1"/></g>
++  <g id="b"><rect width="10" height="10"/></g>
++</svg>"#
++        ),
++    )?);
++    Ok(())
++}
++
++#[test]
++fn collapse_groups_preserves_implicated_child() -> anyhow::Result<()> {
++    use crate::test_config;
++
++    insta::assert_snapshot!(test_config(
++        r#"{ "collapseGroups": true }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++  <style>svg > g > path { fill: red }</style>
++  <g id="a"><path d="M1 1"/></g>
++  <g id="b"><rect width="10" height="10"/></g>
++</svg>"#
++        ),
++    )?);
++    Ok(())
++}
+diff --git a/crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs b/crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs
+index 6130dae..7d2c277 100644
+--- a/crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs
++++ b/crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs
+@@ -1,6 +1,13 @@
+-use std::cell;
++use std::{
++    cell,
++    collections::{HashMap, HashSet},
++};
+ 
+-use lightningcss::{selector::Component, visit_types, visitor::Visit};
++use lightningcss::{
++    selector::{Component, Selector},
++    visit_types,
++    visitor::{Visit as _, Visitor as CssVisitor},
++};
+ use oxvg_ast::{
+     element::Element,
+     get_attribute, has_attribute, remove_attribute, set_attribute,
+@@ -14,7 +21,7 @@ use oxvg_path::{command::Data, convert, Path};
+ #[cfg(feature = "serde")]
+ use serde::{Deserialize, Serialize};
+ 
+-use crate::error::JobsError;
++use crate::{error::JobsError, utils::implicated::Implicated};
+ 
+ use super::convert_path_data::ConvertPrecision;
+ 
+@@ -70,75 +77,55 @@ impl<'input, 'arena> Visitor<'input, 'arena> for ConvertShapeToPath {
+         context: &mut Context<'input, 'arena, '_>,
+     ) -> Result<oxvg_ast::visitor::PrepareOutcome, Self::Error> {
+         context.query_has_stylesheet(document);
+-        let mut state = State {
+-            options: self,
+-            referenced_shapes: ReferencedShapes::empty(),
+-        };
+-        for styles in &context.query_has_stylesheet_result {
+-            styles.borrow_mut().0.visit(&mut state)?;
++        // A plain (non-structure-sensitive) `path` selector would match every
++        // shape that is converted, changing the document. Keep the previous
++        // conservative behaviour of skipping the job entirely in that case.
++        if has_plain_path_reference(&context.query_has_stylesheet_result)? {
++            return Ok(PrepareOutcome::skip);
+         }
+-        if !state.referenced_shapes.contains(ReferencedShapes::Path) {
+-            state.start_with_context(document, context)?;
++        let implicated = Implicated::collect(document, &context.query_has_stylesheet_result)?;
++        let mut plain_targets = HashMap::new();
++        for name in ["rect", "line", "polyline", "polygon", "circle", "ellipse"] {
++            let targets =
++                Implicated::collect_plain_targets(document, &context.query_has_stylesheet_result, name)?;
++            if !targets.is_empty() {
++                plain_targets.insert(name, targets);
++            }
+         }
++        let state = State {
++            options: self,
++            implicated,
++            plain_targets,
++        };
++        state.start_with_context(document, context)?;
+         Ok(PrepareOutcome::skip)
+     }
+ }
+ 
+-struct State<'o> {
++struct State<'o, 'input, 'arena> {
+     options: &'o ConvertShapeToPath,
+-    referenced_shapes: ReferencedShapes,
+-}
+-
+-bitflags! {
+-    #[derive(Debug)]
+-    pub struct ReferencedShapes: usize {
+-        const Rect = 1 << 0;
+-        const Line = 1 << 1;
+-        const Polyline = 1 << 2;
+-        const Polygon = 1 << 3;
+-        const Circle = 1 << 4;
+-        const Ellipse = 1 << 5;
+-        const Path = 1 << 6;
+-    }
++    implicated: Implicated<'input, 'arena>,
++    plain_targets: HashMap<&'static str, HashSet<oxvg_ast::element::HashableElement<'input, 'arena>>>,
+ }
+ 
+-impl<'input> lightningcss::visitor::Visitor<'input> for State<'_> {
+-    type Error = JobsError<'input>;
+-
+-    fn visit_types(&self) -> lightningcss::visitor::VisitTypes {
+-        visit_types!(SELECTORS)
+-    }
+-
+-    fn visit_selector(
+-        &mut self,
+-        selector: &mut lightningcss::selector::Selector<'input>,
+-    ) -> Result<(), Self::Error> {
+-        let mut iter = selector.iter();
+-        loop {
+-            for token in &mut iter {
+-                let Component::LocalName(name) = token else {
+-                    continue;
+-                };
+-                match &*name.lower_name.0 {
+-                    "rect" => self.referenced_shapes.insert(ReferencedShapes::Rect),
+-                    "line" => self.referenced_shapes.insert(ReferencedShapes::Line),
+-                    "polyline" => self.referenced_shapes.insert(ReferencedShapes::Polyline),
+-                    "polygon" => self.referenced_shapes.insert(ReferencedShapes::Polygon),
+-                    "circle" => self.referenced_shapes.insert(ReferencedShapes::Circle),
+-                    "ellipse" => self.referenced_shapes.insert(ReferencedShapes::Ellipse),
+-                    "path" => self.referenced_shapes.insert(ReferencedShapes::Path),
+-                    _ => {}
+-                }
+-            }
+-            if iter.next_sequence().is_none() {
+-                break;
+-            }
+-        }
+-        Ok(())
++impl<'o, 'input, 'arena> State<'o, 'input, 'arena> {
++    fn is_plain_protected(&self, element: &Element<'input, 'arena>) -> bool {
++        let name = match element.qual_name() {
++            ElementId::Rect => "rect",
++            ElementId::Line => "line",
++            ElementId::Polyline => "polyline",
++            ElementId::Polygon => "polygon",
++            ElementId::Circle => "circle",
++            ElementId::Ellipse => "ellipse",
++            _ => return false,
++        };
++        self.plain_targets
++            .get(name)
++            .is_some_and(|targets| targets.contains(&oxvg_ast::element::HashableElement::new(element.clone())))
+     }
+ }
+ 
+-impl<'input, 'arena> Visitor<'input, 'arena> for State<'_> {
++impl<'input, 'arena> Visitor<'input, 'arena> for State<'_, 'input, 'arena> {
+     type Error = JobsError<'input>;
+ 
+     fn element(
+@@ -156,26 +143,26 @@ impl<'input, 'arena> Visitor<'input, 'arena> for State<'_> {
+         let convert_arcs = options.convert_arcs;
+ 
+         match name {
+-            ElementId::Rect if !self.referenced_shapes.contains(ReferencedShapes::Rect) => {
++            ElementId::Rect if !self.is_plain_protected(element) && !self.implicated.contains(element) => {
+                 ConvertShapeToPath::rect_to_path(element, path_options, context.info);
+             }
+-            ElementId::Line if !self.referenced_shapes.contains(ReferencedShapes::Line) => {
++            ElementId::Line if !self.is_plain_protected(element) && !self.implicated.contains(element) => {
+                 ConvertShapeToPath::line_to_path(element, path_options, context.info);
+             }
+-            ElementId::Polyline if !self.referenced_shapes.contains(ReferencedShapes::Polyline) => {
++            ElementId::Polyline if !self.is_plain_protected(element) && !self.implicated.contains(element) => {
+                 ConvertShapeToPath::poly_to_path(element, path_options, false, context.info);
+             }
+-            ElementId::Polygon if !self.referenced_shapes.contains(ReferencedShapes::Polygon) => {
++            ElementId::Polygon if !self.is_plain_protected(element) && !self.implicated.contains(element) => {
+                 ConvertShapeToPath::poly_to_path(element, path_options, true, context.info);
+             }
+             ElementId::Circle
+-                if convert_arcs && !self.referenced_shapes.contains(ReferencedShapes::Circle) =>
++                if convert_arcs && !self.is_plain_protected(element) && !self.implicated.contains(element) =>
+             {
+                 ConvertShapeToPath::circle_to_path(element, path_options, context.info);
+             }
+ 
+             ElementId::Ellipse
+-                if convert_arcs && !self.referenced_shapes.contains(ReferencedShapes::Circle) =>
++                if convert_arcs && !self.is_plain_protected(element) && !self.implicated.contains(element) =>
+             {
+                 ConvertShapeToPath::ellipse_to_path(element, path_options, context.info);
+             }
+@@ -186,6 +173,62 @@ impl<'input, 'arena> Visitor<'input, 'arena> for State<'_> {
+     }
+ }
+ 
++fn has_plain_path_reference<'input>(
++    stylesheets: &[std::cell::RefCell<lightningcss::rules::CssRuleList<'input>>],
++) -> Result<bool, JobsError<'input>> {
++    let mut visitor = HasPlainPath { found: false };
++    for stylesheet in stylesheets {
++        stylesheet.borrow_mut().0.visit(&mut visitor)?;
++    }
++    Ok(visitor.found)
++}
++
++struct HasPlainPath {
++    found: bool,
++}
++
++impl<'input> CssVisitor<'input> for HasPlainPath {
++    type Error = JobsError<'input>;
++
++    fn visit_types(&self) -> lightningcss::visitor::VisitTypes {
++        visit_types!(SELECTORS)
++    }
++
++    fn visit_selector(&mut self, selector: &mut Selector<'input>) -> Result<(), Self::Error> {
++        if self.found {
++            return Ok(());
++        }
++        let mut has_path = false;
++        let mut structural = false;
++        let mut iter = selector.iter();
++        loop {
++            for component in &mut iter {
++                match component {
++                    Component::LocalName(name) if name.lower_name.0.as_ref() == "path" => {
++                        has_path = true;
++                    }
++                    Component::Nth(_)
++                    | Component::NthOf(_)
++                    | Component::Empty
++                    | Component::Root
++                    | Component::Has(_)
++                    | Component::Is(_)
++                    | Component::Where(_)
++                    | Component::Negation(_) => structural = true,
++                    _ => {}
++                }
++            }
++            if iter.next_sequence().is_some() {
++                structural = true;
++                continue;
++            }
++            break;
++        }
++        self.found = has_path && !structural;
++        Ok(())
++    }
++}
++
+ #[expect(clippy::needless_pass_by_value)]
+ fn lp_px(lp: cell::Ref<LengthPercentage>) -> Option<f64> {
+     use lightningcss::values::length::LengthPercentage;
+@@ -499,3 +542,59 @@ fn convert_shape_to_path() -> anyhow::Result<()> {
+ 
+     Ok(())
+ }
++
++
++
++
++#[test]
++fn convert_shape_to_path_preserves_implicated_target() -> anyhow::Result<()> {
++    use crate::test_config;
++
++    insta::assert_snapshot!(test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++  <style>path + rect { fill: red }</style>
++  <path d="M1 1h2"/>
++  <rect width="10" height="10"/>
++  <rect width="20" height="20"/>
++</svg>"#
++        ),
++    )?);
++    Ok(())
++}
++
++#[test]
++fn convert_shape_to_path_preserves_implicated_anchor() -> anyhow::Result<()> {
++    use crate::test_config;
++
++    insta::assert_snapshot!(test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++  <style>rect + path { stroke: red }</style>
++  <rect width="10" height="10"/>
++  <path d="M1 1h2"/>
++  <rect width="20" height="20"/>
++</svg>"#
++        ),
++    )?);
++    Ok(())
++}
++
++
++#[test]
++fn convert_shape_to_path_skips_plain_path_selector() -> anyhow::Result<()> {
++    use crate::test_config;
++
++    insta::assert_snapshot!(test_config(
++        r#"{ "convertShapeToPath": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++  <style>path { fill: red }</style>
++  <rect width="10" height="10"/>
++</svg>"#
++        ),
++    )?);
++    Ok(())
++}
+diff --git a/crates/oxvg_optimiser/src/jobs/merge_paths.rs b/crates/oxvg_optimiser/src/jobs/merge_paths.rs
+index 80e49f0..53a10d2 100644
+--- a/crates/oxvg_optimiser/src/jobs/merge_paths.rs
++++ b/crates/oxvg_optimiser/src/jobs/merge_paths.rs
+@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
+ #[cfg(feature = "wasm")]
+ use tsify::Tsify;
+ 
+-use crate::error::JobsError;
++use crate::{error::JobsError, utils::implicated::Implicated};
+ 
+ #[cfg_attr(feature = "wasm", derive(Tsify))]
+ #[cfg_attr(feature = "napi", napi(object))]
+@@ -67,8 +67,20 @@ impl<'input, 'arena> Visitor<'input, 'arena> for MergePaths {
+         context: &mut Context<'input, 'arena, '_>,
+     ) -> Result<PrepareOutcome, Self::Error> {
+         context.query_has_stylesheet(document);
+-        Ok(PrepareOutcome::none)
++        let implicated = Implicated::collect(document, &context.query_has_stylesheet_result)?;
++        let state = State { options: self, implicated };
++        state.start_with_context(document, context)?;
++        Ok(PrepareOutcome::skip)
+     }
++}
++
++struct State<'o, 'input, 'arena> {
++    options: &'o MergePaths,
++    implicated: Implicated<'input, 'arena>,
++}
++
++impl<'input, 'arena> Visitor<'input, 'arena> for State<'_, 'input, 'arena> {
++    type Error = JobsError<'input>;
+ 
+     #[allow(clippy::too_many_lines)]
+     fn element(
+@@ -189,7 +201,12 @@ impl<'input, 'arena> Visitor<'input, 'arena> for MergePaths {
+                 }) {
+                     prev_path_data.0.pop();
+                 }
+-                if self.force || !prev_path_data.intersects(&current_path_data) {
++                if self.options.force || !prev_path_data.intersects(&current_path_data) {
++                    if merge_would_affect_implicated(&prev_child, &self.implicated) {
++                        log::debug!("ending merge, implicated path");
++                        update_previous_path!(prev_child);
++                        continue;
++                    }
+                     log::debug!("merging, current doesn't intersect prev");
+                     prev_path_data.0.extend(current_path_data.0.clone());
+                     prev_child.remove();
+@@ -212,6 +229,25 @@ impl<'input, 'arena> Visitor<'input, 'arena> for MergePaths {
+     }
+ }
+ 
++fn merge_would_affect_implicated<'input, 'arena>(
++    element: &Element<'input, 'arena>,
++    implicated: &Implicated<'input, 'arena>,
++) -> bool {
++    if implicated.contains(element) {
++        log::debug!("merge_paths: not merging: implicated path");
++        return true;
++    }
++    let mut sibling = element.next_element_sibling();
++    while let Some(s) = sibling {
++        if implicated.contains(&s) {
++            log::debug!("merge_paths: not merging: implicated following sibling");
++            return true;
++        }
++        sibling = s.next_element_sibling();
++    }
++    false
++}
++
+ const fn default_force() -> bool {
+     false
+ }
+@@ -462,3 +498,22 @@ fn merge_paths() -> anyhow::Result<()> {
+ 
+     Ok(())
+ }
++
++
++#[test]
++fn merge_paths_preserves_implicated() -> anyhow::Result<()> {
++    use crate::test_config;
++
++    insta::assert_snapshot!(test_config(
++        r#"{ "mergePaths": {} }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++  <style>path + path { fill: red }</style>
++  <path d="M0 0h10"/>
++  <path d="M0 10h10"/>
++  <path d="M0 20h10"/>
++</svg>"#
++        ),
++    )?);
++    Ok(())
++}
+diff --git a/crates/oxvg_optimiser/src/jobs/remove_empty_containers.rs b/crates/oxvg_optimiser/src/jobs/remove_empty_containers.rs
+index f5460c2..f54ba6f 100644
+--- a/crates/oxvg_optimiser/src/jobs/remove_empty_containers.rs
++++ b/crates/oxvg_optimiser/src/jobs/remove_empty_containers.rs
+@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
+ #[cfg(feature = "wasm")]
+ use tsify::Tsify;
+ 
+-use crate::error::JobsError;
++use crate::{error::JobsError, utils::implicated::Implicated};
+ 
+ #[cfg_attr(feature = "wasm", derive(Tsify))]
+ #[cfg_attr(feature = "napi", napi(object))]
+@@ -40,14 +40,24 @@ impl<'input, 'arena> Visitor<'input, 'arena> for RemoveEmptyContainers {
+         document: &Element<'input, 'arena>,
+         context: &mut Context<'input, 'arena, '_>,
+     ) -> Result<PrepareOutcome, Self::Error> {
+-        Ok(if self.0 {
+-            context.query_has_stylesheet(document);
+-            context.query_has_script(document);
+-            PrepareOutcome::none
+-        } else {
+-            PrepareOutcome::skip
+-        })
++        if !self.0 {
++            return Ok(PrepareOutcome::skip);
++        }
++        context.query_has_stylesheet(document);
++        context.query_has_script(document);
++        let implicated = Implicated::collect(document, &context.query_has_stylesheet_result)?;
++        let state = State { implicated };
++        state.start_with_context(document, context)?;
++        Ok(PrepareOutcome::skip)
+     }
++}
++
++struct State<'input, 'arena> {
++    implicated: Implicated<'input, 'arena>,
++}
++
++impl<'input, 'arena> Visitor<'input, 'arena> for State<'input, 'arena> {
++    type Error = JobsError<'input>;
+ 
+     fn exit_element(
+         &self,
+@@ -83,12 +93,41 @@ impl<'input, 'arena> Visitor<'input, 'arena> for RemoveEmptyContainers {
+                 return Ok(());
+             }
+         }
++        if removal_would_affect_implicated(element, &self.implicated) {
++            return Ok(());
++        }
+ 
+         element.remove();
+         Ok(())
+     }
+ }
+ 
++fn removal_would_affect_implicated<'input, 'arena>(
++    element: &Element<'input, 'arena>,
++    implicated: &Implicated<'input, 'arena>,
++) -> bool {
++    if implicated.contains(element) {
++        log::debug!("remove_empty_containers: not removing: implicated element");
++        return true;
++    }
++    if element
++        .parent_element()
++        .is_some_and(|parent| implicated.contains(&parent))
++    {
++        log::debug!("remove_empty_containers: not removing: implicated parent");
++        return true;
++    }
++    let mut sibling = element.next_element_sibling();
++    while let Some(s) = sibling {
++        if implicated.contains(&s) {
++            log::debug!("remove_empty_containers: not removing: implicated following sibling");
++            return true;
++        }
++        sibling = s.next_element_sibling();
++    }
++    false
++}
++
+ impl Default for RemoveEmptyContainers {
+     fn default() -> Self {
+         Self(true)
+diff --git a/crates/oxvg_optimiser/src/jobs/reuse_paths.rs b/crates/oxvg_optimiser/src/jobs/reuse_paths.rs
+index 825bd39..86421d9 100644
+--- a/crates/oxvg_optimiser/src/jobs/reuse_paths.rs
++++ b/crates/oxvg_optimiser/src/jobs/reuse_paths.rs
+@@ -26,12 +26,13 @@ struct State<'input, 'arena> {
+     paths: RefCell<Vec<(Key<'input>, Vec<Element<'input, 'arena>>)>>,
+     defs: RefCell<Option<Element<'input, 'arena>>>,
+     hrefs: RefCell<HashSet<Url<'input>>>,
++    implicated: RefCell<Option<Implicated<'input, 'arena>>>,
+ }
+ 
+ #[cfg(feature = "wasm")]
+ use tsify::Tsify;
+ 
+-use crate::error::JobsError;
++use crate::{error::JobsError, utils::implicated::Implicated};
+ 
+ #[cfg_attr(feature = "wasm", derive(Tsify))]
+ #[cfg_attr(feature = "napi", napi(object))]
+@@ -74,6 +75,8 @@ impl<'input, 'arena> Visitor<'input, 'arena> for State<'input, 'arena> {
+         context: &mut Context<'input, 'arena, '_>,
+     ) -> Result<PrepareOutcome, Self::Error> {
+         context.query_has_stylesheet(document);
++        let implicated = Implicated::collect(document, &context.query_has_stylesheet_result)?;
++        self.implicated.replace(Some(implicated));
+         Ok(PrepareOutcome::none)
+     }
+ 
+@@ -228,6 +231,15 @@ impl<'input, 'arena> Visitor<'input, 'arena> for State<'input, 'arena> {
+ 
+ impl<'input, 'arena> State<'input, 'arena> {
+     fn add_path(&self, element: &Element<'input, 'arena>) {
++        if self
++            .implicated
++            .borrow()
++            .as_ref()
++            .is_some_and(|implicated| implicated.contains(element))
++        {
++            log::debug!("reuse_paths: not reusing implicated path");
++            return;
++        }
+         let Some(path::Path(path, _)) = get_attribute!(element, D).as_deref().cloned() else {
+             return;
+         };
+@@ -399,3 +411,21 @@ fn reuse_paths() -> anyhow::Result<()> {
+ 
+     Ok(())
+ }
++
++
++#[test]
++fn reuse_paths_preserves_implicated() -> anyhow::Result<()> {
++    use crate::test_config;
++
++    insta::assert_snapshot!(test_config(
++        r#"{ "reusePaths": true }"#,
++        Some(
++            r#"<svg xmlns="http://www.w3.org/2000/svg">
++  <style>path:nth-child(2) { fill: red }</style>
++  <path d="M0 0h10"/>
++  <path d="M0 0h10"/>
++</svg>"#
++        ),
++    )?);
++    Ok(())
++}
+diff --git a/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__collapse_groups__collapse_groups_preserves_implicated_child.snap b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__collapse_groups__collapse_groups_preserves_implicated_child.snap
+new file mode 100644
+index 0000000..0cfdcc5
+--- /dev/null
++++ b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__collapse_groups__collapse_groups_preserves_implicated_child.snap
+@@ -0,0 +1,13 @@
++---
++source: crates/oxvg_optimiser/src/jobs/collapse_groups.rs
++expression: "test_config(r#\"{ \"collapseGroups\": true }\"#,\nSome(r#\"<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <style>svg > g > path { fill: red }</style>\n  <g id=\"a\"><path d=\"M1 1\"/></g>\n  <g id=\"b\"><rect width=\"10\" height=\"10\"/></g>\n</svg>\"#),)?"
++---
++<svg xmlns="http://www.w3.org/2000/svg">
++    <style>
++        svg>g>path{fill:red}
++    </style>
++    <g>
++        <path d="M1 1" id="a"/>
++    </g>
++    <rect width="10" height="10" id="b"/>
++</svg>
+diff --git a/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__collapse_groups__collapse_groups_preserves_implicated_has.snap b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__collapse_groups__collapse_groups_preserves_implicated_has.snap
+new file mode 100644
+index 0000000..e78befc
+--- /dev/null
++++ b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__collapse_groups__collapse_groups_preserves_implicated_has.snap
+@@ -0,0 +1,13 @@
++---
++source: crates/oxvg_optimiser/src/jobs/collapse_groups.rs
++expression: "test_config(r#\"{ \"collapseGroups\": true }\"#,\nSome(r#\"<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <style>g:has(> path) { fill: red }</style>\n  <g id=\"a\"><path d=\"M1 1\"/></g>\n  <g id=\"b\"><rect width=\"10\" height=\"10\"/></g>\n</svg>\"#),)?"
++---
++<svg xmlns="http://www.w3.org/2000/svg">
++    <style>
++        g:has(>path){fill:red}
++    </style>
++    <g>
++        <path d="M1 1" id="a"/>
++    </g>
++    <rect width="10" height="10" id="b"/>
++</svg>
+diff --git a/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__convert_shape_to_path__convert_shape_to_path_preserves_implicated_anchor.snap b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__convert_shape_to_path__convert_shape_to_path_preserves_implicated_anchor.snap
+new file mode 100644
+index 0000000..891b09b
+--- /dev/null
++++ b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__convert_shape_to_path__convert_shape_to_path_preserves_implicated_anchor.snap
+@@ -0,0 +1,12 @@
++---
++source: crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs
++expression: "test_config(r#\"{ \"convertShapeToPath\": {} }\"#,\nSome(r#\"<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <style>rect + path { stroke: red }</style>\n  <rect width=\"10\" height=\"10\"/>\n  <path d=\"M1 1h2\"/>\n  <rect width=\"20\" height=\"20\"/>\n</svg>\"#),)?"
++---
++<svg xmlns="http://www.w3.org/2000/svg">
++    <style>
++        rect+path{stroke:red}
++    </style>
++    <rect width="10" height="10"/>
++    <path d="M1 1h2"/>
++    <path d="M0 0H20V20H0Z"/>
++</svg>
+diff --git a/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__convert_shape_to_path__convert_shape_to_path_preserves_implicated_target.snap b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__convert_shape_to_path__convert_shape_to_path_preserves_implicated_target.snap
+new file mode 100644
+index 0000000..25c796d
+--- /dev/null
++++ b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__convert_shape_to_path__convert_shape_to_path_preserves_implicated_target.snap
+@@ -0,0 +1,12 @@
++---
++source: crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs
++expression: "test_config(r#\"{ \"convertShapeToPath\": {} }\"#,\nSome(r#\"<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <style>path + rect { fill: red }</style>\n  <path d=\"M1 1h2\"/>\n  <rect width=\"10\" height=\"10\"/>\n  <rect width=\"20\" height=\"20\"/>\n</svg>\"#),)?"
++---
++<svg xmlns="http://www.w3.org/2000/svg">
++    <style>
++        path+rect{fill:red}
++    </style>
++    <path d="M1 1h2"/>
++    <rect width="10" height="10"/>
++    <path d="M0 0H20V20H0Z"/>
++</svg>
+diff --git a/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__convert_shape_to_path__convert_shape_to_path_skips_plain_path_selector.snap b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__convert_shape_to_path__convert_shape_to_path_skips_plain_path_selector.snap
+new file mode 100644
+index 0000000..af35a02
+--- /dev/null
++++ b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__convert_shape_to_path__convert_shape_to_path_skips_plain_path_selector.snap
+@@ -0,0 +1,10 @@
++---
++source: crates/oxvg_optimiser/src/jobs/convert_shape_to_path.rs
++expression: "test_config(r#\"{ \"convertShapeToPath\": {} }\"#,\nSome(r#\"<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <style>path { fill: red }</style>\n  <rect width=\"10\" height=\"10\"/>\n</svg>\"#),)?"
++---
++<svg xmlns="http://www.w3.org/2000/svg">
++    <style>
++        path{fill:red}
++    </style>
++    <rect width="10" height="10"/>
++</svg>
+diff --git a/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__merge_paths__merge_paths_preserves_implicated.snap b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__merge_paths__merge_paths_preserves_implicated.snap
+new file mode 100644
+index 0000000..b869837
+--- /dev/null
++++ b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__merge_paths__merge_paths_preserves_implicated.snap
+@@ -0,0 +1,12 @@
++---
++source: crates/oxvg_optimiser/src/jobs/merge_paths.rs
++expression: "test_config(r#\"{ \"mergePaths\": {} }\"#,\nSome(r#\"<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <style>path + path { fill: red }</style>\n  <path d=\"M0 0h10\"/>\n  <path d=\"M0 10h10\"/>\n  <path d=\"M0 20h10\"/>\n</svg>\"#),)?"
++---
++<svg xmlns="http://www.w3.org/2000/svg">
++    <style>
++        path+path{fill:red}
++    </style>
++    <path d="M0 0h10"/>
++    <path d="M0 10h10"/>
++    <path d="M0 20h10"/>
++</svg>
+diff --git a/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__reuse_paths__reuse_paths_preserves_implicated.snap b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__reuse_paths__reuse_paths_preserves_implicated.snap
+new file mode 100644
+index 0000000..43d3163
+--- /dev/null
++++ b/crates/oxvg_optimiser/src/jobs/snapshots/oxvg_optimiser__jobs__reuse_paths__reuse_paths_preserves_implicated.snap
+@@ -0,0 +1,12 @@
++---
++source: crates/oxvg_optimiser/src/jobs/reuse_paths.rs
++expression: "test_config(r#\"{ \"reusePaths\": true }\"#,\nSome(r#\"<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <style>path:nth-child(2) { fill: red }</style>\n  <path d=\"M0 0h10\"/>\n  <path d=\"M0 0h10\"/>\n</svg>\"#),)?"
++---
++<svg xmlns="http://www.w3.org/2000/svg">
++    <defs/>
++    <style>
++        path:nth-child(2){fill:red}
++    </style>
++    <path d="M0 0h10"/>
++    <path d="M0 0h10"/>
++</svg>
+diff --git a/crates/oxvg_optimiser/src/utils/implicated.rs b/crates/oxvg_optimiser/src/utils/implicated.rs
+new file mode 100644
+index 0000000..6c50f00
+--- /dev/null
++++ b/crates/oxvg_optimiser/src/utils/implicated.rs
+@@ -0,0 +1,575 @@
++//! Collects elements whose matching with stylesheet selectors depends on the
++//! document structure. Structure-changing rewrites must not touch these
++//! elements, otherwise selectors may stop matching (or start matching) where
++//! they previously did not.
++use std::{cell::RefCell, collections::HashSet};
++
++use lightningcss::{
++    printer::PrinterOptions,
++    rules::CssRuleList,
++    selector::{Combinator, Component, Selector},
++    visit_types,
++    visitor::{Visit, Visitor},
++};
++use oxvg_ast::element::{Element, HashableElement};
++use oxvg_collections::{attribute::AttrId, element::ElementId};
++use oxvg_serialize::ToValue as _;
++
++use crate::error::JobsError;
++
++/// A set of elements that are implicated by structure-sensitive stylesheet
++/// selectors.
++///
++/// An element is implicated by a selector when it is the selector's target, or
++/// when it is an anchor in the selector relationship (e.g. the `path` in
++/// `path + rect`, or the `g` in `g > rect`). The set is computed from the
++/// document before any rewrite so that a rewrite cannot erase the evidence the
++/// selector depends on.
++#[derive(Debug, Default)]
++pub struct Implicated<'input, 'arena> {
++    elements: HashSet<HashableElement<'input, 'arena>>,
++}
++
++impl<'input, 'arena> Implicated<'input, 'arena> {
++    /// Collects all elements implicated by selectors in `stylesheets`.
++    ///
++    /// # Errors
++    /// If a stylesheet cannot be visited.
++    pub fn collect(
++        root: &Element<'input, 'arena>,
++        stylesheets: &[RefCell<CssRuleList<'input>>],
++    ) -> Result<Self, JobsError<'input>> {
++        let mut collector = Collector {
++            root: root.clone(),
++            implicated: HashSet::new(),
++        };
++        for stylesheet in stylesheets {
++            stylesheet.borrow_mut().0.visit(&mut collector)?;
++        }
++        Ok(Self {
++            elements: collector.implicated,
++        })
++    }
++
++    /// Returns whether `element` is implicated by a structure-sensitive
++    /// selector.
++    pub fn contains(&self, element: &Element<'input, 'arena>) -> bool {
++        self.elements
++            .contains(&HashableElement::new(element.clone()))
++    }
++
++    /// Collects elements that are targets of plain (non-structure-sensitive)
++    /// selectors referencing `local_name`. These elements must not be renamed
++    /// away from `local_name`, even though the selector itself does not depend
++    /// on document structure.
++    ///
++    /// # Errors
++    /// If a stylesheet cannot be visited.
++    pub fn collect_plain_targets<'a>(
++        root: &Element<'input, 'arena>,
++        stylesheets: &[RefCell<CssRuleList<'input>>],
++        local_name: &'a str,
++    ) -> Result<HashSet<HashableElement<'input, 'arena>>, JobsError<'input>> {
++        let mut collector = PlainTargetsCollector {
++            root: root.clone(),
++            local_name,
++            targets: HashSet::new(),
++        };
++        for stylesheet in stylesheets {
++            stylesheet.borrow_mut().0.visit(&mut collector)?;
++        }
++        Ok(collector.targets)
++    }
++}
++
++struct Collector<'input, 'arena> {
++    root: Element<'input, 'arena>,
++    implicated: HashSet<HashableElement<'input, 'arena>>,
++}
++
++impl<'input, 'arena> Collector<'input, 'arena> {
++    fn insert(&mut self, element: &Element<'input, 'arena>) {
++        self.implicated
++            .insert(HashableElement::new(element.clone()));
++    }
++
++    fn process_selector(&mut self, selector: &Selector<'input>) {
++        // Split the selector into compounds (left to right) and the combinators
++        // connecting them. `iter_raw_match_order` yields the components in
++        // right-to-left order, so reversing the split gives parse order.
++        let mut compounds: Vec<Vec<Component<'input>>> = Vec::new();
++        let mut combinators: Vec<Combinator> = Vec::new();
++        let mut current: Vec<Component<'input>> = Vec::new();
++        for component in selector.iter_raw_match_order().cloned() {
++            match component {
++                Component::Combinator(combinator) => {
++                    combinators.push(combinator);
++                    compounds.push(std::mem::take(&mut current));
++                }
++                component => current.push(component),
++            }
++        }
++        compounds.push(current);
++        compounds.reverse();
++        combinators.reverse();
++
++        if compounds.is_empty() || !is_structure_sensitive(selector) {
++            return;
++        }
++
++        // Find the selector's targets in the pre-rewrite document by matching
++        // manually. This is needed because the `selectors` crate used by
++        // `root.select` does not support `:has` and some structural
++        // pseudo-classes reliably for our DOM wrapper.
++        let targets: Vec<Element<'input, 'arena>> = self
++            .root
++            .breadth_first()
++            .filter(|element| matches_full_selector(element, &compounds, &combinators, &self.root))
++            .collect();
++
++        for target in targets {
++            self.insert(&target);
++            self.process_compound_has(&target, &compounds[compounds.len() - 1]);
++
++            // Walk from the target through each combinator to the left,
++            // collecting the anchors that actually satisfy the relationship.
++            let mut current_element = target;
++            for i in (0..combinators.len()).rev() {
++                let combinator = combinators[i];
++                let candidates = match combinator {
++                    Combinator::Child => current_element.parent_element().into_iter().collect(),
++                    Combinator::Descendant => ancestors(current_element.clone()).collect(),
++                    Combinator::NextSibling => current_element
++                        .previous_element_sibling()
++                        .into_iter()
++                        .collect(),
++                    Combinator::LaterSibling => {
++                        previous_siblings(current_element.clone()).collect()
++                    }
++                    _ => Vec::new(),
++                };
++                let mut found = false;
++                for candidate in candidates {
++                    if matches_compound(&candidate, &compounds[i], &self.root) {
++                        self.insert(&candidate);
++                        self.process_compound_has(&candidate, &compounds[i]);
++                        current_element = candidate;
++                        found = true;
++                        break;
++                    }
++                }
++                if !found {
++                    break;
++                }
++            }
++        }
++    }
++
++    /// Finds the subjects of any `:has()` in a compound that are anchors of the
++    /// selector relationship and adds them to the implicated set.
++    fn process_compound_has(
++        &mut self,
++        anchor: &Element<'input, 'arena>,
++        compound: &[Component<'input>],
++    ) {
++        for component in compound {
++            match component {
++                Component::Has(relative_selectors) => {
++                    for selector in relative_selectors.iter() {
++                        for subject in has_subjects(anchor, selector, &self.root) {
++                            self.insert(&subject);
++                        }
++                    }
++                }
++                Component::Is(selectors) | Component::Where(selectors) => {
++                    for selector in selectors.iter() {
++                        self.process_selector(selector);
++                    }
++                }
++                Component::Negation(selectors) => {
++                    for selector in selectors.iter() {
++                        self.process_selector(selector);
++                    }
++                }
++                _ => {}
++            }
++        }
++    }
++}
++
++impl<'input, 'arena> Visitor<'input> for Collector<'input, 'arena> {
++    type Error = JobsError<'input>;
++
++    fn visit_types(&self) -> lightningcss::visitor::VisitTypes {
++        visit_types!(SELECTORS)
++    }
++
++    fn visit_selector(&mut self, selector: &mut Selector<'input>) -> Result<(), Self::Error> {
++        self.process_selector(selector);
++        Ok(())
++    }
++}
++
++struct PlainTargetsCollector<'a, 'input, 'arena> {
++    root: Element<'input, 'arena>,
++    local_name: &'a str,
++    targets: HashSet<HashableElement<'input, 'arena>>,
++}
++
++impl<'a, 'input, 'arena> Visitor<'input> for PlainTargetsCollector<'a, 'input, 'arena> {
++    type Error = JobsError<'input>;
++
++    fn visit_types(&self) -> lightningcss::visitor::VisitTypes {
++        visit_types!(SELECTORS)
++    }
++
++    fn visit_selector(&mut self, selector: &mut Selector<'input>) -> Result<(), Self::Error> {
++        if is_structure_sensitive(selector) {
++            return Ok(());
++        }
++        let mut contains_name = false;
++        let mut compounds: Vec<Vec<Component<'input>>> = Vec::new();
++        let mut combinators: Vec<Combinator> = Vec::new();
++        let mut current: Vec<Component<'input>> = Vec::new();
++        for component in selector.iter_raw_match_order().cloned() {
++            match component {
++                Component::Combinator(combinator) => {
++                    combinators.push(combinator);
++                    compounds.push(std::mem::take(&mut current));
++                }
++                component => {
++                    if let Component::LocalName(name) = &component {
++                        if name.lower_name.0.as_ref() == self.local_name {
++                            contains_name = true;
++                        }
++                    }
++                    current.push(component);
++                }
++            }
++        }
++        compounds.push(current);
++        compounds.reverse();
++        combinators.reverse();
++        if !contains_name || compounds.is_empty() {
++            return Ok(());
++        }
++        for element in self.root.breadth_first() {
++            if matches_full_selector(&element, &compounds, &combinators, &self.root) {
++                self.targets.insert(HashableElement::new(element));
++            }
++        }
++        Ok(())
++    }
++}
++
++fn ancestors<'input, 'arena>(
++    element: Element<'input, 'arena>,
++) -> impl Iterator<Item = Element<'input, 'arena>> + use<'input, 'arena> {
++    std::iter::successors(element.parent_element(), |e| e.parent_element())
++}
++
++fn previous_siblings<'input, 'arena>(
++    element: Element<'input, 'arena>,
++) -> impl Iterator<Item = Element<'input, 'arena>> + use<'input, 'arena> {
++    std::iter::successors(element.previous_element_sibling(), |e| {
++        e.previous_element_sibling()
++    })
++}
++
++fn next_siblings<'input, 'arena>(
++    element: Element<'input, 'arena>,
++) -> impl Iterator<Item = Element<'input, 'arena>> + use<'input, 'arena> {
++    std::iter::successors(element.next_element_sibling(), |e| e.next_element_sibling())
++}
++
++/// Whether a selector depends on document structure.
++fn is_structure_sensitive(selector: &Selector<'_>) -> bool {
++    let mut iter = selector.iter();
++    loop {
++        for component in &mut iter {
++            if matches!(
++                component,
++                Component::Nth(_)
++                    | Component::NthOf(_)
++                    | Component::Empty
++                    | Component::Root
++                    | Component::Has(_)
++                    | Component::Is(_)
++                    | Component::Where(_)
++                    | Component::Negation(_)
++            ) {
++                return true;
++            }
++        }
++        if iter.next_sequence().is_some() {
++            return true;
++        }
++        break;
++    }
++    false
++}
++
++/// Whether `element` matches a full complex selector represented by `compounds`
++/// (left to right) and `combinators` (between compounds).
++fn matches_full_selector<'input, 'arena>(
++    target: &Element<'input, 'arena>,
++    compounds: &[Vec<Component<'input>>],
++    combinators: &[Combinator],
++    root: &Element<'input, 'arena>,
++) -> bool {
++    if !matches_compound(target, &compounds[compounds.len() - 1], root) {
++        return false;
++    }
++    let mut current = target.clone();
++    for i in (0..combinators.len()).rev() {
++        let combinator = combinators[i];
++        let candidates: Vec<Element<'input, 'arena>> = match combinator {
++            Combinator::Child => current.parent_element().into_iter().collect(),
++            Combinator::Descendant => ancestors(current.clone()).collect(),
++            Combinator::NextSibling => current.previous_element_sibling().into_iter().collect(),
++            Combinator::LaterSibling => previous_siblings(current.clone()).collect(),
++            _ => Vec::new(),
++        };
++        let mut found = false;
++        for candidate in candidates {
++            if matches_compound(&candidate, &compounds[i], root) {
++                current = candidate;
++                found = true;
++                break;
++            }
++        }
++        if !found {
++            return false;
++        }
++    }
++    true
++}
++
++/// Whether `element` matches a single compound (a sequence of simple selectors).
++#[allow(clippy::too_many_lines)]
++fn matches_compound<'input, 'arena>(
++    element: &Element<'input, 'arena>,
++    compound: &[Component<'input>],
++    root: &Element<'input, 'arena>,
++) -> bool {
++    for component in compound {
++        let matched = match component {
++            Component::LocalName(name) => {
++                element.local_name().as_str() == name.lower_name.0.as_ref()
++                    || element.local_name().as_str() == name.name.0.as_ref()
++            }
++            Component::ID(id) => element.attributes().into_iter().any(|attr| {
++                attr.local_name().as_str() == "id"
++                    && attr
++                        .value()
++                        .to_value_string(PrinterOptions::default())
++                        .unwrap_or_default()
++                        == id.0.as_ref()
++            }),
++            Component::Class(class) => element.attributes().into_iter().any(|attr| {
++                attr.local_name().as_str() == "class"
++                    && attr
++                        .value()
++                        .to_value_string(PrinterOptions::default())
++                        .unwrap_or_default()
++                        .split_ascii_whitespace()
++                        .any(|c| c == class.0.as_ref())
++            }),
++            Component::AttributeInNoNamespaceExists { local_name, .. } => element
++                .attributes()
++                .into_iter()
++                .any(|attr| attr.local_name().as_str() == local_name.0.as_ref()),
++            Component::AttributeInNoNamespace {
++                local_name,
++                operator,
++                value,
++                case_sensitivity,
++                ..
++            } => element.attributes().into_iter().any(|attr| {
++                attr.local_name().as_str() == local_name.0.as_ref()
++                    && operator.eval_str(
++                        &attr
++                            .value()
++                            .to_value_string(PrinterOptions::default())
++                            .unwrap_or_default(),
++                        value.0.as_ref(),
++                        case_sensitivity.to_unconditional(false),
++                    )
++            }),
++            Component::AttributeOther(_) => true,
++            Component::ExplicitUniversalType => true,
++            Component::Nth(data) => matches_nth(element, data),
++            Component::NthOf(_) => true,
++            Component::Empty => element.children_iter().next().is_none(),
++            Component::Root => element.is_root(),
++            Component::Scope => true,
++            Component::Is(selectors) | Component::Where(selectors) => selectors
++                .iter()
++                .any(|s| matches_selector_list(s, element, root)),
++            Component::Negation(selectors) => !selectors
++                .iter()
++                .any(|s| matches_selector_list(s, element, root)),
++            Component::Has(relative_selectors) => relative_selectors
++                .iter()
++                .any(|relative| !has_subjects(element, relative, root).is_empty()),
++            Component::NonTSPseudoClass(_) => is_link(element),
++            _ => true,
++        };
++        if !matched {
++            return false;
++        }
++    }
++    true
++}
++fn matches_selector_list<'input, 'arena>(
++    selector: &Selector<'input>,
++    element: &Element<'input, 'arena>,
++    root: &Element<'input, 'arena>,
++) -> bool {
++    let mut compounds: Vec<Vec<Component<'input>>> = Vec::new();
++    let mut combinators: Vec<Combinator> = Vec::new();
++    let mut current: Vec<Component<'input>> = Vec::new();
++    for component in selector.iter_raw_match_order().cloned() {
++        match component {
++            Component::Combinator(combinator) => {
++                combinators.push(combinator);
++                compounds.push(std::mem::take(&mut current));
++            }
++            component => current.push(component),
++        }
++    }
++    compounds.push(current);
++    compounds.reverse();
++    combinators.reverse();
++    if compounds.is_empty() {
++        return true;
++    }
++    matches_full_selector(element, &compounds, &combinators, root)
++}
++
++fn matches_nth<'input>(
++    element: &Element<'input, '_>,
++    data: &parcel_selectors::parser::NthSelectorData,
++) -> bool {
++    use parcel_selectors::parser::NthType;
++    let Some(parent) = element.parent_element() else {
++        return false;
++    };
++    let siblings: Vec<Element<'input, '_>> = parent.children_iter().collect();
++    let index = siblings
++        .iter()
++        .position(|s| s.id_eq(element))
++        .map(|i| i as i32 + 1)
++        .unwrap_or(0);
++    if index == 0 {
++        return false;
++    }
++    let len = siblings.len() as i32;
++    let matches_nth_formula = |n: i32| -> bool {
++        if data.a == 0 {
++            n == data.b
++        } else {
++            let x = n - data.b;
++            x % data.a == 0 && (x / data.a) >= 0
++        }
++    };
++    match data.ty {
++        NthType::Child => matches_nth_formula(index),
++        NthType::LastChild => matches_nth_formula(len - index + 1),
++        NthType::OnlyChild => len == 1,
++        NthType::OfType | NthType::LastOfType | NthType::OnlyOfType => {
++            let same_type = siblings
++                .iter()
++                .filter(|s| s.qual_name().local_name() == element.qual_name().local_name())
++                .collect::<Vec<_>>();
++            let type_index = same_type
++                .iter()
++                .position(|s| s.id_eq(element))
++                .map(|i| i as i32 + 1)
++                .unwrap_or(0);
++            match data.ty {
++                NthType::OfType => matches_nth_formula(type_index),
++                NthType::LastOfType => {
++                    let type_len = same_type.len() as i32;
++                    matches_nth_formula(type_len - type_index + 1)
++                }
++                NthType::OnlyOfType => same_type.len() == 1,
++                _ => unreachable!(),
++            }
++        }
++        _ => false,
++    }
++}
++
++fn is_link<'input, 'arena>(element: &Element<'input, 'arena>) -> bool {
++    if element.node_type() != oxvg_ast::node::Type::Element {
++        return false;
++    }
++    matches!(element.qual_name(), ElementId::A | ElementId::Unknown(_))
++        && element.attributes().get_named_item(&AttrId::Href).is_some()
++}
++
++/// Returns the elements that are the subject of a `:has()` relative selector
++/// for the given anchor element.
++fn has_subjects<'input, 'arena>(
++    anchor: &Element<'input, 'arena>,
++    relative: &Selector<'input>,
++    root: &Element<'input, 'arena>,
++) -> Vec<Element<'input, 'arena>> {
++    // The relative selector is stored with the subject as the rightmost
++    // compound, followed by the relative combinator, followed by the
++    // `RelativeSelectorAnchor`. `iter().cloned().collect()` collects the
++    // rightmost compound (the subject) because iteration stops at the first
++    // combinator.
++    let mut iter = relative.iter();
++    let subject_components: Vec<Component<'input>> = iter.by_ref().cloned().collect();
++    let combinator = iter.next_sequence();
++
++    // Decompose the subject (which may itself contain combinators) into
++    // compounds and combinators.
++    let mut compounds: Vec<Vec<Component<'input>>> = Vec::new();
++    let mut combinators: Vec<Combinator> = Vec::new();
++    let mut current: Vec<Component<'input>> = Vec::new();
++    for component in subject_components {
++        match component {
++            Component::Combinator(combinator) => {
++                combinators.push(combinator);
++                compounds.push(std::mem::take(&mut current));
++            }
++            component => current.push(component),
++        }
++    }
++    compounds.push(current);
++    compounds.reverse();
++    combinators.reverse();
++
++    // A relative selector with no subject cannot have a subject element.
++    if compounds.is_empty() || compounds[compounds.len() - 1].is_empty() {
++        return Vec::new();
++    }
++
++    let matches_subject = |element: &Element<'input, 'arena>| -> bool {
++        if combinators.is_empty() {
++            matches_compound(element, &compounds[compounds.len() - 1], root)
++        } else {
++            matches_full_selector(element, &compounds, &combinators, root)
++        }
++    };
++
++    match combinator {
++        Some(Combinator::Child) => anchor.children_iter().filter(matches_subject).collect(),
++        Some(Combinator::NextSibling) => anchor
++            .next_element_sibling()
++            .filter(matches_subject)
++            .into_iter()
++            .collect(),
++        Some(Combinator::LaterSibling) => next_siblings(anchor.clone())
++            .filter(matches_subject)
++            .collect(),
++        // `:has(descendant)` and the implicit descendant combinator.
++        _ => anchor
++            .breadth_first()
++            .filter(|child| !child.id_eq(anchor) && matches_subject(child))
++            .collect(),
++    }
++}
+diff --git a/crates/oxvg_optimiser/src/utils/mod.rs b/crates/oxvg_optimiser/src/utils/mod.rs
+index 063a1aa..6264a9a 100644
+--- a/crates/oxvg_optimiser/src/utils/mod.rs
++++ b/crates/oxvg_optimiser/src/utils/mod.rs
+@@ -1,3 +1,4 @@
++pub(crate) mod implicated;
+ pub(crate) mod minify_style;
+ pub(crate) mod regex_memo;
+ pub(crate) mod style_info;
